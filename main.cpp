@@ -7,6 +7,9 @@
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_main.h>
 
+#include <freetype/freetype.h>
+#include <harfbuzz/hb-ft.h>
+#include <harfbuzz/hb.h>
 #include <vulkan/vulkan.h>
 
 struct AppState {
@@ -18,13 +21,53 @@ struct AppState {
   int textureWidth, textureHeight;
 };
 
+static void teardown_app_state(AppState *app) {
+  if (app->device && app->sampler)
+    SDL_ReleaseGPUSampler(app->device, app->sampler);
+  if (app->device && app->textTexture)
+    SDL_ReleaseGPUTexture(app->device, app->textTexture);
+  if (app->device && app->pipeline)
+    SDL_ReleaseGPUGraphicsPipeline(app->device, app->pipeline);
+  if (app->device && app->window)
+    SDL_ReleaseWindowFromGPUDevice(app->device, app->window);
+  if (app->device)
+    SDL_DestroyGPUDevice(app->device);
+  if (app->window)
+    SDL_DestroyWindow(app->window);
+}
+
+struct TextBitmap {
+  uint8_t *pixels;
+  int width;
+  int height;
+};
+
+static int render_text_bitmap(const char *font_path, const char *text, int size,
+                              TextBitmap *out_bitmap) {
+  FT_Library ft;
+  if (FT_Init_FreeType(&ft))
+    return 1;
+
+  FT_Face face;
+  if (FT_New_Face(ft, font_path, 0, &face)) {
+    FT_Done_FreeType(ft);
+    return 2;
+  }
+
+  FT_Set_Pixel_Sizes(face, 0, size);
+
+  FT_Done_Face(face);
+  FT_Done_FreeType(ft);
+  return 0;
+}
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   if (!SDL_Init(SDL_INIT_VIDEO)) {
     SDL_Log("SDL_Init failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
 
-  AppState *app = (AppState *)SDL_calloc(1, sizeof(AppState));
+  AppState *app = new AppState{};
   *appstate = app;
 
   app->window = SDL_CreateWindow("Hello GPU", 800, 600, SDL_WINDOW_RESIZABLE);
@@ -55,6 +98,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     return SDL_APP_FAILURE;
   }
   SDL_ClaimWindowForGPUDevice(app->device, app->window);
+
+  TextBitmap bitmap;
+  if (render_text_bitmap("assets/DejaVuSans.ttf", "Hello world", 48, &bitmap)) {
+    SDL_Log("Failed to render text bitmap");
+    return SDL_APP_FAILURE;
+  }
 
   size_t shader_size;
   void *shader_code = SDL_LoadFile("fullscreen.spv", &shader_size);
@@ -150,29 +199,10 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
   return SDL_APP_CONTINUE;
 }
 
-static void teardown_device_and_related(AppState *app) {
-  if (!app->device)
-    return;
-  if (app->sampler)
-    SDL_ReleaseGPUSampler(app->device, app->sampler);
-  if (app->textTexture)
-    SDL_ReleaseGPUTexture(app->device, app->textTexture);
-  if (app->pipeline)
-    SDL_ReleaseGPUGraphicsPipeline(app->device, app->pipeline);
-  if (app->window)
-    SDL_ReleaseWindowFromGPUDevice(app->device, app->window);
-  SDL_DestroyGPUDevice(app->device);
-}
-
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
   AppState *app = (AppState *)appstate;
   if (!app)
     return;
-
-  teardown_device_and_related(app);
-
-  if (app->window)
-    SDL_DestroyWindow(app->window);
-
-  SDL_free(app);
+  teardown_app_state(app);
+  delete app;
 }
