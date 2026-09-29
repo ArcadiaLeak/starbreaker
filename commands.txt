@@ -1,0 +1,1 @@
+slangc shaders/fullscreen.slang -profile glsl_450 -target spirv -entry fs_main -entry vs_main -fvk-use-entrypoint-name -o fullscreen.spv
