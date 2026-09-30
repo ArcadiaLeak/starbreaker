@@ -186,7 +186,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   vs_info.num_samplers = 0;
   vs_info.num_storage_textures = 0;
   vs_info.num_storage_buffers = 0;
-  vs_info.num_uniform_buffers = 0;
+  vs_info.num_uniform_buffers = 1;
   SDL_GPUShader *vs_program = SDL_CreateGPUShader(app->device, &vs_info);
 
   SDL_GPUShaderCreateInfo fs_info{};
@@ -304,11 +304,19 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
 
   int textW = 0, textH = 0;
   TTF_GetTextSize(app->text, &textW, &textH);
+
   // Position the text block so its center is at the window center.
   const float textX =
       (static_cast<float>(sw) - static_cast<float>(textW)) * 0.5f;
   const float textY =
       (static_cast<float>(sh) - static_cast<float>(textH)) * 0.5f;
+  float transform[4] = {
+      2.0f / (float)sw,                  // scale.x
+      2.0f / (float)sh,                  // scale.y
+      (textX / (float)sw) * 2.0f - 1.0f, // offset.x
+      (textY / (float)sh) * 2.0f - 1.0f, // offset.y
+  };
+  SDL_PushGPUVertexUniformData(cmd, 0, transform, sizeof(transform));
 
   // ---- Count total vertices / indices across all atlas sequences ----
   Uint32 totalVertices = 0, totalIndices = 0;
@@ -326,17 +334,9 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
   Uint32 baseVertex = 0;
   for (TTF_GPUAtlasDrawSequence *seq = drawData; seq; seq = seq->next) {
     for (int i = 0; i < seq->num_vertices; ++i) {
-      TextVertex vtx{};
-
-      float px = seq->xy[i].x + textX; // text-space -> screen pixels
-      float py = seq->xy[i].y + textY;
-      vtx.x = (px / (float)sw) * 2.0f - 1.0f; // -> NDC
-      vtx.y = (py / (float)sh) * 2.0f - 1.0f; // Vulkan: +Y down
-
-      vtx.u = seq->uv[i].x;
-      vtx.v = seq->uv[i].y;
-
-      vertices.push_back(vtx);
+      TextVertex text_vtx{seq->xy[i].x, seq->xy[i].y, seq->uv[i].x,
+                          seq->uv[i].y};
+      vertices.push_back(text_vtx);
     }
     for (int i = 0; i < seq->num_indices; ++i)
       indices.push_back(seq->indices[i] + (int)baseVertex);
