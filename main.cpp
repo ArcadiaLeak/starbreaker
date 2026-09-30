@@ -47,17 +47,97 @@ static int render_text_bitmap(const char *font_path, const char *text, int size,
   FT_Library ft;
   if (FT_Init_FreeType(&ft))
     return 1;
-
   FT_Face face;
   if (FT_New_Face(ft, font_path, 0, &face)) {
     FT_Done_FreeType(ft);
     return 2;
   }
-
   FT_Set_Pixel_Sizes(face, 0, size);
+
+  hb_font_t *hb_font = hb_ft_font_create(face, NULL);
+  hb_buffer_t *buf = hb_buffer_create();
+
+  hb_buffer_add_utf8(buf, text, -1, 0, -1);
+  hb_buffer_guess_segment_properties(buf);
+  hb_shape(hb_font, buf, NULL, 0);
+
+  unsigned int glyph_count;
+  hb_glyph_info_t *glyph_info = hb_buffer_get_glyph_infos(buf, &glyph_count);
+  hb_glyph_position_t *glyph_pos =
+      hb_buffer_get_glyph_positions(buf, &glyph_count);
+
+  int width = 0, height = 0;
+  int pen_x = 0, pen_y = 0;
+  int min_y = INT32_MAX, max_y = INT32_MIN;
+
+  for (unsigned int i = 0; i < glyph_count; i++) {
+    FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_DEFAULT);
+    FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+
+    int x = pen_x + glyph_pos[i].x_offset / 64;
+    int y = pen_y - glyph_pos[i].y_offset / 64;
+
+    int top = y - face->glyph->bitmap_top;
+    int bottom = top + face->glyph->bitmap.rows;
+
+    if (top < min_y)
+      min_y = top;
+    if (bottom > max_y)
+      max_y = bottom;
+
+    width = x + face->glyph->bitmap_left + face->glyph->bitmap.width;
+    pen_x += glyph_pos[i].x_advance / 64;
+    pen_y += glyph_pos[i].y_advance / 64;
+  }
+
+  height = max_y - min_y;
+
+  size_t stride = width * 4;
+  uint8_t *pixels = (uint8_t *)calloc(height * stride, 1);
+
+  for (int y = 0; y < height; y++)
+    for (int x = 0; x < width; x++) {
+      uint8_t *p = pixels + y * stride + x * 4;
+      p[0] = p[1] = p[2] = 0; // RGB black
+      p[3] = 255;             // Alpha white (background)
+    }
+
+  pen_x = 0;
+  pen_y = 0;
+  for (unsigned int i = 0; i < glyph_count; i++) {
+    FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_DEFAULT);
+    FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+
+    int x = pen_x + glyph_pos[i].x_offset / 64 + face->glyph->bitmap_left;
+    int y =
+        pen_y - glyph_pos[i].y_offset / 64 - face->glyph->bitmap_top - min_y;
+
+    for (int row = 0; row < face->glyph->bitmap.rows; row++)
+      for (int col = 0; col < face->glyph->bitmap.width; col++) {
+        int px = x + col;
+        int py = y + row;
+        if (px >= 0 && px < width && py >= 0 && py < height) {
+          uint8_t gray =
+              face->glyph->bitmap.buffer[row * face->glyph->bitmap.width + col];
+          uint8_t *p = pixels + py * stride + px * 4;
+          // Black text with alpha = gray (255 = opaque)
+          p[3] = 255 - gray; // alpha for blending
+        }
+      }
+
+    pen_x += glyph_pos[i].x_advance / 64;
+    pen_y += glyph_pos[i].y_advance / 64;
+  }
+
+  hb_buffer_destroy(buf);
+  hb_font_destroy(hb_font);
 
   FT_Done_Face(face);
   FT_Done_FreeType(ft);
+
+  out_bitmap->pixels = pixels;
+  out_bitmap->width = width;
+  out_bitmap->height = height;
   return 0;
 }
 
