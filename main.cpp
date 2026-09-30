@@ -6,19 +6,18 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3_ttf/SDL_ttf.h>
 
-#include <freetype/freetype.h>
-#include <harfbuzz/hb-ft.h>
-#include <harfbuzz/hb.h>
 #include <vulkan/vulkan.h>
 
 struct AppState {
-  SDL_Window *window;
-  SDL_GPUDevice *device;
-  SDL_GPUGraphicsPipeline *pipeline;
-  SDL_GPUTexture *textTexture;
-  SDL_GPUSampler *sampler;
-  int textureWidth, textureHeight;
+  SDL_Window *window = nullptr;
+  SDL_GPUDevice *device = nullptr;
+  SDL_GPUGraphicsPipeline *pipeline = nullptr;
+  SDL_GPUTexture *textTexture = nullptr;
+  SDL_GPUSampler *sampler = nullptr;
+  int textureWidth = 0;
+  int textureHeight = 0;
 };
 
 static void teardown_app_state(AppState *app) {
@@ -36,109 +35,58 @@ static void teardown_app_state(AppState *app) {
     SDL_DestroyWindow(app->window);
 }
 
-struct TextBitmap {
-  uint8_t *pixels;
-  int width;
-  int height;
-};
+// Upload an RGBA32 SDL_Surface to a freshly created SDL_GPUTexture.
+static SDL_GPUTexture *create_texture_from_surface(SDL_GPUDevice *device,
+                                                   SDL_Surface *rgba, int *outW,
+                                                   int *outH) {
+  *outW = rgba->w;
+  *outH = rgba->h;
 
-static int render_text_bitmap(const char *font_path, const char *text, int size,
-                              TextBitmap *out_bitmap) {
-  FT_Library ft;
-  if (FT_Init_FreeType(&ft))
-    return 1;
-  FT_Face face;
-  if (FT_New_Face(ft, font_path, 0, &face)) {
-    FT_Done_FreeType(ft);
-    return 2;
-  }
-  FT_Set_Pixel_Sizes(face, 0, size);
+  SDL_GPUTextureCreateInfo texInfo{};
+  texInfo.type = SDL_GPU_TEXTURETYPE_2D;
+  texInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+  texInfo.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+  texInfo.width = (Uint32)rgba->w;
+  texInfo.height = (Uint32)rgba->h;
+  texInfo.layer_count_or_depth = 1;
+  texInfo.num_levels = 1;
+  texInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
 
-  hb_font_t *hb_font = hb_ft_font_create(face, NULL);
-  hb_buffer_t *buf = hb_buffer_create();
+  SDL_GPUTexture *tex = SDL_CreateGPUTexture(device, &texInfo);
+  if (!tex)
+    return nullptr;
 
-  hb_buffer_add_utf8(buf, text, -1, 0, -1);
-  hb_buffer_guess_segment_properties(buf);
-  hb_shape(hb_font, buf, NULL, 0);
+  const Uint32 bytes = (Uint32)(rgba->pitch * rgba->h);
 
-  unsigned int glyph_count;
-  hb_glyph_info_t *glyph_info = hb_buffer_get_glyph_infos(buf, &glyph_count);
-  hb_glyph_position_t *glyph_pos =
-      hb_buffer_get_glyph_positions(buf, &glyph_count);
+  SDL_GPUTransferBufferCreateInfo tbInfo{};
+  tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+  tbInfo.size = bytes;
 
-  int width = 0, height = 0;
-  int pen_x = 0, pen_y = 0;
-  int min_y = INT32_MAX, max_y = INT32_MIN;
+  SDL_GPUTransferBuffer *tb = SDL_CreateGPUTransferBuffer(device, &tbInfo);
+  void *mapped = SDL_MapGPUTransferBuffer(device, tb, false);
+  SDL_memcpy(mapped, rgba->pixels, bytes);
+  SDL_UnmapGPUTransferBuffer(device, tb);
 
-  for (unsigned int i = 0; i < glyph_count; i++) {
-    FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_DEFAULT);
-    FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
+  SDL_GPUCopyPass *pass = SDL_BeginGPUCopyPass(cmd);
 
-    int x = pen_x + glyph_pos[i].x_offset / 64;
-    int y = pen_y - glyph_pos[i].y_offset / 64;
+  SDL_GPUTextureTransferInfo src{};
+  src.transfer_buffer = tb;
+  src.offset = 0;
 
-    int top = y - face->glyph->bitmap_top;
-    int bottom = top + face->glyph->bitmap.rows;
+  SDL_GPUTextureRegion dst{};
+  dst.texture = tex;
+  dst.w = (Uint32)rgba->w;
+  dst.h = (Uint32)rgba->h;
+  dst.d = 1;
 
-    if (top < min_y)
-      min_y = top;
-    if (bottom > max_y)
-      max_y = bottom;
+  SDL_UploadToGPUTexture(pass, &src, &dst, false);
 
-    width = x + face->glyph->bitmap_left + face->glyph->bitmap.width;
-    pen_x += glyph_pos[i].x_advance / 64;
-    pen_y += glyph_pos[i].y_advance / 64;
-  }
+  SDL_EndGPUCopyPass(pass);
+  SDL_SubmitGPUCommandBuffer(cmd);
+  SDL_ReleaseGPUTransferBuffer(device, tb);
 
-  height = max_y - min_y;
-
-  size_t stride = width * 4;
-  uint8_t *pixels = (uint8_t *)calloc(height * stride, 1);
-
-  for (int y = 0; y < height; y++)
-    for (int x = 0; x < width; x++) {
-      uint8_t *p = pixels + y * stride + x * 4;
-      p[0] = p[1] = p[2] = 0; // RGB black
-      p[3] = 255;             // Alpha white (background)
-    }
-
-  pen_x = 0;
-  pen_y = 0;
-  for (unsigned int i = 0; i < glyph_count; i++) {
-    FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_DEFAULT);
-    FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
-
-    int x = pen_x + glyph_pos[i].x_offset / 64 + face->glyph->bitmap_left;
-    int y =
-        pen_y - glyph_pos[i].y_offset / 64 - face->glyph->bitmap_top - min_y;
-
-    for (int row = 0; row < face->glyph->bitmap.rows; row++)
-      for (int col = 0; col < face->glyph->bitmap.width; col++) {
-        int px = x + col;
-        int py = y + row;
-        if (px >= 0 && px < width && py >= 0 && py < height) {
-          uint8_t gray =
-              face->glyph->bitmap.buffer[row * face->glyph->bitmap.width + col];
-          uint8_t *p = pixels + py * stride + px * 4;
-          // Black text with alpha = gray (255 = opaque)
-          p[3] = 255 - gray; // alpha for blending
-        }
-      }
-
-    pen_x += glyph_pos[i].x_advance / 64;
-    pen_y += glyph_pos[i].y_advance / 64;
-  }
-
-  hb_buffer_destroy(buf);
-  hb_font_destroy(hb_font);
-
-  FT_Done_Face(face);
-  FT_Done_FreeType(ft);
-
-  out_bitmap->pixels = pixels;
-  out_bitmap->width = width;
-  out_bitmap->height = height;
-  return 0;
+  return tex;
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
@@ -146,16 +94,23 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_Log("SDL_Init failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
+  if (!TTF_Init()) {
+    SDL_Log("TTF_Init failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
 
   AppState *app = new AppState{};
   *appstate = app;
 
-  app->window = SDL_CreateWindow("Hello GPU", 800, 600, SDL_WINDOW_RESIZABLE);
+  app->window =
+      SDL_CreateWindow("Hello GPU", 800, 600,
+                       SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
   if (!app->window) {
     SDL_Log("CreateWindow: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
 
+  // ---- GPU device ----
   SDL_GPUVulkanOptions vulkan_options{};
   vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
 
@@ -172,79 +127,140 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 
   app->device = SDL_CreateGPUDeviceWithProperties(props);
   SDL_DestroyProperties(props);
-
   if (!app->device) {
     SDL_Log("Failed to create GPU device: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
   SDL_ClaimWindowForGPUDevice(app->device, app->window);
 
-  TextBitmap bitmap;
-  if (render_text_bitmap("assets/DejaVuSans.ttf", "Hello world", 48, &bitmap)) {
-    SDL_Log("Failed to render text bitmap");
+  // ---- Render text with SDL3_ttf ----
+  TTF_Font *font = TTF_OpenFont("assets/DejaVuSans.ttf", 14.0f);
+  if (!font) {
+    SDL_Log("TTF_OpenFont failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
 
-  size_t shader_size;
+  SDL_Color white = {255, 255, 255, 255};
+  SDL_Surface *textSurface = TTF_RenderText_Blended(
+      font, "Hello world", 0, white); // 0 = NUL-terminated
+  TTF_CloseFont(font);
+  if (!textSurface) {
+    SDL_Log("TTF_RenderText_Blended failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
+
+  SDL_Surface *rgba = SDL_ConvertSurface(textSurface, SDL_PIXELFORMAT_RGBA32);
+  SDL_DestroySurface(textSurface);
+  if (!rgba) {
+    SDL_Log("SDL_ConvertSurface failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
+
+  app->textTexture = create_texture_from_surface(
+      app->device, rgba, &app->textureWidth, &app->textureHeight);
+  SDL_DestroySurface(rgba);
+  if (!app->textTexture) {
+    SDL_Log("Failed to create text texture: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
+
+  // ---- Sampler ----
+  SDL_GPUSamplerCreateInfo samplerInfo{};
+  samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
+  samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
+  samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+  samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+  samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+  samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+
+  app->sampler = SDL_CreateGPUSampler(app->device, &samplerInfo);
+  if (!app->sampler) {
+    SDL_Log("SDL_CreateGPUSampler failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
+
+  // ---- Shaders ----
+  size_t shader_size = 0;
   void *shader_code = SDL_LoadFile("fullscreen.spv", &shader_size);
   if (!shader_code) {
-    SDL_Log("Failed to load file: %s", SDL_GetError());
+    SDL_Log("Failed to load shader: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
 
-  SDL_GPUShaderCreateInfo fs_info{
-      .code_size = shader_size,
-      .code = (const Uint8 *)shader_code,
-      .entrypoint = "fs_main",
-      .format = SDL_GPU_SHADERFORMAT_SPIRV,
-      .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-      .num_samplers = 0,
-      .num_storage_textures = 0,
-      .num_storage_buffers = 0,
-      .num_uniform_buffers = 0,
-  };
+  SDL_GPUShaderCreateInfo fs_info{};
+  fs_info.code_size = shader_size;
+  fs_info.code = (const Uint8 *)shader_code;
+  fs_info.entrypoint = "fs_main";
+  fs_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  fs_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+  fs_info.num_samplers = 1; // <-- we now sample the text texture
+  fs_info.num_storage_textures = 0;
+  fs_info.num_storage_buffers = 0;
+  fs_info.num_uniform_buffers = 0;
   SDL_GPUShader *fs_program = SDL_CreateGPUShader(app->device, &fs_info);
 
-  SDL_GPUShaderCreateInfo vs_info{
-      .code_size = shader_size,
-      .code = (const Uint8 *)shader_code,
-      .entrypoint = "vs_main",
-      .format = SDL_GPU_SHADERFORMAT_SPIRV,
-      .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-      .num_samplers = 0,
-      .num_storage_textures = 0,
-      .num_storage_buffers = 0,
-      .num_uniform_buffers = 0,
-  };
+  SDL_GPUShaderCreateInfo vs_info{};
+  vs_info.code_size = shader_size;
+  vs_info.code = (const Uint8 *)shader_code;
+  vs_info.entrypoint = "vs_main";
+  vs_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+  vs_info.num_samplers = 0;
+  vs_info.num_storage_textures = 0;
+  vs_info.num_storage_buffers = 0;
+  vs_info.num_uniform_buffers = 0;
   SDL_GPUShader *vs_program = SDL_CreateGPUShader(app->device, &vs_info);
 
-  SDL_GPUColorTargetDescription colorTarget = {
-      .format = SDL_GetGPUSwapchainTextureFormat(app->device, app->window),
-  };
-  SDL_GPUGraphicsPipelineTargetInfo targetInfo = {
-      .color_target_descriptions = &colorTarget,
-      .num_color_targets = 1,
-  };
-  SDL_GPUGraphicsPipelineCreateInfo pipeInfo = {
-      .vertex_shader = vs_program,
-      .fragment_shader = fs_program,
-      .vertex_input_state = SDL_GPUVertexInputState{},
-      .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-      .rasterizer_state = {.fill_mode = SDL_GPU_FILLMODE_FILL,
-                           .cull_mode = SDL_GPU_CULLMODE_NONE},
-      .multisample_state = {.sample_count = SDL_GPU_SAMPLECOUNT_1},
-      .target_info = targetInfo,
-  };
+  SDL_free(shader_code);
+
+  if (!fs_program || !vs_program) {
+    SDL_Log("SDL_CreateGPUShader failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
+
+  // ---- Pipeline (with alpha blending for the text) ----
+  SDL_GPUColorTargetDescription colorTarget{};
+  colorTarget.format =
+      SDL_GetGPUSwapchainTextureFormat(app->device, app->window);
+  colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+  colorTarget.blend_state.dst_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  colorTarget.blend_state.dst_alpha_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.enable_blend = true;
+
+  SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
+  targetInfo.color_target_descriptions = &colorTarget;
+  targetInfo.num_color_targets = 1;
+
+  SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+  pipeInfo.vertex_shader = vs_program;
+  pipeInfo.fragment_shader = fs_program;
+  pipeInfo.vertex_input_state = SDL_GPUVertexInputState{};
+  pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+  pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+  pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+  pipeInfo.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+  pipeInfo.target_info = targetInfo;
+
   app->pipeline = SDL_CreateGPUGraphicsPipeline(app->device, &pipeInfo);
 
   SDL_ReleaseGPUShader(app->device, fs_program);
   SDL_ReleaseGPUShader(app->device, vs_program);
-  SDL_free(shader_code);
+
+  if (!app->pipeline) {
+    SDL_Log("SDL_CreateGPUGraphicsPipeline failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
 
   return SDL_APP_CONTINUE;
 }
 
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
+  (void)appstate;
   if (event->type == SDL_EVENT_QUIT || event->type == SDL_EVENT_KEY_DOWN) {
     return SDL_APP_SUCCESS;
   }
@@ -254,25 +270,49 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
 SDL_AppResult SDL_AppIterate(void *appstate) {
   AppState *app = (AppState *)appstate;
   SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(app->device);
-  SDL_GPUTexture *swapchain;
-  Uint32 sw, sh;
+  if (!cmd)
+    return SDL_APP_FAILURE;
+
+  SDL_GPUTexture *swapchain = nullptr;
+  Uint32 sw = 0, sh = 0;
   SDL_WaitAndAcquireGPUSwapchainTexture(cmd, app->window, &swapchain, &sw, &sh);
+
   if (!swapchain) {
     SDL_SubmitGPUCommandBuffer(cmd);
     return SDL_APP_CONTINUE;
   }
 
-  SDL_GPUColorTargetInfo colorTarget{
-      .texture = swapchain,
-      .clear_color = {1.0f, 1.0f, 1.0f, 1.0f},
-      .load_op = SDL_GPU_LOADOP_CLEAR,
-      .store_op = SDL_GPU_STOREOP_STORE,
-  };
+  SDL_GPUColorTargetInfo colorTarget{};
+  colorTarget.texture = swapchain;
+  colorTarget.clear_color = {0.08f, 0.08f, 0.10f, 1.0f};
+  colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+  colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+
   SDL_GPURenderPass *pass =
       SDL_BeginGPURenderPass(cmd, &colorTarget, 1, nullptr);
+
+  // Center the text quad by setting the viewport. The fullscreen
+  // triangle in the vertex shader gets mapped into this rect.
+  SDL_GPUViewport viewport{};
+  int vx = ((int)sw - app->textureWidth)  / 2;   // integer division
+  int vy = ((int)sh - app->textureHeight) / 2;
+  viewport.x = (float)vx;
+  viewport.y = (float)vy;
+  viewport.w = (float)app->textureWidth;
+  viewport.h = (float)app->textureHeight;
+  viewport.min_depth = 0.0f;
+  viewport.max_depth = 1.0f;
+  SDL_SetGPUViewport(pass, &viewport);
+
   SDL_BindGPUGraphicsPipeline(pass, app->pipeline);
 
+  SDL_GPUTextureSamplerBinding binding{};
+  binding.texture = app->textTexture;
+  binding.sampler = app->sampler;
+  SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+
   SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+
   SDL_EndGPURenderPass(pass);
   SDL_SubmitGPUCommandBuffer(cmd);
 
@@ -280,9 +320,11 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
 }
 
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
+  (void)result;
   AppState *app = (AppState *)appstate;
-  if (!app)
-    return;
-  teardown_app_state(app);
-  delete app;
+  if (app) {
+    teardown_app_state(app);
+    delete app;
+  }
+  TTF_Quit();
 }
