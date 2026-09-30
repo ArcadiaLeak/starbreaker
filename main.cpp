@@ -12,12 +12,14 @@
 
 #include <vulkan/vulkan.h>
 
-// ------------------------------------------------------------------
-// Vertex layout used by the text pipeline. Matches the shader input.
-// ------------------------------------------------------------------
 struct TextVertex {
-  float x, y; // position
-  float u, v; // texture coordinate
+  float x, y, u, v;
+};
+
+struct DrawBatch {
+  SDL_GPUTexture *atlasTexture;
+  Uint32 indexOffset;
+  Uint32 indexCount;
 };
 
 struct AppState {
@@ -30,11 +32,12 @@ struct AppState {
   TTF_Font *font = nullptr;
   TTF_Text *text = nullptr;
 
-  // Geometry buffers reused across frames
   SDL_GPUBuffer *vertexBuffer = nullptr;
   SDL_GPUBuffer *indexBuffer = nullptr;
   Uint32 vertexBufferSize = 0;
   Uint32 indexBufferSize = 0;
+
+  std::vector<DrawBatch> batches;
 };
 
 static void teardown_app_state(AppState *app) {
@@ -61,9 +64,6 @@ static void teardown_app_state(AppState *app) {
     SDL_DestroyWindow(app->window);
 }
 
-// ------------------------------------------------------------------
-// Ensure a GPU buffer is at least `required` bytes. Reallocates if needed.
-// ------------------------------------------------------------------
 static bool ensure_gpu_buffer(SDL_GPUDevice *device, SDL_GPUBuffer **buf,
                               Uint32 *currentSize, Uint32 required,
                               SDL_GPUBufferUsageFlags usage) {
@@ -86,7 +86,7 @@ static bool ensure_gpu_buffer(SDL_GPUDevice *device, SDL_GPUBuffer **buf,
   return *buf != nullptr;
 }
 
-constexpr int ATLAS_SIZE = 1024;
+static bool build_text_geometry(AppState *app);
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -153,6 +153,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     return SDL_APP_FAILURE;
   }
   TTF_SetTextColor(app->text, white.r, white.g, white.b, white.a);
+
+  if (not build_text_geometry(app))
+    return SDL_APP_FAILURE;
 
   // ---- Sampler (linear filtering as recommended for the GPU text engine) ----
   SDL_GPUSamplerCreateInfo samplerInfo{};
@@ -279,6 +282,93 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
   }
   return SDL_APP_CONTINUE;
 }
+
+static bool build_text_geometry(AppState *app) {
+  app->batches.clear();
+
+  TTF_GPUAtlasDrawSequence *drawData = TTF_GetGPUTextDrawData(app->text);
+  if (!drawData)
+    return true;
+
+  Uint32 totalVertices = 0, totalIndices = 0;
+  for (TTF_GPUAtlasDrawSequence *seq = drawData; seq; seq = seq->next) {
+    totalVertices += static_cast<Uint32>(seq->num_vertices);
+    totalIndices += static_cast<Uint32>(seq->num_indices);
+  }
+
+  std::vector<TextVertex> vertices;
+  vertices.reserve(totalVertices);
+  std::vector<int> indices;
+  indices.reserve(totalIndices);
+
+  Uint32 baseVertex = 0, indexOffset = 0;
+  for (TTF_GPUAtlasDrawSequence *seq = drawData; seq; seq = seq->next) {
+    for (int i = 0; i < seq->num_vertices; ++i) {
+      TextVertex text_vtx{seq->xy[i].x, seq->xy[i].y, seq->uv[i].x,
+                          seq->uv[i].y};
+      vertices.push_back(text_vtx);
+    }
+    for (int i = 0; i < seq->num_indices; ++i)
+      indices.push_back(seq->indices[i] + (int)baseVertex);
+    app->batches.push_back(
+        {seq->atlas_texture, indexOffset, (Uint32)seq->num_indices});
+    baseVertex += (Uint32)seq->num_vertices;
+    indexOffset += (Uint32)seq->num_indices;
+  }
+
+  const Uint32 vbBytes = totalVertices * (Uint32)sizeof(TextVertex);
+  const Uint32 ibBytes = totalIndices * (Uint32)sizeof(int);
+
+  if (!ensure_gpu_buffer(app->device, &app->vertexBuffer,
+                         &app->vertexBufferSize, vbBytes,
+                         SDL_GPU_BUFFERUSAGE_VERTEX) ||
+      !ensure_gpu_buffer(app->device, &app->indexBuffer, &app->indexBufferSize,
+                         ibBytes, SDL_GPU_BUFFERUSAGE_INDEX)) {
+    SDL_Log("Failed to allocate GPU buffers: %s", SDL_GetError());
+    app->batches.clear();
+    return false;
+  }
+
+  SDL_GPUTransferBufferCreateInfo tbInfo{};
+  tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+  tbInfo.size = vbBytes + ibBytes;
+  SDL_GPUTransferBuffer *tb = SDL_CreateGPUTransferBuffer(app->device, &tbInfo);
+  if (!tb) {
+    app->batches.clear();
+    return false;
+  }
+
+  void *mapped = SDL_MapGPUTransferBuffer(app->device, tb, false);
+  SDL_memcpy(mapped, vertices.data(), vbBytes);
+  SDL_memcpy((Uint8 *)mapped + vbBytes, indices.data(), ibBytes);
+  SDL_UnmapGPUTransferBuffer(app->device, tb);
+
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(app->device);
+  SDL_GPUCopyPass *copyPass = SDL_BeginGPUCopyPass(cmd);
+
+  SDL_GPUTransferBufferLocation src{};
+  src.transfer_buffer = tb;
+  src.offset = 0;
+
+  SDL_GPUBufferRegion vDst{};
+  vDst.buffer = app->vertexBuffer;
+  vDst.size = vbBytes;
+  SDL_UploadToGPUBuffer(copyPass, &src, &vDst, false);
+
+  src.offset = vbBytes;
+
+  SDL_GPUBufferRegion iDst{};
+  iDst.buffer = app->indexBuffer;
+  iDst.size = ibBytes;
+  SDL_UploadToGPUBuffer(copyPass, &src, &iDst, false);
+
+  SDL_EndGPUCopyPass(copyPass);
+  SDL_SubmitGPUCommandBuffer(cmd);
+  SDL_ReleaseGPUTransferBuffer(app->device, tb);
+
+  return true;
+}
+
 SDL_AppResult SDL_AppIterate(void *appstate) {
   AppState *app = (AppState *)appstate;
   SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(app->device);
@@ -288,7 +378,6 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
   SDL_GPUTexture *swapchain = nullptr;
   Uint32 sw = 0, sh = 0;
   SDL_WaitAndAcquireGPUSwapchainTexture(cmd, app->window, &swapchain, &sw, &sh);
-
   if (!swapchain) {
     SDL_SubmitGPUCommandBuffer(cmd);
     return SDL_APP_CONTINUE;
@@ -300,12 +389,8 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
   colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
   colorTarget.store_op = SDL_GPU_STOREOP_STORE;
 
-  TTF_GPUAtlasDrawSequence *drawData = TTF_GetGPUTextDrawData(app->text);
-
   int textW = 0, textH = 0;
   TTF_GetTextSize(app->text, &textW, &textH);
-
-  // Position the text block so its center is at the window center.
   const float textX =
       (static_cast<float>(sw) - static_cast<float>(textW)) * 0.5f;
   const float textY =
@@ -318,102 +403,30 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
   };
   SDL_PushGPUVertexUniformData(cmd, 0, transform, sizeof(transform));
 
-  // ---- Count total vertices / indices across all atlas sequences ----
-  Uint32 totalVertices = 0, totalIndices = 0;
-  for (TTF_GPUAtlasDrawSequence *seq = drawData; seq; seq = seq->next) {
-    totalVertices += static_cast<Uint32>(seq->num_vertices);
-    totalIndices += static_cast<Uint32>(seq->num_indices);
-  }
-
-  // ---- Pack: pixel space -> NDC on the CPU ----
-  std::vector<TextVertex> vertices;
-  vertices.reserve(totalVertices);
-  std::vector<int> indices;
-  indices.reserve(totalIndices);
-
-  Uint32 baseVertex = 0;
-  for (TTF_GPUAtlasDrawSequence *seq = drawData; seq; seq = seq->next) {
-    for (int i = 0; i < seq->num_vertices; ++i) {
-      TextVertex text_vtx{seq->xy[i].x, seq->xy[i].y, seq->uv[i].x,
-                          seq->uv[i].y};
-      vertices.push_back(text_vtx);
-    }
-    for (int i = 0; i < seq->num_indices; ++i)
-      indices.push_back(seq->indices[i] + (int)baseVertex);
-    baseVertex += (Uint32)seq->num_vertices;
-  }
-
-  const Uint32 vbBytes = totalVertices * (Uint32)sizeof(TextVertex);
-  const Uint32 ibBytes = totalIndices * (Uint32)sizeof(int);
-
-  // ---- Grow persistent buffers if needed ----
-  if (!ensure_gpu_buffer(app->device, &app->vertexBuffer,
-                         &app->vertexBufferSize, vbBytes,
-                         SDL_GPU_BUFFERUSAGE_VERTEX) ||
-      !ensure_gpu_buffer(app->device, &app->indexBuffer, &app->indexBufferSize,
-                         ibBytes, SDL_GPU_BUFFERUSAGE_INDEX)) {
-    SDL_Log("Failed to allocate GPU buffers: %s", SDL_GetError());
-    SDL_SubmitGPUCommandBuffer(cmd);
-    return SDL_APP_FAILURE;
-  }
-
-  // ---- Upload into the same command buffer ----
-  SDL_GPUTransferBufferCreateInfo tbInfo{};
-  tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-  tbInfo.size = vbBytes + ibBytes;
-  SDL_GPUTransferBuffer *tb = SDL_CreateGPUTransferBuffer(app->device, &tbInfo);
-
-  void *mapped = SDL_MapGPUTransferBuffer(app->device, tb, false);
-  SDL_memcpy(mapped, vertices.data(), vbBytes);
-  SDL_memcpy((Uint8 *)mapped + vbBytes, indices.data(), ibBytes);
-  SDL_UnmapGPUTransferBuffer(app->device, tb);
-
-  SDL_GPUCopyPass *copyPass = SDL_BeginGPUCopyPass(cmd);
-
-  SDL_GPUTransferBufferLocation src{};
-  src.transfer_buffer = tb;
-
-  src.offset = 0;
-  SDL_GPUBufferRegion vDst{};
-  vDst.buffer = app->vertexBuffer;
-  vDst.size = vbBytes;
-  SDL_UploadToGPUBuffer(copyPass, &src, &vDst, false);
-
-  src.offset = vbBytes;
-  SDL_GPUBufferRegion iDst{};
-  iDst.buffer = app->indexBuffer;
-  iDst.size = ibBytes;
-  SDL_UploadToGPUBuffer(copyPass, &src, &iDst, false);
-
-  SDL_EndGPUCopyPass(copyPass);
-
-  // ---- Render pass ----
   SDL_GPURenderPass *pass =
       SDL_BeginGPURenderPass(cmd, &colorTarget, 1, nullptr);
-  SDL_BindGPUGraphicsPipeline(pass, app->pipeline);
+  if (app->batches.size() > 0) {
+    SDL_BindGPUGraphicsPipeline(pass, app->pipeline);
 
-  SDL_GPUBufferBinding vb{};
-  vb.buffer = app->vertexBuffer;
-  SDL_BindGPUVertexBuffers(pass, 0, &vb, 1);
+    SDL_GPUBufferBinding vb{};
+    vb.buffer = app->vertexBuffer;
+    SDL_BindGPUVertexBuffers(pass, 0, &vb, 1);
 
-  SDL_GPUBufferBinding ib{};
-  ib.buffer = app->indexBuffer;
-  SDL_BindGPUIndexBuffer(pass, &ib, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+    SDL_GPUBufferBinding ib{};
+    ib.buffer = app->indexBuffer;
+    SDL_BindGPUIndexBuffer(pass, &ib, SDL_GPU_INDEXELEMENTSIZE_32BIT);
 
-  Uint32 idxOffset = 0;
-  for (auto *seq = drawData; seq; seq = seq->next) {
-    SDL_GPUTextureSamplerBinding tsb{};
-    tsb.texture = seq->atlas_texture;
-    tsb.sampler = app->sampler;
-    SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
-
-    SDL_DrawGPUIndexedPrimitives(pass, (Uint32)seq->num_indices, 1, idxOffset,
-                                 0, 0);
-    idxOffset += (Uint32)seq->num_indices;
+    for (const DrawBatch &btch : app->batches) {
+      SDL_GPUTextureSamplerBinding tsb{};
+      tsb.texture = btch.atlasTexture;
+      tsb.sampler = app->sampler;
+      SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
+      SDL_DrawGPUIndexedPrimitives(pass, btch.indexCount, 1, btch.indexOffset,
+                                   0, 0);
+    }
   }
-
   SDL_EndGPURenderPass(pass);
-  SDL_ReleaseGPUTransferBuffer(app->device, tb);
+
   SDL_SubmitGPUCommandBuffer(cmd);
   return SDL_APP_CONTINUE;
 }
