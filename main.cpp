@@ -164,8 +164,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     return SDL_APP_FAILURE;
 
   SDL_GPUSamplerCreateInfo samplerInfo{};
-  samplerInfo.min_filter = SDL_GPU_FILTER_LINEAR;
-  samplerInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
+  samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
+  samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
   samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
   samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
   samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
@@ -451,11 +451,14 @@ SDL_AppResult FrameRunner::operator()() {
 
   int textW = 0, textH = 0;
   TTF_GetTextSize(app->text, &textW, &textH);
-  float transform[4] = {
-      2.0f / static_cast<float>(sw),                              // scale.x
-      2.0f / static_cast<float>(sh),                              // scale.y
-      static_cast<float>(textW) / static_cast<float>(sw) * -1.0f, // offset.x
-      static_cast<float>(textH) / static_cast<float>(sh),         // offset.y
+  const int textX = (sw - textW) / 2;
+  const int textY = (sh - textH) / 2;
+
+  const float transform[4] = {
+      2.0f / static_cast<float>(sw),
+      2.0f / static_cast<float>(sh),
+      2.0f / static_cast<float>(sw) * static_cast<float>(textX) - 1.0f,
+      2.0f / static_cast<float>(sh) * static_cast<float>(textY + textH) - 1.0f,
   };
   SDL_PushGPUVertexUniformData(cmd, 0, transform, sizeof(transform));
 
