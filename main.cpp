@@ -144,6 +144,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_Log("TTF_OpenFont failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
+  TTF_SetFontHinting(app->font, TTF_HINTING_LIGHT);
 
   app->textEngine = TTF_CreateGPUTextEngine(app->device);
   if (!app->textEngine) {
@@ -163,8 +164,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     return SDL_APP_FAILURE;
 
   SDL_GPUSamplerCreateInfo samplerInfo{};
-  samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
-  samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
+  samplerInfo.min_filter = SDL_GPU_FILTER_LINEAR;
+  samplerInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
   samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
   samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
   samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
@@ -450,15 +451,11 @@ SDL_AppResult FrameRunner::operator()() {
 
   int textW = 0, textH = 0;
   TTF_GetTextSize(app->text, &textW, &textH);
-  const float textX =
-      (static_cast<float>(sw) - static_cast<float>(textW)) * 0.5f;
-  const float textY =
-      (static_cast<float>(sh) - static_cast<float>(textH)) * 0.5f;
   float transform[4] = {
-      2.0f / (float)sw,                  // scale.x
-      2.0f / (float)sh,                  // scale.y
-      (textX / (float)sw) * 2.0f - 1.0f, // offset.x
-      (textY / (float)sh) * 2.0f - 1.0f, // offset.y
+      2.0f / static_cast<float>(sw),                              // scale.x
+      2.0f / static_cast<float>(sh),                              // scale.y
+      static_cast<float>(textW) / static_cast<float>(sw) * -1.0f, // offset.x
+      static_cast<float>(textH) / static_cast<float>(sh),         // offset.y
   };
   SDL_PushGPUVertexUniformData(cmd, 0, transform, sizeof(transform));
 
