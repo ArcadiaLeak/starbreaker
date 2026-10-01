@@ -1,5 +1,5 @@
 [[vk::binding(0, 2)]]
-Sampler2D atlasTexture : register(t0, space2) : register(s0, space2);
+Sampler2D atlasTexture : register(t0, space2);
 
 struct Transform2D {
     float2 scale;    // (2/W, 2/H)
