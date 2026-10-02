@@ -1,7 +1,4 @@
 #include <array>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -12,6 +9,10 @@
 #include <SDL3_ttf/SDL_ttf.h>
 
 #include <vulkan/vulkan.h>
+
+static SDL_GPUDevice *device = nullptr;
+static TTF_TextEngine *textEngine = nullptr;
+static TTF_Font *font = nullptr;
 
 struct TextVertex {
   float x, y, u, v;
@@ -29,12 +30,9 @@ struct AppState {
   bool buildTextGeometry();
 
   SDL_Window *window = nullptr;
-  SDL_GPUDevice *device = nullptr;
   SDL_GPUGraphicsPipeline *pipeline = nullptr;
   SDL_GPUSampler *sampler = nullptr;
 
-  TTF_TextEngine *textEngine = nullptr;
-  TTF_Font *font = nullptr;
   TTF_Text *text = nullptr;
 
   SDL_GPUBuffer *vertexBuffer = nullptr;
@@ -48,35 +46,24 @@ struct AppState {
 };
 
 AppState::~AppState() {
-  if (device)
-    SDL_WaitForGPUIdle(device);
   if (text)
     TTF_DestroyText(text);
-  if (font)
-    TTF_CloseFont(font);
-  if (textEngine)
-    TTF_DestroyGPUTextEngine(textEngine);
-
-  if (device && vertexBuffer)
+  if (vertexBuffer)
     SDL_ReleaseGPUBuffer(device, vertexBuffer);
-  if (device && indexBuffer)
+  if (indexBuffer)
     SDL_ReleaseGPUBuffer(device, indexBuffer);
-  if (device && sampler)
+  if (sampler)
     SDL_ReleaseGPUSampler(device, sampler);
-  if (device && pipeline)
+  if (pipeline)
     SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
-  if (device && window)
+  if (window) {
     SDL_ReleaseWindowFromGPUDevice(device, window);
-  if (device)
-    SDL_DestroyGPUDevice(device);
-
-  if (window)
     SDL_DestroyWindow(window);
+  }
 }
 
-static bool ensure_gpu_buffer(SDL_GPUDevice *device, SDL_GPUBuffer **buf,
-                              Uint32 *currentSize, Uint32 required,
-                              SDL_GPUBufferUsageFlags usage) {
+static bool ensureGPUBuffer(SDL_GPUBuffer **buf, Uint32 *currentSize,
+                            Uint32 required, SDL_GPUBufferUsageFlags usage) {
   if (*buf && *currentSize >= required)
     return true;
 
@@ -106,17 +93,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     return SDL_APP_FAILURE;
   }
 
-  AppState *app = new AppState{};
-  *appstate = app;
-
-  app->window =
-      SDL_CreateWindow("Hello GPU", 800, 600,
-                       SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-  if (!app->window) {
-    SDL_Log("CreateWindow: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
-
   SDL_GPUVulkanOptions vulkan_options{};
   vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
 
@@ -131,37 +107,45 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
                          SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER,
                          &vulkan_options);
 
-  app->device = SDL_CreateGPUDeviceWithProperties(device_props);
+  device = SDL_CreateGPUDeviceWithProperties(device_props);
   SDL_DestroyProperties(device_props);
-  if (!app->device) {
+  if (not device) {
     SDL_Log("Failed to create GPU device: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  SDL_ClaimWindowForGPUDevice(app->device, app->window);
 
-  app->font = TTF_OpenFont("assets/DejaVuSans.ttf", 14.0f);
-  if (!app->font) {
-    SDL_Log("TTF_OpenFont failed: %s", SDL_GetError());
+  AppState *app = new AppState{};
+  *appstate = app;
+
+  app->window =
+      SDL_CreateWindow("Hello GPU", 800, 600,
+                       SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+  if (!app->window) {
+    SDL_Log("CreateWindow: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  TTF_SetFontHinting(app->font, TTF_HINTING_LIGHT);
+  SDL_ClaimWindowForGPUDevice(device, app->window);
 
-  app->textEngine = TTF_CreateGPUTextEngine(app->device);
-  if (!app->textEngine) {
+  textEngine = TTF_CreateGPUTextEngine(device);
+  if (not textEngine) {
     SDL_Log("TTF_CreateGPUTextEngine failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
 
+  font = TTF_OpenFont("assets/DejaVuSans.ttf", 14.0f);
+  if (not font) {
+    SDL_Log("TTF_OpenFont failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
+  TTF_SetFontHinting(font, TTF_HINTING_LIGHT);
+
   SDL_Color white = {255, 255, 255, 255};
-  app->text = TTF_CreateText(app->textEngine, app->font, "Hello world", 0);
+  app->text = TTF_CreateText(textEngine, font, app->textBuffer.data(), 0);
   if (!app->text) {
     SDL_Log("TTF_CreateText failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
   TTF_SetTextColor(app->text, white.r, white.g, white.b, white.a);
-
-  if (not app->buildTextGeometry())
-    return SDL_APP_FAILURE;
 
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
@@ -171,7 +155,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
   samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
 
-  app->sampler = SDL_CreateGPUSampler(app->device, &samplerInfo);
+  app->sampler = SDL_CreateGPUSampler(device, &samplerInfo);
   if (!app->sampler) {
     SDL_Log("SDL_CreateGPUSampler failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
@@ -195,7 +179,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   vs_info.num_storage_textures = 0;
   vs_info.num_storage_buffers = 0;
   vs_info.num_uniform_buffers = 1;
-  SDL_GPUShader *vs_program = SDL_CreateGPUShader(app->device, &vs_info);
+  SDL_GPUShader *vs_program = SDL_CreateGPUShader(device, &vs_info);
 
   SDL_GPUShaderCreateInfo fs_info{};
   fs_info.code_size = shader_size;
@@ -207,7 +191,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   fs_info.num_storage_textures = 0;
   fs_info.num_storage_buffers = 0;
   fs_info.num_uniform_buffers = 0;
-  SDL_GPUShader *fs_program = SDL_CreateGPUShader(app->device, &fs_info);
+  SDL_GPUShader *fs_program = SDL_CreateGPUShader(device, &fs_info);
 
   SDL_free(shader_code);
 
@@ -240,8 +224,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   vtxInput.num_vertex_attributes = 2;
 
   SDL_GPUColorTargetDescription colorTarget{};
-  colorTarget.format =
-      SDL_GetGPUSwapchainTextureFormat(app->device, app->window);
+  colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device, app->window);
   colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
   colorTarget.blend_state.dst_color_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -266,10 +249,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   pipeInfo.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
   pipeInfo.target_info = targetInfo;
 
-  app->pipeline = SDL_CreateGPUGraphicsPipeline(app->device, &pipeInfo);
+  app->pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipeInfo);
 
-  SDL_ReleaseGPUShader(app->device, fs_program);
-  SDL_ReleaseGPUShader(app->device, vs_program);
+  SDL_ReleaseGPUShader(device, fs_program);
+  SDL_ReleaseGPUShader(device, vs_program);
 
   if (!app->pipeline) {
     SDL_Log("SDL_CreateGPUGraphicsPipeline failed: %s", SDL_GetError());
@@ -326,15 +309,15 @@ bool AppState::buildTextGeometry() {
   const Uint32 vbBytes = totalVertices * (Uint32)sizeof(TextVertex);
   const Uint32 ibBytes = totalIndices * (Uint32)sizeof(int);
 
-  if (not ensure_gpu_buffer(device, &vertexBuffer, &vertexBufferSize, vbBytes,
-                            SDL_GPU_BUFFERUSAGE_VERTEX)) {
+  if (not ensureGPUBuffer(&vertexBuffer, &vertexBufferSize, vbBytes,
+                          SDL_GPU_BUFFERUSAGE_VERTEX)) {
     SDL_Log("Failed to allocate GPU vertex buffer: %s", SDL_GetError());
     batches.clear();
     return false;
   }
 
-  if (not ensure_gpu_buffer(device, &indexBuffer, &indexBufferSize, ibBytes,
-                            SDL_GPU_BUFFERUSAGE_INDEX)) {
+  if (not ensureGPUBuffer(&indexBuffer, &indexBufferSize, ibBytes,
+                          SDL_GPU_BUFFERUSAGE_INDEX)) {
     SDL_Log("Failed to allocate GPU index buffer: %s", SDL_GetError());
     batches.clear();
     return false;
@@ -428,7 +411,7 @@ void FrameRunner::executeRenderPass() {
 }
 
 SDL_AppResult FrameRunner::operator()() {
-  cmd = SDL_AcquireGPUCommandBuffer(app->device);
+  cmd = SDL_AcquireGPUCommandBuffer(device);
   if (!cmd)
     return SDL_APP_FAILURE;
 
@@ -446,8 +429,10 @@ SDL_AppResult FrameRunner::operator()() {
   colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
   colorTarget.store_op = SDL_GPU_STOREOP_STORE;
 
-  if (not app->prepareTextGeometry())
+  if (not app->prepareTextGeometry()) {
+    SDL_CancelGPUCommandBuffer(cmd);
     return SDL_APP_FAILURE;
+  }
 
   int textW = 0, textH = 0;
   TTF_GetTextSize(app->text, &textW, &textH);
@@ -477,8 +462,16 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
 }
 
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
-  AppState *app = (AppState *)appstate;
-  if (app)
+  if (device)
+    SDL_WaitForGPUIdle(device);
+  if (font)
+    TTF_CloseFont(font);
+  if (textEngine)
+    TTF_DestroyGPUTextEngine(textEngine);
+  if (AppState *app = (AppState *)appstate; app)
     delete app;
+  if (device)
+    SDL_DestroyGPUDevice(device);
   TTF_Quit();
+  SDL_Quit();
 }
