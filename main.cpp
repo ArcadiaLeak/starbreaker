@@ -6,13 +6,15 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_main.h>
-#include <SDL3_ttf/SDL_ttf.h>
 
+#include <freetype/freetype.h>
+#include <harfbuzz/hb-ft.h>
+#include <harfbuzz/hb.h>
 #include <vulkan/vulkan.h>
 
 static SDL_GPUDevice *device = nullptr;
-static TTF_TextEngine *textEngine = nullptr;
-static TTF_Font *font = nullptr;
+static FT_Library ft_library = nullptr;
+static hb_font_t *hb_font = nullptr;
 
 struct TextVertex {
   float x, y, u, v;
@@ -33,7 +35,7 @@ struct AppState {
   SDL_GPUGraphicsPipeline *pipeline = nullptr;
   SDL_GPUSampler *sampler = nullptr;
 
-  TTF_Text *text = nullptr;
+  hb_buffer_t *textBuffer = nullptr;
 
   SDL_GPUBuffer *vertexBuffer = nullptr;
   SDL_GPUBuffer *indexBuffer = nullptr;
@@ -41,13 +43,13 @@ struct AppState {
   Uint32 indexBufferSize = 0;
 
   std::vector<DrawBatch> batches;
-  std::string textBuffer = "Hello world";
-  std::string geometryKey;
+  std::string textString = "Hello world";
+  std::string textLast;
 };
 
 AppState::~AppState() {
-  if (text)
-    TTF_DestroyText(text);
+  if (textBuffer)
+    hb_buffer_destroy(textBuffer);
   if (vertexBuffer)
     SDL_ReleaseGPUBuffer(device, vertexBuffer);
   if (indexBuffer)
@@ -88,10 +90,19 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_Log("SDL_Init failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  if (!TTF_Init()) {
-    SDL_Log("TTF_Init failed: %s", SDL_GetError());
+  if (FT_Init_FreeType(&ft_library)) {
+    SDL_Log("FT_Init_FreeType failed!");
     return SDL_APP_FAILURE;
   }
+
+  FT_Face ft_face{};
+  if (FT_New_Face(ft_library, "assets/DejaVuSans.ttf", 0, &ft_face)) {
+    SDL_Log("FT_New_Face failed!");
+    return SDL_APP_FAILURE;
+  }
+  FT_Set_Pixel_Sizes(ft_face, 0, 14);
+  hb_font = hb_ft_font_create_referenced(ft_face);
+  FT_Done_Face(ft_face);
 
   SDL_GPUVulkanOptions vulkan_options{};
   vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
@@ -126,26 +137,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   }
   SDL_ClaimWindowForGPUDevice(device, app->window);
 
-  textEngine = TTF_CreateGPUTextEngine(device);
-  if (not textEngine) {
-    SDL_Log("TTF_CreateGPUTextEngine failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
-
-  font = TTF_OpenFont("assets/DejaVuSans.ttf", 14.0f);
-  if (not font) {
-    SDL_Log("TTF_OpenFont failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
-  TTF_SetFontHinting(font, TTF_HINTING_LIGHT);
-
-  SDL_Color white = {255, 255, 255, 255};
-  app->text = TTF_CreateText(textEngine, font, app->textBuffer.data(), 0);
-  if (!app->text) {
+  app->textBuffer = TTF_CreateText(textEngine, font, app->textString.data(), 0);
+  if (!app->textBuffer) {
     SDL_Log("TTF_CreateText failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  TTF_SetTextColor(app->text, white.r, white.g, white.b, white.a);
 
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
@@ -161,7 +157,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     return SDL_APP_FAILURE;
   }
 
-  // ---- Shaders ----
   size_t shader_size = 0;
   void *shader_code = SDL_LoadFile("fullscreen.spv", &shader_size);
   if (!shader_code) {
@@ -200,7 +195,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     return SDL_APP_FAILURE;
   }
 
-  // ---- Vertex input layout matching TextVertex / shader ----
   std::array<SDL_GPUVertexAttribute, 2> attrs{};
   attrs[0].location = 0;
   attrs[0].buffer_slot = 0;
@@ -273,7 +267,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
 bool AppState::buildTextGeometry() {
   batches.clear();
 
-  TTF_GPUAtlasDrawSequence *drawData = TTF_GetGPUTextDrawData(text);
+  TTF_GPUAtlasDrawSequence *drawData = TTF_GetGPUTextDrawData(textBuffer);
   if (!drawData)
     return true;
 
@@ -364,15 +358,15 @@ bool AppState::buildTextGeometry() {
 }
 
 bool AppState::prepareTextGeometry() {
-  if (geometryKey == textBuffer)
+  if (textLast == textString)
     return 1;
-  else if (not TTF_SetTextString(text, textBuffer.c_str(), 0)) {
+  else if (not TTF_SetTextString(textBuffer, textString.c_str(), 0)) {
     SDL_Log("TTF_SetTextString failed: %s", SDL_GetError());
     return 0;
   } else if (not buildTextGeometry())
     return 0;
   else {
-    geometryKey = textBuffer;
+    textLast = textString;
     return 1;
   }
 }
@@ -435,7 +429,7 @@ SDL_AppResult FrameRunner::operator()() {
   }
 
   int textW = 0, textH = 0;
-  TTF_GetTextSize(app->text, &textW, &textH);
+  TTF_GetTextSize(app->textBuffer, &textW, &textH);
   const int textX = (sw - textW) / 2;
   const int textY = (sh - textH) / 2;
 
@@ -462,16 +456,15 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
 }
 
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
+  if (hb_font)
+    hb_font_destroy(hb_font);
+  if (ft_library)
+    FT_Done_FreeType(ft_library);
   if (device)
     SDL_WaitForGPUIdle(device);
-  if (font)
-    TTF_CloseFont(font);
-  if (textEngine)
-    TTF_DestroyGPUTextEngine(textEngine);
   if (AppState *app = (AppState *)appstate; app)
     delete app;
   if (device)
     SDL_DestroyGPUDevice(device);
-  TTF_Quit();
   SDL_Quit();
 }
