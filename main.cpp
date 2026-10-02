@@ -20,10 +20,13 @@ struct TextVertex {
   float x, y, u, v;
 };
 
-struct DrawBatch {
-  SDL_GPUTexture *atlasTexture;
-  Uint32 indexOffset;
-  Uint32 indexCount;
+struct AtlasGlyph {
+  float u0, v0;
+  float u1, v1;
+  float width;
+  float height;
+  float bearing_x;
+  float bearing_y;
 };
 
 struct AppState {
@@ -42,7 +45,6 @@ struct AppState {
   Uint32 vertexBufferSize = 0;
   Uint32 indexBufferSize = 0;
 
-  std::vector<DrawBatch> batches;
   std::string textString = "Hello world";
   std::string textLast;
 };
@@ -137,11 +139,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   }
   SDL_ClaimWindowForGPUDevice(device, app->window);
 
-  app->textBuffer = TTF_CreateText(textEngine, font, app->textString.data(), 0);
-  if (!app->textBuffer) {
-    SDL_Log("TTF_CreateText failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
+  app->textBuffer = hb_buffer_create();
 
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
@@ -257,47 +255,73 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 }
 
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
-  (void)appstate;
-  if (event->type == SDL_EVENT_QUIT || event->type == SDL_EVENT_KEY_DOWN) {
+  if (event->type == SDL_EVENT_QUIT || event->type == SDL_EVENT_KEY_DOWN)
     return SDL_APP_SUCCESS;
-  }
-  return SDL_APP_CONTINUE;
+  else
+    return SDL_APP_CONTINUE;
 }
 
 bool AppState::buildTextGeometry() {
-  batches.clear();
+  hb_buffer_reset(textBuffer);
+  hb_buffer_add_utf8(textBuffer, textString.data(), -1, 0, -1);
+  hb_buffer_guess_segment_properties(textBuffer);
+  hb_shape(hb_font, textBuffer, NULL, 0);
 
-  TTF_GPUAtlasDrawSequence *drawData = TTF_GetGPUTextDrawData(textBuffer);
-  if (!drawData)
-    return true;
+  std::vector<TextVertex> vertices{};
+  std::vector<int> indices{};
 
-  Uint32 totalVertices = 0, totalIndices = 0;
-  for (TTF_GPUAtlasDrawSequence *seq = drawData; seq; seq = seq->next) {
-    totalVertices += static_cast<Uint32>(seq->num_vertices);
-    totalIndices += static_cast<Uint32>(seq->num_indices);
-  }
+  unsigned int count = hb_buffer_get_length(textBuffer);
+  hb_glyph_info_t *infos = hb_buffer_get_glyph_infos(textBuffer, nullptr);
+  hb_glyph_position_t *positions =
+      hb_buffer_get_glyph_positions(textBuffer, nullptr);
+  float pen_x{}, pen_y{};
 
-  if (totalVertices == 0 || totalIndices == 0)
-    return true;
+  for (unsigned int i = 0; i < count; ++i) {
+    hb_codepoint_t glyph_id = infos[i].codepoint;
+    const hb_glyph_position_t &pos = positions[i];
 
-  std::vector<TextVertex> vertices;
-  vertices.reserve(totalVertices);
-  std::vector<int> indices;
-  indices.reserve(totalIndices);
-
-  Uint32 baseVertex = 0, indexOffset = 0;
-  for (TTF_GPUAtlasDrawSequence *seq = drawData; seq; seq = seq->next) {
-    for (int i = 0; i < seq->num_vertices; ++i) {
-      TextVertex text_vtx{seq->xy[i].x, seq->xy[i].y, seq->uv[i].x,
-                          seq->uv[i].y};
-      vertices.push_back(text_vtx);
+    auto it = atlas.find(glyph_id);
+    if (it == atlas.end()) {
+      // Missing glyph: still advance the pen.
+      pen_x += pos.x_advance * scale;
+      pen_y -= pos.y_advance * scale; // HarfBuzz y+ is up, screen y+ is down
+      continue;
     }
-    for (int i = 0; i < seq->num_indices; ++i)
-      indices.push_back(seq->indices[i] + (int)baseVertex);
-    batches.push_back(
-        {seq->atlas_texture, indexOffset, (Uint32)seq->num_indices});
-    baseVertex += (Uint32)seq->num_vertices;
-    indexOffset += (Uint32)seq->num_indices;
+
+    const AtlasGlyph &g = it->second;
+    if (g.width <= 0.0f || g.height <= 0.0f) {
+      // Invisible glyph (e.g. space): advance only.
+      pen_x += pos.x_advance * scale;
+      pen_y -= pos.y_advance * scale;
+      continue;
+    }
+
+    // Compute the quad corners in screen space.
+    // HarfBuzz offsets are relative to the pen; bearing_y is positive up.
+    float x0 = pen_x + pos.x_offset * scale + g.bearing_x * scale;
+    float y0 = pen_y - pos.y_offset * scale - g.bearing_y * scale;
+    float x1 = x0 + g.width * scale;
+    float y1 = y0 + g.height * scale;
+
+    uint32_t base = static_cast<uint32_t>(vertices.size());
+
+    // Four corners, clockwise in y-down space.
+    vertices.push_back({x0, y0, g.u0, g.v0}); // top-left
+    vertices.push_back({x1, y0, g.u1, g.v0}); // top-right
+    vertices.push_back({x1, y1, g.u1, g.v1}); // bottom-right
+    vertices.push_back({x0, y1, g.u0, g.v1}); // bottom-left
+
+    // Two triangles: (0,1,2) and (0,2,3)
+    indices.push_back(base + 0);
+    indices.push_back(base + 1);
+    indices.push_back(base + 2);
+    indices.push_back(base + 0);
+    indices.push_back(base + 2);
+    indices.push_back(base + 3);
+
+    // Advance pen for the next glyph.
+    pen_x += pos.x_advance * scale;
+    pen_y -= pos.y_advance * scale;
   }
 
   const Uint32 vbBytes = totalVertices * (Uint32)sizeof(TextVertex);
@@ -360,10 +384,7 @@ bool AppState::buildTextGeometry() {
 bool AppState::prepareTextGeometry() {
   if (textLast == textString)
     return 1;
-  else if (not TTF_SetTextString(textBuffer, textString.c_str(), 0)) {
-    SDL_Log("TTF_SetTextString failed: %s", SDL_GetError());
-    return 0;
-  } else if (not buildTextGeometry())
+  else if (not buildTextGeometry())
     return 0;
   else {
     textLast = textString;
