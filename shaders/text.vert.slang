@@ -1,6 +1,3 @@
-[[vk::binding(0, 2)]]
-Sampler2D atlasTexture : register(t0, space2);
-
 struct Transform2D {
     float2 scale;    // (2/W, 2/H)
     float2 offset;   // (-1, -1) plus centering term
@@ -27,10 +24,4 @@ VSOutput vs_main(VSInput input)
                         0.0, 1.0);
     o.uv       = input.uv;
     return o;
-}
-
-[shader("fragment")]
-float4 fs_main(VSOutput input) : SV_Target
-{
-    return atlasTexture.Sample(input.uv);
 }

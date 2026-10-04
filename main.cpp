@@ -1,5 +1,9 @@
 #include <array>
+#include <expected>
+#include <format>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #define SDL_MAIN_USE_CALLBACKS 1
@@ -12,100 +16,69 @@
 #include <harfbuzz/hb.h>
 #include <vulkan/vulkan.h>
 
-static SDL_GPUDevice *device = nullptr;
-static FT_Library ft_library = nullptr;
-static hb_font_t *hb_font = nullptr;
-
 struct TextVertex {
-  float x, y, u, v;
+  float position[2];
+  float uv[2];
 };
 
-struct AtlasGlyph {
-  float u0, v0;
-  float u1, v1;
-  float width;
-  float height;
-  float bearing_x;
-  float bearing_y;
+struct SDLCommonDeleter {
+  void operator()(void *m) const {
+    if (m)
+      SDL_free(m);
+  }
 };
 
-struct AppState {
-  ~AppState();
-  bool prepareTextGeometry();
-  bool buildTextGeometry();
+struct SDLShaderDeleter {
+  SDL_GPUDevice *device;
 
+  void operator()(SDL_GPUShader *shader) const {
+    if (shader)
+      SDL_ReleaseGPUShader(device, shader);
+  }
+};
+
+class AppState {
+private:
+  SDL_GPUDevice *device = nullptr;
   SDL_Window *window = nullptr;
   SDL_GPUGraphicsPipeline *pipeline = nullptr;
   SDL_GPUSampler *sampler = nullptr;
 
+  FT_Library ft_library = nullptr;
+  hb_font_t *hb_font = nullptr;
+
   hb_buffer_t *textBuffer = nullptr;
-
-  SDL_GPUBuffer *vertexBuffer = nullptr;
-  SDL_GPUBuffer *indexBuffer = nullptr;
-  Uint32 vertexBufferSize = 0;
-  Uint32 indexBufferSize = 0;
-
   std::string textString = "Hello world";
-  std::string textLast;
+
+  std::expected<void, std::string> initialize_font();
+  std::expected<void, std::string> initialize_device();
+  std::expected<void, std::string> initialize_window();
+  std::expected<void, std::string> initialize_sampler();
+  std::expected<void, std::string> initialize_pipeline();
+
+  void destroy_font();
+  void destroy_freetype();
+  void destroy_device();
+  void destroy_window();
+  void destroy_sampler();
+  void destroy_pipeline();
+
+public:
+  SDL_AppResult initialize();
+  void quit();
 };
 
-AppState::~AppState() {
-  if (textBuffer)
-    hb_buffer_destroy(textBuffer);
-  if (vertexBuffer)
-    SDL_ReleaseGPUBuffer(device, vertexBuffer);
-  if (indexBuffer)
-    SDL_ReleaseGPUBuffer(device, indexBuffer);
-  if (sampler)
-    SDL_ReleaseGPUSampler(device, sampler);
-  if (pipeline)
-    SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
-  if (window) {
-    SDL_ReleaseWindowFromGPUDevice(device, window);
-    SDL_DestroyWindow(window);
-  }
-}
-
-static bool ensureGPUBuffer(SDL_GPUBuffer **buf, Uint32 *currentSize,
-                            Uint32 required, SDL_GPUBufferUsageFlags usage) {
-  if (*buf && *currentSize >= required)
-    return true;
-
-  if (*buf) {
-    SDL_ReleaseGPUBuffer(device, *buf);
-    *buf = nullptr;
-    *currentSize = 0;
-  }
-
-  SDL_GPUBufferCreateInfo info{};
-  info.usage = usage;
-  info.size = required;
-
-  *buf = SDL_CreateGPUBuffer(device, &info);
-  if (*buf)
-    *currentSize = required;
-  return *buf != nullptr;
-}
-
-SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
-  if (!SDL_Init(SDL_INIT_VIDEO)) {
-    SDL_Log("SDL_Init failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
-  if (FT_Init_FreeType(&ft_library)) {
-    SDL_Log("FT_Init_FreeType failed!");
-    return SDL_APP_FAILURE;
-  }
-
+std::expected<void, std::string> AppState::initialize_font() {
   FT_Face ft_face{};
-  if (FT_New_Face(ft_library, "assets/DejaVuSans.ttf", 0, &ft_face)) {
-    SDL_Log("FT_New_Face failed!");
-    return SDL_APP_FAILURE;
-  }
+  if (FT_New_Face(ft_library, "assets/DejaVuSans.ttf", 0, &ft_face))
+    return std::unexpected{"FT_New_Face failed!"};
   FT_Set_Pixel_Sizes(ft_face, 0, 14);
   hb_font = hb_ft_font_create_referenced(ft_face);
   FT_Done_Face(ft_face);
+  return std::expected<void, std::string>{};
+}
 
+std::expected<void, std::string> AppState::initialize_device() {
   SDL_GPUVulkanOptions vulkan_options{};
   vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
 
@@ -119,28 +92,29 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   SDL_SetPointerProperty(device_props,
                          SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER,
                          &vulkan_options);
-
   device = SDL_CreateGPUDeviceWithProperties(device_props);
+
   SDL_DestroyProperties(device_props);
-  if (not device) {
-    SDL_Log("Failed to create GPU device: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
 
-  AppState *app = new AppState{};
-  *appstate = app;
+  if (not device)
+    return std::unexpected{
+        std::format("Failed to create GPU device: {}", SDL_GetError())};
+  return std::expected<void, std::string>{};
+}
 
-  app->window =
+std::expected<void, std::string> AppState::initialize_window() {
+  window =
       SDL_CreateWindow("Hello GPU", 800, 600,
                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-  if (!app->window) {
-    SDL_Log("CreateWindow: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
-  SDL_ClaimWindowForGPUDevice(device, app->window);
+  if (not window)
+    return std::unexpected{std::format("CreateWindow: {}", SDL_GetError())};
+  if (not SDL_ClaimWindowForGPUDevice(device, window))
+    return std::unexpected{
+        std::format("ClaimWindowForGPUDevice: {}", SDL_GetError())};
+  return std::expected<void, std::string>{};
+}
 
-  app->textBuffer = hb_buffer_create();
-
+std::expected<void, std::string> AppState::initialize_sampler() {
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
   samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -149,60 +123,74 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
   samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
 
-  app->sampler = SDL_CreateGPUSampler(device, &samplerInfo);
-  if (!app->sampler) {
-    SDL_Log("SDL_CreateGPUSampler failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
+  sampler = SDL_CreateGPUSampler(device, &samplerInfo);
+  if (not sampler)
+    return std::unexpected{
+        std::format("SDL_CreateGPUSampler failed: {}", SDL_GetError())};
+  return std::expected<void, std::string>{};
+}
+
+std::expected<void, std::string> AppState::initialize_pipeline() {
+  std::unique_ptr<SDL_GPUShader, SDLShaderDeleter> vertex_shader{
+      nullptr, SDLShaderDeleter{device}};
+  {
+    size_t shader_size{};
+    std::unique_ptr<void, SDLCommonDeleter> shader_code{
+        SDL_LoadFile("text.vert.spv", &shader_size)};
+    if (not shader_code)
+      return std::unexpected{
+          std::format("Failed to load vertex shader: {}", SDL_GetError())};
+
+    SDL_GPUShaderCreateInfo shader_info{};
+    shader_info.code_size = shader_size;
+    shader_info.code = static_cast<const Uint8 *>(shader_code.get());
+    shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    shader_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    shader_info.num_samplers = 0;
+    shader_info.num_storage_textures = 0;
+    shader_info.num_storage_buffers = 0;
+    shader_info.num_uniform_buffers = 1;
+    vertex_shader.reset(SDL_CreateGPUShader(device, &shader_info));
+    if (not vertex_shader)
+      return std::unexpected{std::format(
+          "SDL_CreateGPUShader for vertex failed: {}", SDL_GetError())};
   }
 
-  size_t shader_size = 0;
-  void *shader_code = SDL_LoadFile("fullscreen.spv", &shader_size);
-  if (!shader_code) {
-    SDL_Log("Failed to load shader: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
+  std::unique_ptr<SDL_GPUShader, SDLShaderDeleter> fragment_shader{
+      nullptr, SDLShaderDeleter{device}};
+  {
+    size_t shader_size{};
+    std::unique_ptr<void, SDLCommonDeleter> shader_code{
+        SDL_LoadFile("text.frag.spv", &shader_size)};
+    if (not shader_code)
+      return std::unexpected{
+          std::format("Failed to load fragment shader: {}", SDL_GetError())};
 
-  SDL_GPUShaderCreateInfo vs_info{};
-  vs_info.code_size = shader_size;
-  vs_info.code = (const Uint8 *)shader_code;
-  vs_info.entrypoint = "vs_main";
-  vs_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-  vs_info.num_samplers = 0;
-  vs_info.num_storage_textures = 0;
-  vs_info.num_storage_buffers = 0;
-  vs_info.num_uniform_buffers = 1;
-  SDL_GPUShader *vs_program = SDL_CreateGPUShader(device, &vs_info);
-
-  SDL_GPUShaderCreateInfo fs_info{};
-  fs_info.code_size = shader_size;
-  fs_info.code = (const Uint8 *)shader_code;
-  fs_info.entrypoint = "fs_main";
-  fs_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  fs_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-  fs_info.num_samplers = 1; // combined image sampler
-  fs_info.num_storage_textures = 0;
-  fs_info.num_storage_buffers = 0;
-  fs_info.num_uniform_buffers = 0;
-  SDL_GPUShader *fs_program = SDL_CreateGPUShader(device, &fs_info);
-
-  SDL_free(shader_code);
-
-  if (!fs_program || !vs_program) {
-    SDL_Log("SDL_CreateGPUShader failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
+    SDL_GPUShaderCreateInfo shader_info{};
+    shader_info.code_size = shader_size;
+    shader_info.code = static_cast<const Uint8 *>(shader_code.get());
+    shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    shader_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    shader_info.num_samplers = 1; // combined image sampler
+    shader_info.num_storage_textures = 0;
+    shader_info.num_storage_buffers = 0;
+    shader_info.num_uniform_buffers = 0;
+    fragment_shader.reset(SDL_CreateGPUShader(device, &shader_info));
+    if (not fragment_shader)
+      return std::unexpected{std::format(
+          "SDL_CreateGPUShader for fragment failed: {}", SDL_GetError())};
   }
 
   std::array<SDL_GPUVertexAttribute, 2> attrs{};
   attrs[0].location = 0;
   attrs[0].buffer_slot = 0;
   attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  attrs[0].offset = offsetof(TextVertex, x);
+  attrs[0].offset = offsetof(TextVertex, position);
 
   attrs[1].location = 1;
   attrs[1].buffer_slot = 0;
   attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  attrs[1].offset = offsetof(TextVertex, u);
+  attrs[1].offset = offsetof(TextVertex, uv);
 
   SDL_GPUVertexBufferDescription vtxDesc{};
   vtxDesc.slot = 0;
@@ -216,7 +204,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   vtxInput.num_vertex_attributes = 2;
 
   SDL_GPUColorTargetDescription colorTarget{};
-  colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device, app->window);
+  colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device, window);
   colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
   colorTarget.blend_state.dst_color_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -232,8 +220,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   targetInfo.num_color_targets = 1;
 
   SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
-  pipeInfo.vertex_shader = vs_program;
-  pipeInfo.fragment_shader = fs_program;
+  pipeInfo.vertex_shader = vertex_shader.get();
+  pipeInfo.fragment_shader = fragment_shader.get();
   pipeInfo.vertex_input_state = vtxInput;
   pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
   pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
@@ -241,251 +229,114 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   pipeInfo.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
   pipeInfo.target_info = targetInfo;
 
-  app->pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipeInfo);
+  pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipeInfo);
+  if (not pipeline)
+    return std::unexpected{std::format(
+        "SDL_CreateGPUGraphicsPipeline failed: {}", SDL_GetError())};
 
-  SDL_ReleaseGPUShader(device, fs_program);
-  SDL_ReleaseGPUShader(device, vs_program);
-
-  if (!app->pipeline) {
-    SDL_Log("SDL_CreateGPUGraphicsPipeline failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
-
-  return SDL_APP_CONTINUE;
+  return std::expected<void, std::string>{};
 }
+
+SDL_AppResult AppState::initialize() {
+  if (!SDL_Init(SDL_INIT_VIDEO)) {
+    SDL_Log("SDL_Init failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  } else if (FT_Init_FreeType(&ft_library)) {
+    SDL_Log("FT_Init_FreeType failed!");
+    return SDL_APP_FAILURE;
+  } else if (std::expected result = initialize_font(); not result) {
+    SDL_Log("%s", result.error().data());
+    return SDL_APP_FAILURE;
+  } else if (std::expected result = initialize_device(); not result) {
+    SDL_Log("%s", result.error().data());
+    return SDL_APP_FAILURE;
+  } else if (std::expected result = initialize_window(); not result) {
+    SDL_Log("%s", result.error().data());
+    return SDL_APP_FAILURE;
+  } else if (std::expected result = initialize_sampler(); not result) {
+    SDL_Log("%s", result.error().data());
+    return SDL_APP_FAILURE;
+  } else if (std::expected result = initialize_pipeline(); not result) {
+    SDL_Log("%s", result.error().data());
+    return SDL_APP_FAILURE;
+  } else
+    return SDL_APP_CONTINUE;
+}
+
+void AppState::quit() {
+  destroy_pipeline();
+  destroy_sampler();
+  destroy_window();
+  destroy_device();
+  destroy_font();
+  destroy_freetype();
+  SDL_Quit();
+}
+
+void AppState::destroy_font() {
+  if (not hb_font)
+    return;
+  hb_font_destroy(hb_font);
+}
+
+void AppState::destroy_freetype() {
+  if (not ft_library)
+    return;
+  FT_Done_FreeType(ft_library);
+}
+
+void AppState::destroy_device() {
+  if (not device)
+    return;
+  SDL_WaitForGPUIdle(device);
+  SDL_DestroyGPUDevice(device);
+}
+
+void AppState::destroy_window() {
+  if (not device)
+    return;
+  SDL_WaitForGPUIdle(device);
+  if (not window)
+    return;
+  SDL_ReleaseWindowFromGPUDevice(device, window);
+  SDL_DestroyWindow(window);
+}
+
+void AppState::destroy_sampler() {
+  if (not device)
+    return;
+  SDL_WaitForGPUIdle(device);
+  if (not sampler)
+    return;
+  SDL_ReleaseGPUSampler(device, sampler);
+}
+
+void AppState::destroy_pipeline() {
+  if (not device)
+    return;
+  SDL_WaitForGPUIdle(device);
+  if (not sampler)
+    return;
+  SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+}
+
+SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
+  AppState *app = new AppState{};
+  *appstate = app;
+  return app->initialize();
+}
+
+void SDL_AppQuit(void *appstate, SDL_AppResult result) {
+  AppState *app = (AppState *)appstate;
+  app->quit();
+  delete app;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate) { return SDL_APP_CONTINUE; }
 
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
   if (event->type == SDL_EVENT_QUIT || event->type == SDL_EVENT_KEY_DOWN)
     return SDL_APP_SUCCESS;
   else
     return SDL_APP_CONTINUE;
-}
-
-bool AppState::buildTextGeometry() {
-  hb_buffer_reset(textBuffer);
-  hb_buffer_add_utf8(textBuffer, textString.data(), -1, 0, -1);
-  hb_buffer_guess_segment_properties(textBuffer);
-  hb_shape(hb_font, textBuffer, NULL, 0);
-
-  std::vector<TextVertex> vertices{};
-  std::vector<int> indices{};
-
-  unsigned int count = hb_buffer_get_length(textBuffer);
-  hb_glyph_info_t *infos = hb_buffer_get_glyph_infos(textBuffer, nullptr);
-  hb_glyph_position_t *positions =
-      hb_buffer_get_glyph_positions(textBuffer, nullptr);
-  float pen_x{}, pen_y{};
-
-  for (unsigned int i = 0; i < count; ++i) {
-    hb_codepoint_t glyph_id = infos[i].codepoint;
-    const hb_glyph_position_t &pos = positions[i];
-
-    auto it = atlas.find(glyph_id);
-    if (it == atlas.end()) {
-      // Missing glyph: still advance the pen.
-      pen_x += pos.x_advance * scale;
-      pen_y -= pos.y_advance * scale; // HarfBuzz y+ is up, screen y+ is down
-      continue;
-    }
-
-    const AtlasGlyph &g = it->second;
-    if (g.width <= 0.0f || g.height <= 0.0f) {
-      // Invisible glyph (e.g. space): advance only.
-      pen_x += pos.x_advance * scale;
-      pen_y -= pos.y_advance * scale;
-      continue;
-    }
-
-    // Compute the quad corners in screen space.
-    // HarfBuzz offsets are relative to the pen; bearing_y is positive up.
-    float x0 = pen_x + pos.x_offset * scale + g.bearing_x * scale;
-    float y0 = pen_y - pos.y_offset * scale - g.bearing_y * scale;
-    float x1 = x0 + g.width * scale;
-    float y1 = y0 + g.height * scale;
-
-    uint32_t base = static_cast<uint32_t>(vertices.size());
-
-    // Four corners, clockwise in y-down space.
-    vertices.push_back({x0, y0, g.u0, g.v0}); // top-left
-    vertices.push_back({x1, y0, g.u1, g.v0}); // top-right
-    vertices.push_back({x1, y1, g.u1, g.v1}); // bottom-right
-    vertices.push_back({x0, y1, g.u0, g.v1}); // bottom-left
-
-    // Two triangles: (0,1,2) and (0,2,3)
-    indices.push_back(base + 0);
-    indices.push_back(base + 1);
-    indices.push_back(base + 2);
-    indices.push_back(base + 0);
-    indices.push_back(base + 2);
-    indices.push_back(base + 3);
-
-    // Advance pen for the next glyph.
-    pen_x += pos.x_advance * scale;
-    pen_y -= pos.y_advance * scale;
-  }
-
-  const Uint32 vbBytes = totalVertices * (Uint32)sizeof(TextVertex);
-  const Uint32 ibBytes = totalIndices * (Uint32)sizeof(int);
-
-  if (not ensureGPUBuffer(&vertexBuffer, &vertexBufferSize, vbBytes,
-                          SDL_GPU_BUFFERUSAGE_VERTEX)) {
-    SDL_Log("Failed to allocate GPU vertex buffer: %s", SDL_GetError());
-    batches.clear();
-    return false;
-  }
-
-  if (not ensureGPUBuffer(&indexBuffer, &indexBufferSize, ibBytes,
-                          SDL_GPU_BUFFERUSAGE_INDEX)) {
-    SDL_Log("Failed to allocate GPU index buffer: %s", SDL_GetError());
-    batches.clear();
-    return false;
-  }
-
-  SDL_GPUTransferBufferCreateInfo tbInfo{};
-  tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-  tbInfo.size = vbBytes + ibBytes;
-  SDL_GPUTransferBuffer *tb = SDL_CreateGPUTransferBuffer(device, &tbInfo);
-  if (!tb) {
-    batches.clear();
-    return false;
-  }
-
-  void *mapped = SDL_MapGPUTransferBuffer(device, tb, false);
-  SDL_memcpy(mapped, vertices.data(), vbBytes);
-  SDL_memcpy((Uint8 *)mapped + vbBytes, indices.data(), ibBytes);
-  SDL_UnmapGPUTransferBuffer(device, tb);
-
-  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
-  SDL_GPUCopyPass *copyPass = SDL_BeginGPUCopyPass(cmd);
-
-  SDL_GPUTransferBufferLocation src{};
-  src.transfer_buffer = tb;
-  src.offset = 0;
-
-  SDL_GPUBufferRegion vDst{};
-  vDst.buffer = vertexBuffer;
-  vDst.size = vbBytes;
-  SDL_UploadToGPUBuffer(copyPass, &src, &vDst, false);
-
-  src.offset = vbBytes;
-
-  SDL_GPUBufferRegion iDst{};
-  iDst.buffer = indexBuffer;
-  iDst.size = ibBytes;
-  SDL_UploadToGPUBuffer(copyPass, &src, &iDst, false);
-
-  SDL_EndGPUCopyPass(copyPass);
-  SDL_SubmitGPUCommandBuffer(cmd);
-  SDL_ReleaseGPUTransferBuffer(device, tb);
-
-  return true;
-}
-
-bool AppState::prepareTextGeometry() {
-  if (textLast == textString)
-    return 1;
-  else if (not buildTextGeometry())
-    return 0;
-  else {
-    textLast = textString;
-    return 1;
-  }
-}
-
-struct FrameRunner {
-  AppState *app;
-  SDL_GPUCommandBuffer *cmd;
-  SDL_GPURenderPass *renderPass;
-
-  void executeRenderPass();
-  SDL_AppResult operator()();
-};
-
-void FrameRunner::executeRenderPass() {
-  if (app->batches.empty())
-    return;
-
-  SDL_BindGPUGraphicsPipeline(renderPass, app->pipeline);
-
-  SDL_GPUBufferBinding vb{};
-  vb.buffer = app->vertexBuffer;
-  SDL_BindGPUVertexBuffers(renderPass, 0, &vb, 1);
-
-  SDL_GPUBufferBinding ib{};
-  ib.buffer = app->indexBuffer;
-  SDL_BindGPUIndexBuffer(renderPass, &ib, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-
-  for (const DrawBatch &btch : app->batches) {
-    SDL_GPUTextureSamplerBinding tsb{};
-    tsb.texture = btch.atlasTexture;
-    tsb.sampler = app->sampler;
-    SDL_BindGPUFragmentSamplers(renderPass, 0, &tsb, 1);
-    SDL_DrawGPUIndexedPrimitives(renderPass, btch.indexCount, 1,
-                                 btch.indexOffset, 0, 0);
-  }
-}
-
-SDL_AppResult FrameRunner::operator()() {
-  cmd = SDL_AcquireGPUCommandBuffer(device);
-  if (!cmd)
-    return SDL_APP_FAILURE;
-
-  SDL_GPUTexture *swapchain = nullptr;
-  Uint32 sw = 0, sh = 0;
-  SDL_WaitAndAcquireGPUSwapchainTexture(cmd, app->window, &swapchain, &sw, &sh);
-  if (!swapchain) {
-    SDL_SubmitGPUCommandBuffer(cmd);
-    return SDL_APP_CONTINUE;
-  }
-
-  SDL_GPUColorTargetInfo colorTarget{};
-  colorTarget.texture = swapchain;
-  colorTarget.clear_color = {0.08f, 0.08f, 0.10f, 1.0f};
-  colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
-  colorTarget.store_op = SDL_GPU_STOREOP_STORE;
-
-  if (not app->prepareTextGeometry()) {
-    SDL_CancelGPUCommandBuffer(cmd);
-    return SDL_APP_FAILURE;
-  }
-
-  int textW = 0, textH = 0;
-  TTF_GetTextSize(app->textBuffer, &textW, &textH);
-  const int textX = (sw - textW) / 2;
-  const int textY = (sh - textH) / 2;
-
-  const float transform[4] = {
-      2.0f / static_cast<float>(sw),
-      2.0f / static_cast<float>(sh),
-      2.0f / static_cast<float>(sw) * static_cast<float>(textX) - 1.0f,
-      2.0f / static_cast<float>(sh) * static_cast<float>(textY + textH) - 1.0f,
-  };
-  SDL_PushGPUVertexUniformData(cmd, 0, transform, sizeof(transform));
-
-  renderPass = SDL_BeginGPURenderPass(cmd, &colorTarget, 1, nullptr);
-  executeRenderPass();
-  SDL_EndGPURenderPass(renderPass);
-
-  SDL_SubmitGPUCommandBuffer(cmd);
-  return SDL_APP_CONTINUE;
-}
-
-SDL_AppResult SDL_AppIterate(void *appstate) {
-  FrameRunner iterate_frame{};
-  iterate_frame.app = (AppState *)appstate;
-  return iterate_frame();
-}
-
-void SDL_AppQuit(void *appstate, SDL_AppResult result) {
-  if (hb_font)
-    hb_font_destroy(hb_font);
-  if (ft_library)
-    FT_Done_FreeType(ft_library);
-  if (device)
-    SDL_WaitForGPUIdle(device);
-  if (AppState *app = (AppState *)appstate; app)
-    delete app;
-  if (device)
-    SDL_DestroyGPUDevice(device);
-  SDL_Quit();
 }
