@@ -21,22 +21,6 @@ struct TextVertex {
   float uv[2];
 };
 
-struct SDLCommonDeleter {
-  void operator()(void *m) const {
-    if (m)
-      SDL_free(m);
-  }
-};
-
-struct SDLShaderDeleter {
-  SDL_GPUDevice *device;
-
-  void operator()(SDL_GPUShader *shader) const {
-    if (shader)
-      SDL_ReleaseGPUShader(device, shader);
-  }
-};
-
 class AppState {
 private:
   SDL_GPUDevice *device = nullptr;
@@ -65,6 +49,7 @@ private:
 
 public:
   SDL_AppResult initialize();
+  SDL_AppResult iterate();
   void quit();
 };
 
@@ -131,11 +116,25 @@ std::expected<void, std::string> AppState::initialize_sampler() {
 }
 
 std::expected<void, std::string> AppState::initialize_pipeline() {
-  std::unique_ptr<SDL_GPUShader, SDLShaderDeleter> vertex_shader{
-      nullptr, SDLShaderDeleter{device}};
+  struct CommonDeleter {
+    void operator()(void *m) const {
+      if (m)
+        SDL_free(m);
+    }
+  };
+  struct ShaderDeleter {
+    SDL_GPUDevice *device;
+    void operator()(SDL_GPUShader *shader) const {
+      if (shader)
+        SDL_ReleaseGPUShader(device, shader);
+    }
+  };
+
+  std::unique_ptr<SDL_GPUShader, ShaderDeleter> vertex_shader{
+      nullptr, ShaderDeleter{device}};
   {
     size_t shader_size{};
-    std::unique_ptr<void, SDLCommonDeleter> shader_code{
+    std::unique_ptr<void, CommonDeleter> shader_code{
         SDL_LoadFile("text.vert.spv", &shader_size)};
     if (not shader_code)
       return std::unexpected{
@@ -156,11 +155,11 @@ std::expected<void, std::string> AppState::initialize_pipeline() {
           "SDL_CreateGPUShader for vertex failed: {}", SDL_GetError())};
   }
 
-  std::unique_ptr<SDL_GPUShader, SDLShaderDeleter> fragment_shader{
-      nullptr, SDLShaderDeleter{device}};
+  std::unique_ptr<SDL_GPUShader, ShaderDeleter> fragment_shader{
+      nullptr, ShaderDeleter{device}};
   {
     size_t shader_size{};
-    std::unique_ptr<void, SDLCommonDeleter> shader_code{
+    std::unique_ptr<void, CommonDeleter> shader_code{
         SDL_LoadFile("text.frag.spv", &shader_size)};
     if (not shader_code)
       return std::unexpected{
@@ -332,7 +331,37 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
   delete app;
 }
 
-SDL_AppResult SDL_AppIterate(void *appstate) { return SDL_APP_CONTINUE; }
+SDL_AppResult AppState::iterate() {
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
+  if (not cmd)
+    return SDL_APP_FAILURE;
+
+  SDL_GPUTexture *swapchain = nullptr;
+  Uint32 sw = 0, sh = 0;
+  SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window, &swapchain, &sw, &sh);
+  if (not swapchain) {
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return SDL_APP_CONTINUE;
+  }
+
+  SDL_GPUColorTargetInfo colorTarget{};
+  colorTarget.texture = swapchain;
+  colorTarget.clear_color = {0.08f, 0.08f, 0.10f, 1.0f};
+  colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+  colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+
+  SDL_GPURenderPass *renderPass =
+      SDL_BeginGPURenderPass(cmd, &colorTarget, 1, nullptr);
+  SDL_EndGPURenderPass(renderPass);
+
+  SDL_SubmitGPUCommandBuffer(cmd);
+  return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void *appstate) {
+  AppState *app = (AppState *)appstate;
+  return app->iterate();
+}
 
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
   if (event->type == SDL_EVENT_QUIT || event->type == SDL_EVENT_KEY_DOWN)
