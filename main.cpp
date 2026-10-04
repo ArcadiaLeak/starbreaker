@@ -30,9 +30,11 @@ private:
 
   FT_Library ft_library = nullptr;
   hb_font_t *hb_font = nullptr;
-
   hb_buffer_t *textBuffer = nullptr;
   std::string textString = "Hello world";
+
+  void render_text_bitmap(int &width, int &height,
+                          std::vector<std::byte> &out_bitmap);
 
   std::expected<void, std::string> initialize_font();
   std::expected<void, std::string> initialize_device();
@@ -57,9 +59,13 @@ std::expected<void, std::string> AppState::initialize_font() {
   FT_Face ft_face{};
   if (FT_New_Face(ft_library, "assets/DejaVuSans.ttf", 0, &ft_face))
     return std::unexpected{"FT_New_Face failed!"};
+
   FT_Set_Pixel_Sizes(ft_face, 0, 14);
+
   hb_font = hb_ft_font_create_referenced(ft_face);
   FT_Done_Face(ft_face);
+
+  textBuffer = hb_buffer_create();
   return std::expected<void, std::string>{};
 }
 
@@ -275,6 +281,7 @@ void AppState::quit() {
 void AppState::destroy_font() {
   if (not hb_font)
     return;
+  hb_buffer_destroy(textBuffer);
   hb_font_destroy(hb_font);
 }
 
@@ -356,6 +363,45 @@ SDL_AppResult AppState::iterate() {
 
   SDL_SubmitGPUCommandBuffer(cmd);
   return SDL_APP_CONTINUE;
+}
+
+void AppState::render_text_bitmap(int &width, int &height,
+                                  std::vector<std::byte> &out_bitmap) {
+  hb_buffer_reset(textBuffer);
+  hb_buffer_add_utf8(textBuffer, textString.data(), -1, 0, -1);
+  hb_buffer_guess_segment_properties(textBuffer);
+  hb_shape(hb_font, textBuffer, NULL, 0);
+
+  unsigned int glyph_count{};
+  hb_glyph_info_t *glyph_info =
+      hb_buffer_get_glyph_infos(textBuffer, &glyph_count);
+  hb_glyph_position_t *glyph_pos =
+      hb_buffer_get_glyph_positions(textBuffer, &glyph_count);
+
+  FT_Face face = hb_ft_font_get_ft_face(hb_font);
+  int pen_x = 0, pen_y = 0;
+  int min_y = INT32_MAX, max_y = INT32_MIN;
+
+  for (unsigned int i = 0; i < glyph_count; i++) {
+    FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_DEFAULT);
+    FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+
+    int x = pen_x + glyph_pos[i].x_offset / 64;
+    int y = pen_y - glyph_pos[i].y_offset / 64;
+
+    int top = y - face->glyph->bitmap_top;
+    int bottom = top + face->glyph->bitmap.rows;
+
+    if (top < min_y)
+      min_y = top;
+    if (bottom > max_y)
+      max_y = bottom;
+
+    width = x + face->glyph->bitmap_left + face->glyph->bitmap.width;
+    pen_x += glyph_pos[i].x_advance / 64;
+    pen_y += glyph_pos[i].y_advance / 64;
+  }
+  height = max_y - min_y;
 }
 
 SDL_AppResult SDL_AppIterate(void *appstate) {
