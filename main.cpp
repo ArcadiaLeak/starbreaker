@@ -390,33 +390,52 @@ AppState::build_glyph_textures(std::vector<GlyphTexture> &glyph_textures) {
   hb_glyph_position_t *glyph_pos =
       hb_buffer_get_glyph_positions(textBuffer, &glyph_count);
 
-  glyph_textures.clear();
-  glyph_textures.reserve(glyph_count);
+  std::vector<GlyphTexture> local_textures{};
   std::vector<SDL_GPUTransferBuffer *> pending_tbs{};
+  local_textures.reserve(glyph_count);
+  pending_tbs.reserve(glyph_count);
 
-  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
-  SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+  // RAII cleanup that runs on any early return.
+  auto cleanup = [&]() {
+    for (SDL_GPUTransferBuffer *tb : pending_tbs)
+      SDL_ReleaseGPUTransferBuffer(device, tb);
+    for (GlyphTexture &g : local_textures)
+      if (g.texture)
+        SDL_ReleaseGPUTexture(device, g.texture);
+  };
 
+  // ---- Pass 1: rasterize, create textures, fill transfer buffers ----
   FT_Face face = hb_ft_font_get_ft_face(hb_font);
   for (unsigned int i = 0; i < glyph_count; ++i) {
-    if (FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_RENDER) != 0)
-      continue;
+    if (FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_DEFAULT) != 0) {
+      cleanup();
+      return std::unexpected{
+          std::format("FT_Load_Glyph failed for glyph {}", i)};
+    }
 
     FT_GlyphSlot slot = face->glyph;
+
+    GlyphTexture gtex{};
+    gtex.bitmap_left = slot->bitmap_left;
+    gtex.bitmap_top = slot->bitmap_top;
+    gtex.x_advance = static_cast<float>(glyph_pos[i].x_advance) / 64.0f;
+    gtex.x_offset = static_cast<float>(glyph_pos[i].x_offset) / 64.0f;
+    gtex.y_offset = static_cast<float>(glyph_pos[i].y_offset) / 64.0f;
+
+    if (FT_Render_Glyph(slot, FT_RENDER_MODE_NORMAL) != 0) {
+      cleanup();
+      return std::unexpected{
+          std::format("FT_Render_Glyph failed for glyph {}", i)};
+    }
+
     FT_Bitmap &bmp = slot->bitmap;
+    gtex.width = static_cast<int>(bmp.width);
+    gtex.height = static_cast<int>(bmp.rows);
 
-    GlyphTexture gt{};
-    gt.width = static_cast<int>(bmp.width);
-    gt.height = static_cast<int>(bmp.rows);
-    gt.bitmap_left = slot->bitmap_left;
-    gt.bitmap_top = slot->bitmap_top;
-    gt.x_advance = static_cast<float>(glyph_pos[i].x_advance) / 64.0f;
-    gt.x_offset = static_cast<float>(glyph_pos[i].x_offset) / 64.0f;
-    gt.y_offset = static_cast<float>(glyph_pos[i].y_offset) / 64.0f;
-
-    if (gt.width == 0 || gt.height == 0) {
-      // Space or zero-size glyph — keep the metrics, no texture.
-      glyph_textures.push_back(gt);
+    if (gtex.width == 0 || gtex.height == 0) {
+      // Space or zero-ink glyph: keep metrics, no texture.
+      local_textures.push_back(gtex);
+      pending_tbs.push_back(nullptr);
       continue;
     }
 
@@ -425,50 +444,59 @@ AppState::build_glyph_textures(std::vector<GlyphTexture> &glyph_textures) {
     tex_info.type = SDL_GPU_TEXTURETYPE_2D;
     tex_info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
     tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    tex_info.width = static_cast<Uint32>(gt.width);
-    tex_info.height = static_cast<Uint32>(gt.height);
+    tex_info.width = static_cast<Uint32>(gtex.width);
+    tex_info.height = static_cast<Uint32>(gtex.height);
     tex_info.layer_count_or_depth = 1;
     tex_info.num_levels = 1;
     tex_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
 
-    gt.texture = SDL_CreateGPUTexture(device, &tex_info);
-    if (not gt.texture) {
-      SDL_CancelGPUCommandBuffer(cmd);
+    gtex.texture = SDL_CreateGPUTexture(device, &tex_info);
+    if (not gtex.texture) {
+      cleanup();
       return std::unexpected{
           std::format("SDL_CreateGPUTexture failed: {}", SDL_GetError())};
     }
+    local_textures.push_back(gtex);
 
     SDL_GPUTransferBufferCreateInfo tb_info{};
     tb_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    tb_info.size = static_cast<Uint32>(gt.width) * gt.height;
+    tb_info.size = static_cast<Uint32>(gtex.width) * gtex.height;
     SDL_GPUTransferBuffer *tb = SDL_CreateGPUTransferBuffer(device, &tb_info);
+    pending_tbs.push_back(tb);
 
     void *mapped = SDL_MapGPUTransferBuffer(device, tb, false);
     // Copy row-by-row to strip FreeType's pitch padding.
     uint8_t *dst_base = static_cast<uint8_t *>(mapped);
-    for (int row = 0; row < gt.height; ++row) {
+    for (int row = 0; row < gtex.height; ++row) {
       const uint8_t *src_row = bmp.buffer + row * bmp.pitch;
-      uint8_t *dst_row = dst_base + static_cast<size_t>(row) * gt.width;
-      memcpy(dst_row, src_row, gt.width);
+      uint8_t *dst_row = dst_base + static_cast<size_t>(row) * gtex.width;
+      memcpy(dst_row, src_row, gtex.width);
     }
     SDL_UnmapGPUTransferBuffer(device, tb);
+  }
+
+  // ---- Pass 2: single command buffer, single copy pass, N uploads ----
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
+  SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+
+  for (size_t i = 0; i < local_textures.size(); ++i) {
+    GlyphTexture &gtex = local_textures[i];
+    if (gtex.texture == nullptr)
+      continue;
 
     SDL_GPUTextureTransferInfo src{};
-    src.transfer_buffer = tb;
+    src.transfer_buffer = pending_tbs[i];
     src.offset = 0;
-    src.pixels_per_row = static_cast<Uint32>(gt.width);
-    src.rows_per_layer = static_cast<Uint32>(gt.height);
+    src.pixels_per_row = static_cast<Uint32>(gtex.width);
+    src.rows_per_layer = static_cast<Uint32>(gtex.height);
 
     SDL_GPUTextureRegion dst{};
-    dst.texture = gt.texture;
-    dst.w = static_cast<Uint32>(gt.width);
-    dst.h = static_cast<Uint32>(gt.height);
+    dst.texture = gtex.texture;
+    dst.w = static_cast<Uint32>(gtex.width);
+    dst.h = static_cast<Uint32>(gtex.height);
     dst.d = 1;
 
     SDL_UploadToGPUTexture(copy, &src, &dst, false);
-
-    pending_tbs.push_back(tb);
-    glyph_textures.push_back(gt);
   }
 
   SDL_EndGPUCopyPass(copy);
@@ -476,6 +504,7 @@ AppState::build_glyph_textures(std::vector<GlyphTexture> &glyph_textures) {
   for (SDL_GPUTransferBuffer *tb : pending_tbs)
     SDL_ReleaseGPUTransferBuffer(device, tb);
 
+  glyph_textures = std::move(local_textures);
   return std::expected<void, std::string>{};
 }
 
