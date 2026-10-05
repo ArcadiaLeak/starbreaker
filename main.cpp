@@ -1,4 +1,5 @@
 #include <array>
+#include <cstring>
 #include <expected>
 #include <format>
 #include <memory>
@@ -21,6 +22,17 @@ struct TextVertex {
   float uv[2];
 };
 
+struct GlyphTexture {
+  SDL_GPUTexture *texture = nullptr;
+  int width = 0;
+  int height = 0;
+  int bitmap_left = 0;
+  int bitmap_top = 0;
+  float x_advance = 0.0f;
+  float x_offset = 0.0f;
+  float y_offset = 0.0f;
+};
+
 class AppState {
 private:
   SDL_GPUDevice *device = nullptr;
@@ -33,8 +45,8 @@ private:
   hb_buffer_t *textBuffer = nullptr;
   std::string textString = "Hello world";
 
-  void render_text_bitmap(int &width, int &height,
-                          std::vector<std::byte> &out_bitmap);
+  std::expected<void, std::string>
+  build_glyph_textures(std::vector<GlyphTexture> &glyph_textures);
 
   std::expected<void, std::string> initialize_font();
   std::expected<void, std::string> initialize_device();
@@ -365,43 +377,106 @@ SDL_AppResult AppState::iterate() {
   return SDL_APP_CONTINUE;
 }
 
-void AppState::render_text_bitmap(int &width, int &height,
-                                  std::vector<std::byte> &out_bitmap) {
+std::expected<void, std::string>
+AppState::build_glyph_textures(std::vector<GlyphTexture> &glyph_textures) {
   hb_buffer_reset(textBuffer);
   hb_buffer_add_utf8(textBuffer, textString.data(), -1, 0, -1);
   hb_buffer_guess_segment_properties(textBuffer);
-  hb_shape(hb_font, textBuffer, NULL, 0);
+  hb_shape(hb_font, textBuffer, nullptr, 0);
 
-  unsigned int glyph_count{};
+  unsigned int glyph_count = 0;
   hb_glyph_info_t *glyph_info =
       hb_buffer_get_glyph_infos(textBuffer, &glyph_count);
   hb_glyph_position_t *glyph_pos =
       hb_buffer_get_glyph_positions(textBuffer, &glyph_count);
 
+  glyph_textures.clear();
+  glyph_textures.reserve(glyph_count);
+  std::vector<SDL_GPUTransferBuffer *> pending_tbs{};
+
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
+  SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+
   FT_Face face = hb_ft_font_get_ft_face(hb_font);
-  int pen_x = 0, pen_y = 0;
-  int min_y = INT32_MAX, max_y = INT32_MIN;
+  for (unsigned int i = 0; i < glyph_count; ++i) {
+    if (FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_RENDER) != 0)
+      continue;
 
-  for (unsigned int i = 0; i < glyph_count; i++) {
-    FT_Load_Glyph(face, glyph_info[i].codepoint, FT_LOAD_DEFAULT);
-    FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+    FT_GlyphSlot slot = face->glyph;
+    FT_Bitmap &bmp = slot->bitmap;
 
-    int x = pen_x + glyph_pos[i].x_offset / 64;
-    int y = pen_y - glyph_pos[i].y_offset / 64;
+    GlyphTexture gt{};
+    gt.width = static_cast<int>(bmp.width);
+    gt.height = static_cast<int>(bmp.rows);
+    gt.bitmap_left = slot->bitmap_left;
+    gt.bitmap_top = slot->bitmap_top;
+    gt.x_advance = static_cast<float>(glyph_pos[i].x_advance) / 64.0f;
+    gt.x_offset = static_cast<float>(glyph_pos[i].x_offset) / 64.0f;
+    gt.y_offset = static_cast<float>(glyph_pos[i].y_offset) / 64.0f;
 
-    int top = y - face->glyph->bitmap_top;
-    int bottom = top + face->glyph->bitmap.rows;
+    if (gt.width == 0 || gt.height == 0) {
+      // Space or zero-size glyph — keep the metrics, no texture.
+      glyph_textures.push_back(gt);
+      continue;
+    }
 
-    if (top < min_y)
-      min_y = top;
-    if (bottom > max_y)
-      max_y = bottom;
+    // Create an R8 texture for this glyph.
+    SDL_GPUTextureCreateInfo tex_info{};
+    tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+    tex_info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+    tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    tex_info.width = static_cast<Uint32>(gt.width);
+    tex_info.height = static_cast<Uint32>(gt.height);
+    tex_info.layer_count_or_depth = 1;
+    tex_info.num_levels = 1;
+    tex_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
 
-    width = x + face->glyph->bitmap_left + face->glyph->bitmap.width;
-    pen_x += glyph_pos[i].x_advance / 64;
-    pen_y += glyph_pos[i].y_advance / 64;
+    gt.texture = SDL_CreateGPUTexture(device, &tex_info);
+    if (not gt.texture) {
+      SDL_CancelGPUCommandBuffer(cmd);
+      return std::unexpected{
+          std::format("SDL_CreateGPUTexture failed: {}", SDL_GetError())};
+    }
+
+    SDL_GPUTransferBufferCreateInfo tb_info{};
+    tb_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    tb_info.size = static_cast<Uint32>(gt.width) * gt.height;
+    SDL_GPUTransferBuffer *tb = SDL_CreateGPUTransferBuffer(device, &tb_info);
+
+    void *mapped = SDL_MapGPUTransferBuffer(device, tb, false);
+    // Copy row-by-row to strip FreeType's pitch padding.
+    uint8_t *dst_base = static_cast<uint8_t *>(mapped);
+    for (int row = 0; row < gt.height; ++row) {
+      const uint8_t *src_row = bmp.buffer + row * bmp.pitch;
+      uint8_t *dst_row = dst_base + static_cast<size_t>(row) * gt.width;
+      memcpy(dst_row, src_row, gt.width);
+    }
+    SDL_UnmapGPUTransferBuffer(device, tb);
+
+    SDL_GPUTextureTransferInfo src{};
+    src.transfer_buffer = tb;
+    src.offset = 0;
+    src.pixels_per_row = static_cast<Uint32>(gt.width);
+    src.rows_per_layer = static_cast<Uint32>(gt.height);
+
+    SDL_GPUTextureRegion dst{};
+    dst.texture = gt.texture;
+    dst.w = static_cast<Uint32>(gt.width);
+    dst.h = static_cast<Uint32>(gt.height);
+    dst.d = 1;
+
+    SDL_UploadToGPUTexture(copy, &src, &dst, false);
+
+    pending_tbs.push_back(tb);
+    glyph_textures.push_back(gt);
   }
-  height = max_y - min_y;
+
+  SDL_EndGPUCopyPass(copy);
+  SDL_SubmitGPUCommandBuffer(cmd);
+  for (SDL_GPUTransferBuffer *tb : pending_tbs)
+    SDL_ReleaseGPUTransferBuffer(device, tb);
+
+  return std::expected<void, std::string>{};
 }
 
 SDL_AppResult SDL_AppIterate(void *appstate) {
