@@ -94,6 +94,87 @@ AppFont::~AppFont() noexcept {
     FT_Done_Face(ft_face);
 }
 
+class AppGPUCommandBuffer {
+private:
+  SDL_GPUCommandBuffer *cmd = nullptr;
+  SDL_GPUTexture *swapchain_texture = nullptr;
+  Uint32 swapchain_texture_width = 0;
+  Uint32 swapchain_texture_height = 0;
+
+  bool must_submit = false;
+
+public:
+  AppGPUCommandBuffer();
+  ~AppGPUCommandBuffer();
+
+  AppGPUCommandBuffer(const AppGPUCommandBuffer &) = delete;
+  AppGPUCommandBuffer &operator=(const AppGPUCommandBuffer &) = delete;
+  AppGPUCommandBuffer(AppGPUCommandBuffer &&) = delete;
+  AppGPUCommandBuffer &operator=(AppGPUCommandBuffer &&) = delete;
+
+  void wait_and_acquire_swapchain_texture(SDL_Window *window);
+  void mark_for_submit() { must_submit = true; }
+  void submit_now();
+  void cancel_now();
+
+  SDL_GPUTexture *get_swapchain_texture() { return swapchain_texture; }
+  Uint32 get_swapchain_texture_width() { return swapchain_texture_width; }
+  Uint32 get_swapchain_texture_height() { return swapchain_texture_height; }
+};
+
+AppGPUCommandBuffer::AppGPUCommandBuffer() {
+  cmd = SDL_AcquireGPUCommandBuffer(gpu_device);
+  if (cmd)
+    return;
+  throw std::runtime_error{
+      std::format("SDL_AcquireGPUCommandBuffer failed: {}", SDL_GetError())};
+}
+
+AppGPUCommandBuffer::~AppGPUCommandBuffer() {
+  if (not cmd)
+    return;
+  bool ok = false;
+  if (must_submit)
+    ok = SDL_SubmitGPUCommandBuffer(cmd);
+  else
+    ok = SDL_CancelGPUCommandBuffer(cmd);
+  if (not ok)
+    SDL_Log("Finalizing GPU command buffer failed: %s", SDL_GetError());
+}
+
+void AppGPUCommandBuffer::wait_and_acquire_swapchain_texture(
+    SDL_Window *window) {
+  bool ok = SDL_WaitAndAcquireGPUSwapchainTexture(
+      cmd, window, &swapchain_texture, &swapchain_texture_width,
+      &swapchain_texture_height);
+  if (not ok)
+    throw std::runtime_error{std::format(
+        "SDL_WaitAndAcquireGPUSwapchainTexture failed: {}", SDL_GetError())};
+  must_submit = true;
+}
+
+void AppGPUCommandBuffer::submit_now() {
+  if (not cmd)
+    return;
+  bool ok = SDL_SubmitGPUCommandBuffer(cmd);
+  cmd = nullptr;
+  if (ok)
+    return;
+  throw std::runtime_error{
+      std::format("SDL_SubmitGPUCommandBuffer failed: {}", SDL_GetError())};
+}
+
+void AppGPUCommandBuffer::cancel_now() {
+  if (not cmd)
+    return;
+  bool ok = SDL_CancelGPUCommandBuffer(cmd);
+  cmd = nullptr;
+  if (ok)
+    return;
+  throw std::runtime_error{
+      std::format("SDL_CancelGPUCommandBuffer failed: {}", SDL_GetError())};
+}
+
 class AppState {
 private:
   AppFont app_font;
