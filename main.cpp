@@ -35,31 +35,31 @@ struct GlyphTexture {
   float y_offset = 0.0f;
 };
 
-class FTLibraryScoped {
+class AppFreetype {
 private:
   FT_Library ft_library = nullptr;
 
 public:
   FT_Library get() const noexcept { return ft_library; }
 
-  FTLibraryScoped() {
+  AppFreetype() {
     if (FT_Init_FreeType(&ft_library))
       throw std::runtime_error{"FT_Init_FreeType failed!"};
   }
-  ~FTLibraryScoped() noexcept {
+  ~AppFreetype() noexcept {
     if (ft_library)
       FT_Done_FreeType(ft_library);
   }
 
-  FTLibraryScoped(const FTLibraryScoped &) = delete;
-  FTLibraryScoped &operator=(const FTLibraryScoped &) = delete;
-  FTLibraryScoped(FTLibraryScoped &&) = delete;
-  FTLibraryScoped &operator=(FTLibraryScoped &&) = delete;
+  AppFreetype(const AppFreetype &) = delete;
+  AppFreetype &operator=(const AppFreetype &) = delete;
+  AppFreetype(AppFreetype &&) = delete;
+  AppFreetype &operator=(AppFreetype &&) = delete;
 };
 
-class HBFontScoped {
+class AppFont {
 private:
-  std::shared_ptr<FTLibraryScoped> ft_library;
+  std::shared_ptr<AppFreetype> ft_library;
   FT_Face ft_face = nullptr;
   hb_font_t *hb_font = nullptr;
 
@@ -67,18 +67,18 @@ public:
   FT_Face get_face() const noexcept { return ft_face; }
   hb_font_t *get_font() const noexcept { return hb_font; }
 
-  HBFontScoped(std::shared_ptr<FTLibraryScoped> ft_lib, const char *filepath,
-               FT_UInt pixel_height);
-  ~HBFontScoped();
+  AppFont(std::shared_ptr<AppFreetype> ft_lib, const char *filepath,
+          FT_UInt pixel_height);
+  ~AppFont() noexcept;
 
-  HBFontScoped(const HBFontScoped &) = delete;
-  HBFontScoped &operator=(const HBFontScoped &) = delete;
-  HBFontScoped(HBFontScoped &&) = delete;
-  HBFontScoped &operator=(HBFontScoped &&) = delete;
+  AppFont(const AppFont &) = delete;
+  AppFont &operator=(const AppFont &) = delete;
+  AppFont(AppFont &&) = delete;
+  AppFont &operator=(AppFont &&) = delete;
 };
 
-HBFontScoped::HBFontScoped(std::shared_ptr<FTLibraryScoped> ft_lib,
-                           const char *filepath, FT_UInt pixel_height)
+AppFont::AppFont(std::shared_ptr<AppFreetype> ft_lib, const char *filepath,
+                 FT_UInt pixel_height)
     : ft_library{std::move(ft_lib)} {
   if (FT_New_Face(ft_library->get(), filepath, 0, &ft_face))
     throw std::runtime_error{"FT_New_Face failed!"};
@@ -90,7 +90,7 @@ HBFontScoped::HBFontScoped(std::shared_ptr<FTLibraryScoped> ft_lib,
   hb_font = hb_ft_font_create(ft_face, nullptr);
 }
 
-HBFontScoped::~HBFontScoped() noexcept {
+AppFont::~AppFont() noexcept {
   if (hb_font)
     hb_font_destroy(hb_font);
   if (ft_face)
@@ -99,8 +99,7 @@ HBFontScoped::~HBFontScoped() noexcept {
 
 class AppState {
 private:
-  hb_font_t *hb_font;
-  hb_buffer_t *textBuffer;
+  AppFont app_font;
 
   SDL_GPUDevice *device;
   SDL_Window *window;
@@ -110,6 +109,9 @@ private:
   std::string textString = "Hello world";
 
 public:
+  AppState(std::shared_ptr<AppFreetype> ft_lib)
+      : app_font{std::move(ft_lib), "assets/DejaVuSans.ttf", 14} {}
+
   SDL_AppResult iterate();
   SDL_AppResult initialize();
 };
@@ -118,14 +120,8 @@ SDL_AppResult AppState::initialize() {
   if (not SDL_Init(SDL_INIT_VIDEO)) {
     SDL_Log("SDL_Init failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
-  }
-  try {
-    FTLibraryScoped ft_library_scoped{};
+  } else
     return SDL_APP_CONTINUE;
-  } catch (const std::runtime_error &e) {
-    SDL_Log("%s", e.what());
-    return SDL_APP_FAILURE;
-  }
 }
 
 SDL_AppResult AppState::iterate() {
@@ -156,9 +152,14 @@ SDL_AppResult AppState::iterate() {
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
-  AppState *app = new AppState{};
-  *appstate = app;
-  return app->initialize();
+  try {
+    AppState *app = new AppState{std::make_shared<AppFreetype>()};
+    *appstate = app;
+    return app->initialize();
+  } catch (const std::runtime_error &e) {
+    SDL_Log("%s", e.what());
+    return SDL_APP_FAILURE;
+  }
 }
 
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
