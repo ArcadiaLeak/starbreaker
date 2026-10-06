@@ -35,8 +35,8 @@ struct GlyphTexture {
   float y_offset = 0.0f;
 };
 
-static FT_Library ft_library = nullptr;
-static SDL_GPUDevice *gpu_device = nullptr;
+static FT_Library global_ft_library = nullptr;
+static SDL_GPUDevice *global_gpu_device = nullptr;
 
 static bool initialize_gpu_device() {
   SDL_GPUVulkanOptions vulkan_options{};
@@ -52,14 +52,15 @@ static bool initialize_gpu_device() {
   SDL_SetPointerProperty(device_props,
                          SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER,
                          &vulkan_options);
-  gpu_device = SDL_CreateGPUDeviceWithProperties(device_props);
+  global_gpu_device = SDL_CreateGPUDeviceWithProperties(device_props);
   SDL_DestroyProperties(device_props);
 
-  return static_cast<bool>(gpu_device);
+  return static_cast<bool>(global_gpu_device);
 }
 
 class AppFont {
 private:
+  FT_Library ft_library = nullptr;
   FT_Face ft_face = nullptr;
   hb_font_t *hb_font = nullptr;
 
@@ -67,7 +68,7 @@ public:
   FT_Face get_face() const noexcept { return ft_face; }
   hb_font_t *get_font() const noexcept { return hb_font; }
 
-  AppFont(const char *filepath, FT_UInt pixel_height);
+  AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height);
   ~AppFont() noexcept;
 
   AppFont(const AppFont &) = delete;
@@ -76,7 +77,8 @@ public:
   AppFont &operator=(AppFont &&) = delete;
 };
 
-AppFont::AppFont(const char *filepath, FT_UInt pixel_height) {
+AppFont::AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height)
+    : ft_library{ft_lib} {
   if (FT_New_Face(ft_library, filepath, 0, &ft_face))
     throw std::runtime_error{"FT_New_Face failed!"};
   if (FT_Set_Pixel_Sizes(ft_face, 0, pixel_height)) {
@@ -96,6 +98,7 @@ AppFont::~AppFont() noexcept {
 
 class AppGPUCommandBuffer {
 private:
+  SDL_GPUDevice *gpu_device = nullptr;
   SDL_GPUCommandBuffer *cmd = nullptr;
   SDL_GPUTexture *swapchain_texture = nullptr;
   Uint32 swapchain_texture_width = 0;
@@ -104,7 +107,7 @@ private:
   bool must_submit = false;
 
 public:
-  AppGPUCommandBuffer();
+  AppGPUCommandBuffer(SDL_GPUDevice *device);
   ~AppGPUCommandBuffer();
 
   AppGPUCommandBuffer(const AppGPUCommandBuffer &) = delete;
@@ -122,7 +125,8 @@ public:
   Uint32 get_swapchain_texture_height() { return swapchain_texture_height; }
 };
 
-AppGPUCommandBuffer::AppGPUCommandBuffer() {
+AppGPUCommandBuffer::AppGPUCommandBuffer(SDL_GPUDevice *device)
+    : gpu_device{device} {
   cmd = SDL_AcquireGPUCommandBuffer(gpu_device);
   if (cmd)
     return;
@@ -139,7 +143,7 @@ AppGPUCommandBuffer::~AppGPUCommandBuffer() {
   else
     ok = SDL_CancelGPUCommandBuffer(cmd);
   if (not ok)
-    SDL_Log("Finalizing GPU command buffer failed: %s", SDL_GetError());
+    SDL_Log("GPU command buffer finalization failed: %s", SDL_GetError());
 }
 
 void AppGPUCommandBuffer::wait_and_acquire_swapchain_texture(
@@ -186,12 +190,13 @@ private:
   std::string textString = "Hello world";
 
 public:
-  AppState() : app_font{"assets/DejaVuSans.ttf", 14} {}
+  AppState(FT_Library ft_library)
+      : app_font{ft_library, "assets/DejaVuSans.ttf", 14} {}
   SDL_AppResult iterate();
 };
 
 SDL_AppResult AppState::iterate() {
-  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(gpu_device);
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(global_gpu_device);
   if (not cmd)
     return SDL_APP_FAILURE;
 
@@ -226,12 +231,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_Log("Failed to create GPU device: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  if (FT_Init_FreeType(&ft_library)) {
+  if (FT_Init_FreeType(&global_ft_library)) {
     SDL_Log("FT_Init_FreeType failed!");
     return SDL_APP_FAILURE;
   }
   try {
-    AppState *app = new AppState{};
+    AppState *app = new AppState{global_ft_library};
     *appstate = app;
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
@@ -243,14 +248,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
   AppState *app = (AppState *)appstate;
   delete app;
-  if (ft_library) {
-    FT_Done_FreeType(ft_library);
-    ft_library = nullptr;
+  if (global_ft_library) {
+    FT_Done_FreeType(global_ft_library);
+    global_ft_library = nullptr;
   }
-  if (gpu_device) {
-    SDL_WaitForGPUIdle(gpu_device);
-    SDL_DestroyGPUDevice(gpu_device);
-    gpu_device = nullptr;
+  if (global_gpu_device) {
+    SDL_WaitForGPUIdle(global_gpu_device);
+    SDL_DestroyGPUDevice(global_gpu_device);
+    global_gpu_device = nullptr;
   }
 }
 
