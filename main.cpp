@@ -40,6 +40,8 @@ private:
   FT_Library ft_library = nullptr;
 
 public:
+  FT_Library get() const noexcept { return ft_library; }
+
   FTLibraryScoped() {
     if (FT_Init_FreeType(&ft_library))
       throw std::runtime_error{"FT_Init_FreeType failed!"};
@@ -48,7 +50,6 @@ public:
     if (ft_library)
       FT_Done_FreeType(ft_library);
   }
-  FT_Library get() const noexcept { return ft_library; }
 
   FTLibraryScoped(const FTLibraryScoped &) = delete;
   FTLibraryScoped &operator=(const FTLibraryScoped &) = delete;
@@ -58,24 +59,43 @@ public:
 
 class HBFontScoped {
 private:
+  std::shared_ptr<FTLibraryScoped> ft_library;
+  FT_Face ft_face = nullptr;
   hb_font_t *hb_font = nullptr;
 
 public:
-  HBFontScoped() {
-    if (FT_Init_FreeType(&ft_library))
-      throw std::runtime_error{"FT_Init_FreeType failed!"};
-  }
-  ~HBFontScoped() noexcept {
-    if (ft_library)
-      FT_Done_FreeType(ft_library);
-  }
-  hb_font_t *get() const noexcept { return ft_library; }
+  FT_Face get_face() const noexcept { return ft_face; }
+  hb_font_t *get_font() const noexcept { return hb_font; }
+
+  HBFontScoped(std::shared_ptr<FTLibraryScoped> ft_lib, const char *filepath,
+               FT_UInt pixel_height);
+  ~HBFontScoped();
 
   HBFontScoped(const HBFontScoped &) = delete;
   HBFontScoped &operator=(const HBFontScoped &) = delete;
   HBFontScoped(HBFontScoped &&) = delete;
   HBFontScoped &operator=(HBFontScoped &&) = delete;
 };
+
+HBFontScoped::HBFontScoped(std::shared_ptr<FTLibraryScoped> ft_lib,
+                           const char *filepath, FT_UInt pixel_height)
+    : ft_library{std::move(ft_lib)} {
+  if (FT_New_Face(ft_library->get(), filepath, 0, &ft_face))
+    throw std::runtime_error{"FT_New_Face failed!"};
+  if (FT_Set_Pixel_Sizes(ft_face, 0, pixel_height)) {
+    FT_Done_Face(ft_face);
+    ft_face = nullptr;
+    throw std::runtime_error{"FT_Set_Pixel_Sizes failed!"};
+  }
+  hb_font = hb_ft_font_create(ft_face, nullptr);
+}
+
+HBFontScoped::~HBFontScoped() noexcept {
+  if (hb_font)
+    hb_font_destroy(hb_font);
+  if (ft_face)
+    FT_Done_Face(ft_face);
+}
 
 class AppState {
 private:
