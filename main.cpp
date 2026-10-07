@@ -1,4 +1,3 @@
-#include <SDL3/SDL_init.h>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -7,6 +6,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 #define SDL_MAIN_USE_CALLBACKS 1
@@ -97,16 +97,16 @@ AppFont::~AppFont() noexcept {
 }
 
 class AppGPUCommandBuffer {
-private:
-  SDL_GPUDevice *gpu_device = nullptr;
-  SDL_GPUCommandBuffer *cmd = nullptr;
-  SDL_GPUTexture *swapchain_texture = nullptr;
-  Uint32 swapchain_texture_width = 0;
-  Uint32 swapchain_texture_height = 0;
-
-  bool must_submit = false;
-
 public:
+  struct Empty {};
+  struct Acquired {};
+  struct HasSwapchainTexture {
+    SDL_GPUTexture *swapchain_texture = nullptr;
+    Uint32 swapchain_texture_width = 0;
+    Uint32 swapchain_texture_height = 0;
+  };
+  using Status = std::variant<Empty, Acquired, HasSwapchainTexture>;
+
   AppGPUCommandBuffer(SDL_GPUDevice *device);
   ~AppGPUCommandBuffer();
 
@@ -116,13 +116,17 @@ public:
   AppGPUCommandBuffer &operator=(AppGPUCommandBuffer &&) = delete;
 
   void wait_and_acquire_swapchain_texture(SDL_Window *window);
-  void mark_for_submit() { must_submit = true; }
   void submit_now();
   void cancel_now();
 
-  SDL_GPUTexture *get_swapchain_texture() { return swapchain_texture; }
-  Uint32 get_swapchain_texture_width() { return swapchain_texture_width; }
-  Uint32 get_swapchain_texture_height() { return swapchain_texture_height; }
+  Status get_status() { return status; }
+  SDL_GPUCommandBuffer *get() { return cmd; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUCommandBuffer *cmd = nullptr;
+
+  Status status;
 };
 
 AppGPUCommandBuffer::AppGPUCommandBuffer(SDL_GPUDevice *device)
@@ -138,7 +142,7 @@ AppGPUCommandBuffer::~AppGPUCommandBuffer() {
   if (not cmd)
     return;
   bool ok = false;
-  if (must_submit)
+  if (std::holds_alternative<HasSwapchainTexture>(status))
     ok = SDL_SubmitGPUCommandBuffer(cmd);
   else
     ok = SDL_CancelGPUCommandBuffer(cmd);
@@ -148,13 +152,15 @@ AppGPUCommandBuffer::~AppGPUCommandBuffer() {
 
 void AppGPUCommandBuffer::wait_and_acquire_swapchain_texture(
     SDL_Window *window) {
+  HasSwapchainTexture has_swapchain_texture{};
   bool ok = SDL_WaitAndAcquireGPUSwapchainTexture(
-      cmd, window, &swapchain_texture, &swapchain_texture_width,
-      &swapchain_texture_height);
+      cmd, window, &has_swapchain_texture.swapchain_texture,
+      &has_swapchain_texture.swapchain_texture_width,
+      &has_swapchain_texture.swapchain_texture_height);
   if (not ok)
     throw std::runtime_error{std::format(
         "SDL_WaitAndAcquireGPUSwapchainTexture failed: {}", SDL_GetError())};
-  must_submit = true;
+  status = has_swapchain_texture;
 }
 
 void AppGPUCommandBuffer::submit_now() {
@@ -196,17 +202,14 @@ public:
 };
 
 SDL_AppResult AppState::iterate() {
-  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(global_gpu_device);
-  if (not cmd)
-    return SDL_APP_FAILURE;
+  AppGPUCommandBuffer cmd{global_gpu_device};
+  cmd.wait_and_acquire_swapchain_texture(window);
 
-  SDL_GPUTexture *swapchain = nullptr;
-  Uint32 sw = 0, sh = 0;
-  SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window, &swapchain, &sw, &sh);
-  if (not swapchain) {
-    SDL_SubmitGPUCommandBuffer(cmd);
+  SDL_GPUTexture *swapchain =
+      std::get<AppGPUCommandBuffer::HasSwapchainTexture>(cmd.get_status())
+          .swapchain_texture;
+  if (not swapchain)
     return SDL_APP_CONTINUE;
-  }
 
   SDL_GPUColorTargetInfo colorTarget{};
   colorTarget.texture = swapchain;
@@ -215,10 +218,8 @@ SDL_AppResult AppState::iterate() {
   colorTarget.store_op = SDL_GPU_STOREOP_STORE;
 
   SDL_GPURenderPass *renderPass =
-      SDL_BeginGPURenderPass(cmd, &colorTarget, 1, nullptr);
+      SDL_BeginGPURenderPass(cmd.get(), &colorTarget, 1, nullptr);
   SDL_EndGPURenderPass(renderPass);
-
-  SDL_SubmitGPUCommandBuffer(cmd);
   return SDL_APP_CONTINUE;
 }
 
