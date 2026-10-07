@@ -1,11 +1,11 @@
 #include <array>
 #include <cmath>
 #include <cstring>
-#include <expected>
 #include <format>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -99,13 +99,16 @@ AppFont::~AppFont() noexcept {
 class AppGPUCommandBuffer {
 public:
   struct Empty {};
-  struct Acquired {};
-  struct HasSwapchainTexture {
+  struct AcquiredBuffer {
+    SDL_GPUCommandBuffer *buffer = nullptr;
+  };
+  struct AcquiredTexture {
+    SDL_GPUCommandBuffer *buffer = nullptr;
     SDL_GPUTexture *swapchain_texture = nullptr;
     Uint32 swapchain_texture_width = 0;
     Uint32 swapchain_texture_height = 0;
   };
-  using Status = std::variant<Empty, Acquired, HasSwapchainTexture>;
+  using Status = std::variant<Empty, AcquiredBuffer, AcquiredTexture>;
 
   AppGPUCommandBuffer(SDL_GPUDevice *device);
   ~AppGPUCommandBuffer();
@@ -119,70 +122,91 @@ public:
   void submit_now();
   void cancel_now();
 
-  Status get_status() { return status; }
-  SDL_GPUCommandBuffer *get() { return cmd; }
+  SDL_GPUCommandBuffer *get_buffer() const;
+  SDL_GPUTexture *get_swapchain_texture() const;
 
 private:
-  SDL_GPUDevice *gpu_device = nullptr;
-  SDL_GPUCommandBuffer *cmd = nullptr;
-
   Status status;
 };
 
-AppGPUCommandBuffer::AppGPUCommandBuffer(SDL_GPUDevice *device)
-    : gpu_device{device} {
-  cmd = SDL_AcquireGPUCommandBuffer(gpu_device);
-  if (cmd)
+AppGPUCommandBuffer::AppGPUCommandBuffer(SDL_GPUDevice *device) {
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
+  if (cmd) {
+    status = AcquiredBuffer{cmd};
     return;
+  }
   throw std::runtime_error{
       std::format("SDL_AcquireGPUCommandBuffer failed: {}", SDL_GetError())};
 }
 
 AppGPUCommandBuffer::~AppGPUCommandBuffer() {
-  if (not cmd)
+  if (std::holds_alternative<Empty>(status))
     return;
-  bool ok = false;
-  if (std::holds_alternative<HasSwapchainTexture>(status))
-    ok = SDL_SubmitGPUCommandBuffer(cmd);
-  else
-    ok = SDL_CancelGPUCommandBuffer(cmd);
-  if (not ok)
-    SDL_Log("GPU command buffer finalization failed: %s", SDL_GetError());
+  if (AcquiredBuffer *acquired = std::get_if<AcquiredBuffer>(&status);
+      acquired) {
+    if (not SDL_CancelGPUCommandBuffer(acquired->buffer))
+      SDL_Log("SDL_CancelGPUCommandBuffer finalization failed: %s",
+              SDL_GetError());
+    return;
+  }
+  if (AcquiredTexture *acquired = std::get_if<AcquiredTexture>(&status);
+      acquired) {
+    if (not SDL_SubmitGPUCommandBuffer(acquired->buffer))
+      SDL_Log("SDL_SubmitGPUCommandBuffer finalization failed: %s",
+              SDL_GetError());
+    return;
+  }
+  std::unreachable();
 }
 
 void AppGPUCommandBuffer::wait_and_acquire_swapchain_texture(
     SDL_Window *window) {
-  HasSwapchainTexture has_swapchain_texture{};
+  if (not std::holds_alternative<AcquiredBuffer>(status))
+    return;
+  AcquiredTexture acquired_texture{get_buffer()};
   bool ok = SDL_WaitAndAcquireGPUSwapchainTexture(
-      cmd, window, &has_swapchain_texture.swapchain_texture,
-      &has_swapchain_texture.swapchain_texture_width,
-      &has_swapchain_texture.swapchain_texture_height);
+      std::get<AcquiredBuffer>(status).buffer, window,
+      &acquired_texture.swapchain_texture,
+      &acquired_texture.swapchain_texture_width,
+      &acquired_texture.swapchain_texture_height);
   if (not ok)
     throw std::runtime_error{std::format(
         "SDL_WaitAndAcquireGPUSwapchainTexture failed: {}", SDL_GetError())};
-  status = has_swapchain_texture;
+  status = acquired_texture;
 }
 
 void AppGPUCommandBuffer::submit_now() {
+  SDL_GPUCommandBuffer *cmd = get_buffer();
   if (not cmd)
     return;
-  bool ok = SDL_SubmitGPUCommandBuffer(cmd);
-  cmd = nullptr;
-  if (ok)
-    return;
-  throw std::runtime_error{
-      std::format("SDL_SubmitGPUCommandBuffer failed: {}", SDL_GetError())};
+  if (not SDL_SubmitGPUCommandBuffer(cmd))
+    throw std::runtime_error{
+        std::format("SDL_SubmitGPUCommandBuffer failed: {}", SDL_GetError())};
+  status.emplace<Empty>();
 }
 
 void AppGPUCommandBuffer::cancel_now() {
+  SDL_GPUCommandBuffer *cmd = get_buffer();
   if (not cmd)
     return;
-  bool ok = SDL_CancelGPUCommandBuffer(cmd);
-  cmd = nullptr;
-  if (ok)
-    return;
-  throw std::runtime_error{
-      std::format("SDL_CancelGPUCommandBuffer failed: {}", SDL_GetError())};
+  if (not SDL_CancelGPUCommandBuffer(cmd))
+    throw std::runtime_error{
+        std::format("SDL_CancelGPUCommandBuffer failed: {}", SDL_GetError())};
+  status.emplace<Empty>();
+}
+
+SDL_GPUCommandBuffer *AppGPUCommandBuffer::get_buffer() const {
+  if (std::holds_alternative<AcquiredBuffer>(status))
+    return std::get<AcquiredBuffer>(status).buffer;
+  if (std::holds_alternative<AcquiredTexture>(status))
+    return std::get<AcquiredTexture>(status).buffer;
+  return nullptr;
+}
+
+SDL_GPUTexture *AppGPUCommandBuffer::get_swapchain_texture() const {
+  if (std::holds_alternative<AcquiredTexture>(status))
+    return std::get<AcquiredTexture>(status).swapchain_texture;
+  return nullptr;
 }
 
 class AppState {
@@ -205,9 +229,7 @@ SDL_AppResult AppState::iterate() {
   AppGPUCommandBuffer cmd{global_gpu_device};
   cmd.wait_and_acquire_swapchain_texture(window);
 
-  SDL_GPUTexture *swapchain =
-      std::get<AppGPUCommandBuffer::HasSwapchainTexture>(cmd.get_status())
-          .swapchain_texture;
+  SDL_GPUTexture *swapchain = cmd.get_swapchain_texture();
   if (not swapchain)
     return SDL_APP_CONTINUE;
 
@@ -218,7 +240,7 @@ SDL_AppResult AppState::iterate() {
   colorTarget.store_op = SDL_GPU_STOREOP_STORE;
 
   SDL_GPURenderPass *renderPass =
-      SDL_BeginGPURenderPass(cmd.get(), &colorTarget, 1, nullptr);
+      SDL_BeginGPURenderPass(cmd.get_buffer(), &colorTarget, 1, nullptr);
   SDL_EndGPURenderPass(renderPass);
   return SDL_APP_CONTINUE;
 }
