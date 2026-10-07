@@ -35,27 +35,6 @@ struct GlyphTexture {
 };
 
 static FT_Library global_ft_library = nullptr;
-static SDL_GPUDevice *global_gpu_device = nullptr;
-
-static bool initialize_gpu_device() {
-  SDL_GPUVulkanOptions vulkan_options{};
-  vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
-
-  SDL_PropertiesID device_props = SDL_CreateProperties();
-  SDL_SetStringProperty(device_props, SDL_PROP_GPU_DEVICE_CREATE_NAME_STRING,
-                        "vulkan");
-  SDL_SetBooleanProperty(device_props,
-                         SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, true);
-  SDL_SetBooleanProperty(
-      device_props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
-  SDL_SetPointerProperty(device_props,
-                         SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER,
-                         &vulkan_options);
-  global_gpu_device = SDL_CreateGPUDeviceWithProperties(device_props);
-  SDL_DestroyProperties(device_props);
-
-  return static_cast<bool>(global_gpu_device);
-}
 
 class AppFont {
 private:
@@ -68,7 +47,7 @@ public:
   hb_font_t *get_font() const noexcept { return hb_font; }
 
   AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height);
-  ~AppFont() noexcept;
+  ~AppFont();
 
   AppFont(const AppFont &) = delete;
   AppFont &operator=(const AppFont &) = delete;
@@ -88,18 +67,91 @@ AppFont::AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height)
   hb_font = hb_ft_font_create(ft_face, nullptr);
 }
 
-AppFont::~AppFont() noexcept {
+AppFont::~AppFont() {
   if (hb_font)
     hb_font_destroy(hb_font);
   if (ft_face)
     FT_Done_Face(ft_face);
 }
 
+class AppGPUDevice {
+public:
+  AppGPUDevice();
+  ~AppGPUDevice();
+
+  AppGPUDevice(const AppGPUDevice &) = delete;
+  AppGPUDevice &operator=(const AppGPUDevice &) = delete;
+  AppGPUDevice(AppGPUDevice &&) = delete;
+  AppGPUDevice &operator=(AppGPUDevice &&) = delete;
+
+  SDL_GPUDevice *get() { return gpu_device; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+};
+
+AppGPUDevice::AppGPUDevice() {
+  SDL_GPUVulkanOptions vulkan_options{};
+  vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
+
+  SDL_PropertiesID device_props = SDL_CreateProperties();
+  SDL_SetStringProperty(device_props, SDL_PROP_GPU_DEVICE_CREATE_NAME_STRING,
+                        "vulkan");
+  SDL_SetBooleanProperty(device_props,
+                         SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, true);
+  SDL_SetBooleanProperty(
+      device_props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
+  SDL_SetPointerProperty(device_props,
+                         SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER,
+                         &vulkan_options);
+  gpu_device = SDL_CreateGPUDeviceWithProperties(device_props);
+  SDL_DestroyProperties(device_props);
+
+  if (not gpu_device)
+    throw std::runtime_error{"Failed to create GPU device!"};
+}
+
+AppGPUDevice::~AppGPUDevice() {
+  SDL_WaitForGPUIdle(gpu_device);
+  SDL_DestroyGPUDevice(gpu_device);
+}
+
+class AppWindow {
+public:
+  AppWindow(SDL_GPUDevice *device);
+  ~AppWindow();
+
+  AppWindow(const AppWindow &) = delete;
+  AppWindow &operator=(const AppWindow &) = delete;
+  AppWindow(AppWindow &&) = delete;
+  AppWindow &operator=(AppWindow &&) = delete;
+
+private:
+  SDL_Window *window = nullptr;
+  SDL_GPUDevice *gpu_device = nullptr;
+};
+
+AppWindow::AppWindow(SDL_GPUDevice *device) : gpu_device{device} {
+  window =
+      SDL_CreateWindow("Hello GPU", 800, 600,
+                       SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+  if (not window)
+    throw std::runtime_error{"SDL_CreateWindow failed!"};
+  if (not SDL_ClaimWindowForGPUDevice(device, window))
+    throw std::runtime_error{"SDL_ClaimWindowForGPUDevice failed!"};
+}
+
+AppWindow::~AppWindow() {
+  SDL_ReleaseWindowFromGPUDevice(gpu_device, window);
+  SDL_DestroyWindow(window);
+}
+
 class AppState {
 private:
   AppFont app_font;
 
-  SDL_Window *window;
+  AppGPUDevice app_device;
+  AppWindow app_window;
   SDL_GPUSampler *sampler;
   SDL_GPUGraphicsPipeline *pipeline;
 
@@ -107,7 +159,8 @@ private:
 
 public:
   AppState(FT_Library ft_library)
-      : app_font{ft_library, "assets/DejaVuSans.ttf", 14} {}
+      : app_font{ft_library, "assets/DejaVuSans.ttf", 14}, app_device{},
+        app_window{app_device.get()} {}
   SDL_AppResult iterate();
 };
 
@@ -116,10 +169,6 @@ SDL_AppResult AppState::iterate() { return SDL_APP_CONTINUE; }
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   if (not SDL_Init(SDL_INIT_VIDEO)) {
     SDL_Log("SDL_Init failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
-  if (not initialize_gpu_device()) {
-    SDL_Log("Failed to create GPU device: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
   if (FT_Init_FreeType(&global_ft_library)) {
@@ -142,11 +191,6 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
   if (global_ft_library) {
     FT_Done_FreeType(global_ft_library);
     global_ft_library = nullptr;
-  }
-  if (global_gpu_device) {
-    SDL_WaitForGPUIdle(global_gpu_device);
-    SDL_DestroyGPUDevice(global_gpu_device);
-    global_gpu_device = nullptr;
   }
 }
 
