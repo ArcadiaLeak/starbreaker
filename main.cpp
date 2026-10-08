@@ -238,9 +238,49 @@ AppGPUShader::~AppGPUShader() {
   SDL_ReleaseGPUShader(gpu_device, gpu_shader);
 }
 
+class AppGPUSampler {
+public:
+  AppGPUSampler(SDL_GPUDevice *device);
+  ~AppGPUSampler();
+
+  AppGPUSampler(const AppGPUSampler &) = delete;
+  AppGPUSampler &operator=(const AppGPUSampler &) = delete;
+  AppGPUSampler(AppGPUSampler &&) = delete;
+  AppGPUSampler &operator=(AppGPUSampler &&) = delete;
+
+  SDL_GPUSampler *get() { return gpu_sampler; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUSampler *gpu_sampler = nullptr;
+};
+
+AppGPUSampler::AppGPUSampler(SDL_GPUDevice *device) : gpu_device{device} {
+  SDL_GPUSamplerCreateInfo samplerInfo{};
+  samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
+  samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
+  samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+  samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+  samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+  samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+
+  gpu_sampler = SDL_CreateGPUSampler(gpu_device, &samplerInfo);
+  if (not gpu_sampler) {
+    std::string errorMsg{"SDL_CreateGPUSampler failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+}
+
+AppGPUSampler::~AppGPUSampler() {
+  if (not gpu_sampler)
+    return;
+  SDL_ReleaseGPUSampler(gpu_device, gpu_sampler);
+}
+
 class MainGPUGraphicsPipeline {
 public:
-  MainGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *win);
+  MainGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window);
   ~MainGPUGraphicsPipeline();
 
   MainGPUGraphicsPipeline(const MainGPUGraphicsPipeline &) = delete;
@@ -338,7 +378,7 @@ private:
 
   AppGPUDevice app_device;
   AppWindow app_window;
-  SDL_GPUSampler *sampler;
+  AppGPUSampler app_sampler;
   MainGPUGraphicsPipeline app_pipeline;
 
   std::string textString = "Hello world";
@@ -346,12 +386,45 @@ private:
 public:
   AppState(FT_Library ft_library)
       : app_font{ft_library, "assets/DejaVuSans.ttf", 14}, app_device{},
-        app_window{app_device.get()},
+        app_window{app_device.get()}, app_sampler{app_device.get()},
         app_pipeline{app_device.get(), app_window.get()} {}
   SDL_AppResult iterate();
 };
 
-SDL_AppResult AppState::iterate() { return SDL_APP_CONTINUE; }
+SDL_AppResult AppState::iterate() {
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(app_device.get());
+  if (not cmd) {
+    SDL_Log("SDL_AcquireGPUCommandBuffer failed: %s", SDL_GetError());
+    return SDL_APP_FAILURE;
+  }
+
+  SDL_GPUTexture *swapchain = nullptr;
+  Uint32 sw = 0, sh = 0;
+  if (not SDL_WaitAndAcquireGPUSwapchainTexture(cmd, app_window.get(),
+                                                &swapchain, &sw, &sh)) {
+    SDL_Log("SDL_WaitAndAcquireGPUSwapchainTexture failed: %s", SDL_GetError());
+    std::terminate();
+  }
+
+  if (swapchain) {
+    SDL_GPUColorTargetInfo colorTarget{};
+    colorTarget.texture = swapchain;
+    colorTarget.clear_color = {0.08f, 0.08f, 0.10f, 1.0f};
+    colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+    colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+
+    SDL_GPURenderPass *renderPass =
+        SDL_BeginGPURenderPass(cmd, &colorTarget, 1, nullptr);
+    SDL_EndGPURenderPass(renderPass);
+  }
+
+  if (SDL_SubmitGPUCommandBuffer(cmd))
+    return SDL_APP_CONTINUE;
+  else {
+    SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
+    std::terminate();
+  }
+}
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   if (not SDL_Init(SDL_INIT_VIDEO)) {
