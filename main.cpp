@@ -65,6 +65,7 @@ AppFont::AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height)
     throw std::runtime_error{"FT_Set_Pixel_Sizes failed!"};
   }
   hb_font = hb_ft_font_create(ft_face, nullptr);
+  hb_ft_font_set_load_flags(hb_font, FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
 }
 
 AppFont::~AppFont() {
@@ -468,6 +469,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   try {
     AppState *app = new AppState{global_ft_library};
     *appstate = app;
+    app->shape_text_string();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[App] %s", e.what());
