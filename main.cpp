@@ -114,6 +114,8 @@ AppGPUDevice::AppGPUDevice() {
 }
 
 AppGPUDevice::~AppGPUDevice() {
+  if (not gpu_device)
+    return;
   SDL_WaitForGPUIdle(gpu_device);
   SDL_DestroyGPUDevice(gpu_device);
 }
@@ -127,6 +129,8 @@ public:
   AppWindow &operator=(const AppWindow &) = delete;
   AppWindow(AppWindow &&) = delete;
   AppWindow &operator=(AppWindow &&) = delete;
+
+  SDL_Window *get() { return window; }
 
 private:
   SDL_Window *window = nullptr;
@@ -144,6 +148,8 @@ AppWindow::AppWindow(SDL_GPUDevice *device) : gpu_device{device} {
 }
 
 AppWindow::~AppWindow() {
+  if (not window)
+    return;
   SDL_ReleaseWindowFromGPUDevice(gpu_device, window);
   SDL_DestroyWindow(window);
 }
@@ -151,7 +157,7 @@ AppWindow::~AppWindow() {
 class AppFile {
 public:
   AppFile(const char *filepath);
-  ~AppFile() { SDL_free(file_data); }
+  ~AppFile();
 
   AppFile(const AppFile &) = delete;
   AppFile &operator=(const AppFile &) = delete;
@@ -175,6 +181,12 @@ AppFile::AppFile(const char *filepath) {
   }
 }
 
+AppFile::~AppFile() {
+  if (not file_data)
+    return;
+  SDL_free(file_data);
+}
+
 class AppGPUShader {
 public:
   struct CreateInfo {
@@ -185,7 +197,7 @@ public:
   };
 
   AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo);
-  ~AppGPUShader() { SDL_ReleaseGPUShader(gpu_device, gpu_shader); }
+  ~AppGPUShader();
 
   AppGPUShader(const AppGPUShader &) = delete;
   AppGPUShader &operator=(const AppGPUShader &) = delete;
@@ -220,6 +232,106 @@ AppGPUShader::AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo)
   }
 }
 
+AppGPUShader::~AppGPUShader() {
+  if (not gpu_shader)
+    return;
+  SDL_ReleaseGPUShader(gpu_device, gpu_shader);
+}
+
+class MainGPUGraphicsPipeline {
+public:
+  MainGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *win);
+  ~MainGPUGraphicsPipeline();
+
+  MainGPUGraphicsPipeline(const MainGPUGraphicsPipeline &) = delete;
+  MainGPUGraphicsPipeline &operator=(const MainGPUGraphicsPipeline &) = delete;
+  MainGPUGraphicsPipeline(MainGPUGraphicsPipeline &&) = delete;
+  MainGPUGraphicsPipeline &operator=(MainGPUGraphicsPipeline &&) = delete;
+
+  SDL_GPUGraphicsPipeline *get() { return gpu_pipeline; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUGraphicsPipeline *gpu_pipeline = nullptr;
+};
+
+MainGPUGraphicsPipeline::MainGPUGraphicsPipeline(SDL_GPUDevice *device,
+                                                 SDL_Window *window)
+    : gpu_device{device} {
+  AppGPUShader::CreateInfo vertexInfo{.filepath = "text.vert.spv",
+                                      .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+                                      .num_samplers = 0,
+                                      .num_uniform_buffers = 1};
+  AppGPUShader vertexShader{gpu_device, vertexInfo};
+
+  AppGPUShader::CreateInfo fragmentInfo{.filepath = "text.frag.spv",
+                                        .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                        .num_samplers = 1,
+                                        .num_uniform_buffers = 0};
+  AppGPUShader fragmentShader{gpu_device, fragmentInfo};
+
+  std::array<SDL_GPUVertexAttribute, 2> attrs{};
+  attrs[0].location = 0;
+  attrs[0].buffer_slot = 0;
+  attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  attrs[0].offset = offsetof(Vertex, position);
+
+  attrs[1].location = 1;
+  attrs[1].buffer_slot = 0;
+  attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  attrs[1].offset = offsetof(Vertex, uv);
+
+  SDL_GPUVertexBufferDescription vtxDesc{};
+  vtxDesc.slot = 0;
+  vtxDesc.pitch = sizeof(Vertex);
+  vtxDesc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+
+  SDL_GPUVertexInputState vtxInput{};
+  vtxInput.vertex_buffer_descriptions = &vtxDesc;
+  vtxInput.num_vertex_buffers = 1;
+  vtxInput.vertex_attributes = attrs.data();
+  vtxInput.num_vertex_attributes = 2;
+
+  SDL_GPUColorTargetDescription colorTarget{};
+  colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+  colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+  colorTarget.blend_state.dst_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  colorTarget.blend_state.dst_alpha_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.enable_blend = true;
+
+  SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
+  targetInfo.color_target_descriptions = &colorTarget;
+  targetInfo.num_color_targets = 1;
+
+  SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+  pipeInfo.vertex_shader = vertexShader.get();
+  pipeInfo.fragment_shader = fragmentShader.get();
+  pipeInfo.vertex_input_state = vtxInput;
+  pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+  pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+  pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+  pipeInfo.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+  pipeInfo.target_info = targetInfo;
+
+  gpu_pipeline = SDL_CreateGPUGraphicsPipeline(gpu_device, &pipeInfo);
+  if (not gpu_pipeline) {
+    std::string errorMsg{"SDL_CreateGPUGraphicsPipeline failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+}
+
+MainGPUGraphicsPipeline::~MainGPUGraphicsPipeline() {
+  if (not gpu_pipeline)
+    return;
+  SDL_ReleaseGPUGraphicsPipeline(gpu_device, gpu_pipeline);
+}
+
 class AppState {
 private:
   AppFont app_font;
@@ -227,14 +339,15 @@ private:
   AppGPUDevice app_device;
   AppWindow app_window;
   SDL_GPUSampler *sampler;
-  SDL_GPUGraphicsPipeline *pipeline;
+  MainGPUGraphicsPipeline app_pipeline;
 
   std::string textString = "Hello world";
 
 public:
   AppState(FT_Library ft_library)
       : app_font{ft_library, "assets/DejaVuSans.ttf", 14}, app_device{},
-        app_window{app_device.get()} {}
+        app_window{app_device.get()},
+        app_pipeline{app_device.get(), app_window.get()} {}
   SDL_AppResult iterate();
 };
 
@@ -254,7 +367,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     *appstate = app;
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
-    SDL_Log("App error: %s", e.what());
+    SDL_Log("[App] %s", e.what());
     return SDL_APP_FAILURE;
   }
 }
