@@ -1,5 +1,7 @@
+#include <SDL3/SDL_error.h>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -144,6 +146,78 @@ AppWindow::AppWindow(SDL_GPUDevice *device) : gpu_device{device} {
 AppWindow::~AppWindow() {
   SDL_ReleaseWindowFromGPUDevice(gpu_device, window);
   SDL_DestroyWindow(window);
+}
+
+class AppFile {
+public:
+  AppFile(const char *filepath);
+  ~AppFile() { SDL_free(file_data); }
+
+  AppFile(const AppFile &) = delete;
+  AppFile &operator=(const AppFile &) = delete;
+  AppFile(AppFile &&) = delete;
+  AppFile &operator=(AppFile &&) = delete;
+
+  void *get_data() { return file_data; }
+  std::size_t get_size() { return file_size; }
+
+private:
+  void *file_data = nullptr;
+  size_t file_size = 0;
+};
+
+AppFile::AppFile(const char *filepath) {
+  file_data = SDL_LoadFile(filepath, &file_size);
+  if (not file_data) {
+    std::string errorMsg{"Failed to load file: "};
+    errorMsg.append(filepath);
+    throw std::runtime_error{errorMsg};
+  }
+}
+
+class AppGPUShader {
+public:
+  struct CreateInfo {
+    const char *filepath;
+    SDL_GPUShaderStage stage;
+    Uint32 num_samplers;
+    Uint32 num_uniform_buffers;
+  };
+
+  AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo);
+  ~AppGPUShader() { SDL_ReleaseGPUShader(gpu_device, gpu_shader); }
+
+  AppGPUShader(const AppGPUShader &) = delete;
+  AppGPUShader &operator=(const AppGPUShader &) = delete;
+  AppGPUShader(AppGPUShader &&) = delete;
+  AppGPUShader &operator=(AppGPUShader &&) = delete;
+
+  SDL_GPUShader *get() { return gpu_shader; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUShader *gpu_shader = nullptr;
+};
+
+AppGPUShader::AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo)
+    : gpu_device{device} {
+  AppFile appFile{createInfo.filepath};
+
+  SDL_GPUShaderCreateInfo shaderInfo{};
+  shaderInfo.code_size = appFile.get_size();
+  shaderInfo.code = static_cast<const Uint8 *>(appFile.get_data());
+  shaderInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  shaderInfo.stage = createInfo.stage;
+  shaderInfo.num_samplers = createInfo.num_samplers;
+  shaderInfo.num_storage_textures = 0;
+  shaderInfo.num_storage_buffers = 0;
+  shaderInfo.num_uniform_buffers = createInfo.num_uniform_buffers;
+  gpu_shader = SDL_CreateGPUShader(gpu_device, &shaderInfo);
+  if (not gpu_shader) {
+    std::string errorMsg{"SDL_CreateGPUShader failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
 }
 
 class AppState {
