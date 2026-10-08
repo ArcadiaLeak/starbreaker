@@ -116,7 +116,10 @@ AppGPUDevice::AppGPUDevice() {
 AppGPUDevice::~AppGPUDevice() {
   if (not gpu_device)
     return;
-  SDL_WaitForGPUIdle(gpu_device);
+  if (not SDL_WaitForGPUIdle(gpu_device)) {
+    SDL_Log("SDL_WaitForGPUIdle failed: %s", SDL_GetError());
+    std::terminate();
+  }
   SDL_DestroyGPUDevice(gpu_device);
 }
 
@@ -321,16 +324,16 @@ MainGPUGraphicsPipeline::MainGPUGraphicsPipeline(SDL_GPUDevice *device,
   attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
   attrs[1].offset = offsetof(Vertex, uv);
 
-  SDL_GPUVertexBufferDescription vtxDesc{};
-  vtxDesc.slot = 0;
-  vtxDesc.pitch = sizeof(Vertex);
-  vtxDesc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+  SDL_GPUVertexBufferDescription vertexDescription{};
+  vertexDescription.slot = 0;
+  vertexDescription.pitch = sizeof(Vertex);
+  vertexDescription.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
 
-  SDL_GPUVertexInputState vtxInput{};
-  vtxInput.vertex_buffer_descriptions = &vtxDesc;
-  vtxInput.num_vertex_buffers = 1;
-  vtxInput.vertex_attributes = attrs.data();
-  vtxInput.num_vertex_attributes = 2;
+  SDL_GPUVertexInputState vertexInput{};
+  vertexInput.vertex_buffer_descriptions = &vertexDescription;
+  vertexInput.num_vertex_buffers = 1;
+  vertexInput.vertex_attributes = attrs.data();
+  vertexInput.num_vertex_attributes = 2;
 
   SDL_GPUColorTargetDescription colorTarget{};
   colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device, window);
@@ -351,7 +354,7 @@ MainGPUGraphicsPipeline::MainGPUGraphicsPipeline(SDL_GPUDevice *device,
   SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
   pipeInfo.vertex_shader = vertexShader.get();
   pipeInfo.fragment_shader = fragmentShader.get();
-  pipeInfo.vertex_input_state = vtxInput;
+  pipeInfo.vertex_input_state = vertexInput;
   pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
   pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
   pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
@@ -388,10 +391,11 @@ public:
       : app_font{ft_library, "assets/DejaVuSans.ttf", 14}, app_device{},
         app_window{app_device.get()}, app_sampler{app_device.get()},
         app_pipeline{app_device.get(), app_window.get()} {}
-  SDL_AppResult iterate();
+
+  SDL_AppResult iterate() noexcept;
 };
 
-SDL_AppResult AppState::iterate() {
+SDL_AppResult AppState::iterate() noexcept {
   SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(app_device.get());
   if (not cmd) {
     SDL_Log("SDL_AcquireGPUCommandBuffer failed: %s", SDL_GetError());
