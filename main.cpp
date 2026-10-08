@@ -25,15 +25,13 @@ struct Vertex {
   float uv[2];
 };
 
-struct GlyphTexture {
-  SDL_GPUTexture *texture = nullptr;
-  int width = 0;
-  int height = 0;
-  int bitmap_left = 0;
-  int bitmap_top = 0;
-  float x_advance = 0.0f;
-  float x_offset = 0.0f;
-  float y_offset = 0.0f;
+struct GlyphInfo {
+  hb_codepoint_t codepoint;
+  std::uint32_t cluster;
+  hb_position_t x_advance;
+  hb_position_t y_advance;
+  hb_position_t x_offset;
+  hb_position_t y_offset;
 };
 
 static FT_Library global_ft_library = nullptr;
@@ -384,7 +382,7 @@ private:
   AppGPUSampler app_sampler;
   MainGPUGraphicsPipeline app_pipeline;
 
-  std::string textString = "Hello world";
+  std::string text_string = "Hello world";
 
 public:
   AppState(FT_Library ft_library)
@@ -393,6 +391,7 @@ public:
         app_pipeline{app_device.get(), app_window.get()} {}
 
   SDL_AppResult iterate() noexcept;
+  std::vector<GlyphInfo> shape_text_string() noexcept;
 };
 
 SDL_AppResult AppState::iterate() noexcept {
@@ -428,6 +427,33 @@ SDL_AppResult AppState::iterate() noexcept {
     SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
     std::terminate();
   }
+}
+
+std::vector<GlyphInfo> AppState::shape_text_string() noexcept {
+  hb_buffer_t *textBuffer = hb_buffer_create();
+
+  hb_buffer_add_utf8(textBuffer, text_string.data(), -1, 0, -1);
+  hb_buffer_guess_segment_properties(textBuffer);
+  hb_shape(app_font.get_font(), textBuffer, nullptr, 0);
+
+  unsigned int glyphCount = 0;
+  hb_glyph_info_t *glyphInfos =
+      hb_buffer_get_glyph_infos(textBuffer, &glyphCount);
+  hb_glyph_position_t *glyphPositions =
+      hb_buffer_get_glyph_positions(textBuffer, &glyphCount);
+
+  std::vector<GlyphInfo> glyphInfoVec(glyphCount);
+  for (unsigned int i = 0; i < glyphCount; ++i) {
+    glyphInfoVec[i].codepoint = glyphInfos[i].codepoint;
+    glyphInfoVec[i].cluster = glyphInfos[i].cluster;
+    glyphInfoVec[i].x_advance = glyphPositions[i].x_advance;
+    glyphInfoVec[i].y_advance = glyphPositions[i].y_advance;
+    glyphInfoVec[i].x_offset = glyphPositions[i].x_offset;
+    glyphInfoVec[i].y_offset = glyphPositions[i].y_offset;
+  }
+
+  hb_buffer_destroy(textBuffer);
+  return glyphInfoVec;
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
