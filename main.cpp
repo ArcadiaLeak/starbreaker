@@ -1,3 +1,4 @@
+#include <SDL3/SDL_video.h>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -464,6 +465,51 @@ MainGPUGraphicsPipeline::~MainGPUGraphicsPipeline() {
   SDL_ReleaseGPUGraphicsPipeline(gpu_device, gpu_pipeline);
 }
 
+class AppGPUSwapchainCommand {
+public:
+  AppGPUSwapchainCommand(SDL_GPUDevice *device, SDL_Window *window);
+  ~AppGPUSwapchainCommand();
+
+  AppGPUSwapchainCommand(const AppGPUSwapchainCommand &) = delete;
+  AppGPUSwapchainCommand &operator=(const AppGPUSwapchainCommand &) = delete;
+  AppGPUSwapchainCommand(AppGPUSwapchainCommand &&) = delete;
+  AppGPUSwapchainCommand &operator=(AppGPUSwapchainCommand &&) = delete;
+
+  SDL_GPUCommandBuffer *get_command() { return gpu_command; }
+  SDL_GPUTexture *get_swapchain() { return swapchain; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUCommandBuffer *gpu_command = nullptr;
+  SDL_GPUTexture *swapchain = nullptr;
+  std::uint32_t swapchain_width = 0, swapchain_height = 0;
+};
+
+AppGPUSwapchainCommand::AppGPUSwapchainCommand(SDL_GPUDevice *device,
+                                               SDL_Window *window)
+    : gpu_device{device} {
+  gpu_command = SDL_AcquireGPUCommandBuffer(gpu_device);
+  if (not gpu_command) {
+    std::string errorMsg{"SDL_AcquireGPUCommandBuffer failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+  if (not SDL_WaitAndAcquireGPUSwapchainTexture(gpu_command, window, &swapchain,
+                                                &swapchain_width,
+                                                &swapchain_height)) {
+    std::string errorMsg{"SDL_WaitAndAcquireGPUSwapchainTexture failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+}
+
+AppGPUSwapchainCommand::~AppGPUSwapchainCommand() {
+  if (SDL_SubmitGPUCommandBuffer(gpu_command))
+    return;
+  SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
+  std::terminate();
+}
+
 struct GlyphData {
   hb_codepoint_t codepoint;
   std::uint32_t cluster;
@@ -503,38 +549,21 @@ public:
 };
 
 SDL_AppResult AppState::iterate() noexcept {
-  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(app_device.get());
-  if (not cmd) {
-    SDL_Log("SDL_AcquireGPUCommandBuffer failed: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
-  }
+  AppGPUSwapchainCommand swapchainCommand{app_device.get(), app_window.get()};
 
-  SDL_GPUTexture *swapchain = nullptr;
-  Uint32 sw = 0, sh = 0;
-  if (not SDL_WaitAndAcquireGPUSwapchainTexture(cmd, app_window.get(),
-                                                &swapchain, &sw, &sh)) {
-    SDL_Log("SDL_WaitAndAcquireGPUSwapchainTexture failed: %s", SDL_GetError());
-    std::terminate();
-  }
-
-  if (swapchain) {
+  if (SDL_GPUTexture *swapchain = swapchainCommand.get_swapchain(); swapchain) {
     SDL_GPUColorTargetInfo colorTarget{};
     colorTarget.texture = swapchain;
     colorTarget.clear_color = {0.08f, 0.08f, 0.10f, 1.0f};
     colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
     colorTarget.store_op = SDL_GPU_STOREOP_STORE;
 
-    SDL_GPURenderPass *renderPass =
-        SDL_BeginGPURenderPass(cmd, &colorTarget, 1, nullptr);
+    SDL_GPURenderPass *renderPass = SDL_BeginGPURenderPass(
+        swapchainCommand.get_command(), &colorTarget, 1, nullptr);
     SDL_EndGPURenderPass(renderPass);
   }
 
-  if (SDL_SubmitGPUCommandBuffer(cmd))
-    return SDL_APP_CONTINUE;
-  else {
-    SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
-    std::terminate();
-  }
+  return SDL_APP_CONTINUE;
 }
 
 void AppState::text_glyphs_alloc() {
@@ -666,37 +695,6 @@ void AppState::text_glyphs_combine() {
 
   int combinedWidth = maxX - minX;
   int combinedHeight = maxY - minY;
-
-  std::vector<Vertex> vertices;
-  vertices.reserve(glyph_textures.size() * 6);
-
-  pen_x = 0.0f;
-  for (const auto &g : glyph_textures) {
-    if (g.width > 0 && g.height > 0) {
-      float x = pen_x + g.x_offset;
-      float y = -g.y_offset;
-
-      // Top-left of this glyph's quad in combined-texture space.
-      float qx = x + static_cast<float>(g.bitmap_left - min_x);
-      float qy =
-          y - static_cast<float>(g.bitmap_top) - static_cast<float>(min_y);
-      float qw = static_cast<float>(g.width);
-      float qh = static_cast<float>(g.height);
-
-      Vertex tl{qx, qy, 0.0f, 0.0f};
-      Vertex tr{qx + qw, qy, 1.0f, 0.0f};
-      Vertex bl{qx, qy + qh, 0.0f, 1.0f};
-      Vertex br{qx + qw, qy + qh, 1.0f, 1.0f};
-
-      vertices.push_back(tl);
-      vertices.push_back(tr);
-      vertices.push_back(bl);
-      vertices.push_back(tr);
-      vertices.push_back(br);
-      vertices.push_back(bl);
-    }
-    pen_x += g.x_advance;
-  }
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
