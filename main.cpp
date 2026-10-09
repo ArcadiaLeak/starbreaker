@@ -1,13 +1,12 @@
-#include <SDL3/SDL_error.h>
+#include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_video.h>
 #include <array>
-#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
-#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
-#include <utility>
-#include <variant>
 #include <vector>
 
 #define SDL_MAIN_USE_CALLBACKS 1
@@ -23,15 +22,6 @@
 struct Vertex {
   float position[2];
   float uv[2];
-};
-
-struct GlyphInfo {
-  hb_codepoint_t codepoint;
-  std::uint32_t cluster;
-  hb_position_t x_advance;
-  hb_position_t y_advance;
-  hb_position_t x_offset;
-  hb_position_t y_offset;
 };
 
 static FT_Library global_ft_library = nullptr;
@@ -61,7 +51,6 @@ AppFont::AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height)
     throw std::runtime_error{"FT_New_Face failed!"};
   if (FT_Set_Pixel_Sizes(ft_face, 0, pixel_height)) {
     FT_Done_Face(ft_face);
-    ft_face = nullptr;
     throw std::runtime_error{"FT_Set_Pixel_Sizes failed!"};
   }
   hb_font = hb_ft_font_create(ft_face, nullptr);
@@ -145,8 +134,10 @@ AppWindow::AppWindow(SDL_GPUDevice *device) : gpu_device{device} {
                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
   if (not window)
     throw std::runtime_error{"SDL_CreateWindow failed!"};
-  if (not SDL_ClaimWindowForGPUDevice(device, window))
+  if (not SDL_ClaimWindowForGPUDevice(device, window)) {
+    SDL_DestroyWindow(window);
     throw std::runtime_error{"SDL_ClaimWindowForGPUDevice failed!"};
+  }
 }
 
 AppWindow::~AppWindow() {
@@ -280,6 +271,97 @@ AppGPUSampler::~AppGPUSampler() {
   SDL_ReleaseGPUSampler(gpu_device, gpu_sampler);
 }
 
+class AppGPUGlyphTexture {
+public:
+  AppGPUGlyphTexture(SDL_GPUDevice *device, std::uint32_t textureWidth,
+                     std::uint32_t textureHeight);
+  ~AppGPUGlyphTexture();
+
+  AppGPUGlyphTexture(const AppGPUGlyphTexture &) = delete;
+  AppGPUGlyphTexture &operator=(const AppGPUGlyphTexture &) = delete;
+  AppGPUGlyphTexture(AppGPUGlyphTexture &&) = delete;
+  AppGPUGlyphTexture &operator=(AppGPUGlyphTexture &&) = delete;
+
+  SDL_GPUTexture *get() { return gpu_texture; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUTexture *gpu_texture = nullptr;
+};
+
+AppGPUGlyphTexture::AppGPUGlyphTexture(SDL_GPUDevice *device,
+                                       std::uint32_t textureWidth,
+                                       std::uint32_t textureHeight)
+    : gpu_device{device} {
+  SDL_GPUTextureCreateInfo textureInfo{};
+  textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
+  textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+  textureInfo.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+  textureInfo.width = textureWidth;
+  textureInfo.height = textureHeight;
+  textureInfo.layer_count_or_depth = 1;
+  textureInfo.num_levels = 1;
+  textureInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
+  gpu_texture = SDL_CreateGPUTexture(device, &textureInfo);
+  if (not gpu_texture) {
+    std::string errorMsg{"SDL_CreateGPUTexture failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+}
+
+AppGPUGlyphTexture::~AppGPUGlyphTexture() {
+  if (not gpu_texture)
+    return;
+  SDL_ReleaseGPUTexture(gpu_device, gpu_texture);
+}
+
+class AppGPUUploadBuffer {
+public:
+  AppGPUUploadBuffer(SDL_GPUDevice *device, std::uint32_t bufferSize);
+  ~AppGPUUploadBuffer();
+
+  AppGPUUploadBuffer(const AppGPUUploadBuffer &) = delete;
+  AppGPUUploadBuffer &operator=(const AppGPUUploadBuffer &) = delete;
+  AppGPUUploadBuffer(AppGPUUploadBuffer &&) = delete;
+  AppGPUUploadBuffer &operator=(AppGPUUploadBuffer &&) = delete;
+
+  void *get_mapped() { return mapped_buffer; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUTransferBuffer *gpu_buffer = nullptr;
+  void *mapped_buffer = nullptr;
+};
+
+AppGPUUploadBuffer::AppGPUUploadBuffer(SDL_GPUDevice *device,
+                                       std::uint32_t bufferSize)
+    : gpu_device{device} {
+  SDL_GPUTransferBufferCreateInfo bufferInfo{};
+  bufferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+  bufferInfo.size = bufferSize;
+  gpu_buffer = SDL_CreateGPUTransferBuffer(gpu_device, &bufferInfo);
+  if (not gpu_buffer) {
+    std::string errorMsg{"SDL_CreateGPUTransferBuffer failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+  mapped_buffer = SDL_MapGPUTransferBuffer(gpu_device, gpu_buffer, false);
+  if (not mapped_buffer) {
+    SDL_ReleaseGPUTransferBuffer(gpu_device, gpu_buffer);
+    std::string errorMsg{"SDL_MapGPUTransferBuffer failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+}
+
+AppGPUUploadBuffer::~AppGPUUploadBuffer() {
+  if (mapped_buffer)
+    SDL_UnmapGPUTransferBuffer(gpu_device, gpu_buffer);
+  if (gpu_buffer)
+    SDL_ReleaseGPUTransferBuffer(gpu_device, gpu_buffer);
+}
+
 class MainGPUGraphicsPipeline {
 public:
   MainGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window);
@@ -374,6 +456,17 @@ MainGPUGraphicsPipeline::~MainGPUGraphicsPipeline() {
   SDL_ReleaseGPUGraphicsPipeline(gpu_device, gpu_pipeline);
 }
 
+struct GlyphData {
+  hb_codepoint_t codepoint;
+  std::uint32_t cluster;
+  hb_position_t x_advance, y_advance;
+  hb_position_t x_offset, y_offset;
+  std::vector<unsigned char> bitmap;
+  unsigned int width, height;
+  int bitmap_left, bitmap_top;
+  std::optional<AppGPUGlyphTexture> texture;
+};
+
 class AppState {
 private:
   AppFont app_font;
@@ -384,6 +477,7 @@ private:
   MainGPUGraphicsPipeline app_pipeline;
 
   std::string text_string = "Hello world";
+  std::vector<GlyphData> text_glyphs;
 
 public:
   AppState(FT_Library ft_library)
@@ -391,8 +485,11 @@ public:
         app_window{app_device.get()}, app_sampler{app_device.get()},
         app_pipeline{app_device.get(), app_window.get()} {}
 
+  void text_glyphs_alloc() noexcept;
+  void text_glyphs_render() noexcept;
+  void text_glyphs_upload() noexcept;
+
   SDL_AppResult iterate() noexcept;
-  std::vector<GlyphInfo> shape_text_string() noexcept;
 };
 
 SDL_AppResult AppState::iterate() noexcept {
@@ -430,7 +527,7 @@ SDL_AppResult AppState::iterate() noexcept {
   }
 }
 
-std::vector<GlyphInfo> AppState::shape_text_string() noexcept {
+void AppState::text_glyphs_alloc() noexcept {
   hb_buffer_t *textBuffer = hb_buffer_create();
 
   hb_buffer_add_utf8(textBuffer, text_string.data(), -1, 0, -1);
@@ -443,19 +540,46 @@ std::vector<GlyphInfo> AppState::shape_text_string() noexcept {
   hb_glyph_position_t *glyphPositions =
       hb_buffer_get_glyph_positions(textBuffer, &glyphCount);
 
-  std::vector<GlyphInfo> glyphInfoVec(glyphCount);
+  text_glyphs = std::vector<GlyphData>(glyphCount);
   for (unsigned int i = 0; i < glyphCount; ++i) {
-    glyphInfoVec[i].codepoint = glyphInfos[i].codepoint;
-    glyphInfoVec[i].cluster = glyphInfos[i].cluster;
-    glyphInfoVec[i].x_advance = glyphPositions[i].x_advance;
-    glyphInfoVec[i].y_advance = glyphPositions[i].y_advance;
-    glyphInfoVec[i].x_offset = glyphPositions[i].x_offset;
-    glyphInfoVec[i].y_offset = glyphPositions[i].y_offset;
+    text_glyphs[i].codepoint = glyphInfos[i].codepoint;
+    text_glyphs[i].cluster = glyphInfos[i].cluster;
+    text_glyphs[i].x_advance = glyphPositions[i].x_advance;
+    text_glyphs[i].y_advance = glyphPositions[i].y_advance;
+    text_glyphs[i].x_offset = glyphPositions[i].x_offset;
+    text_glyphs[i].y_offset = glyphPositions[i].y_offset;
   }
 
   hb_buffer_destroy(textBuffer);
-  return glyphInfoVec;
 }
+
+void AppState::text_glyphs_render() noexcept {
+  for (GlyphData &glyphData : text_glyphs) {
+    FT_Int32 glyphFlags =
+        FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
+    FT_Error glyphLoadErr =
+        FT_Load_Glyph(app_font.get_face(), glyphData.codepoint, glyphFlags);
+    if (glyphLoadErr != 0) {
+      SDL_Log("FT_Load_Glyph failed for glyph: %d", glyphData.codepoint);
+      continue;
+    }
+    FT_GlyphSlot glyphSlot = app_font.get_face()->glyph;
+    glyphData.bitmap_left = glyphSlot->bitmap_left;
+    glyphData.bitmap_top = glyphSlot->bitmap_top;
+    const FT_Bitmap &glyphBitmap = glyphSlot->bitmap;
+    glyphData.width = glyphBitmap.width;
+    glyphData.height = glyphBitmap.rows;
+    glyphData.bitmap.resize(glyphBitmap.width * glyphBitmap.rows);
+    for (unsigned int y = 0; y < glyphBitmap.rows; ++y) {
+      const uint8_t *rowSource =
+          glyphBitmap.buffer + y * std::abs(glyphBitmap.pitch);
+      uint8_t *rowTarget = glyphData.bitmap.data() + y * glyphBitmap.width;
+      std::memcpy(rowTarget, rowSource, glyphBitmap.width);
+    }
+  }
+}
+
+void AppState::text_glyphs_upload() noexcept {}
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   if (not SDL_Init(SDL_INIT_VIDEO)) {
@@ -469,7 +593,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   try {
     AppState *app = new AppState{global_ft_library};
     *appstate = app;
-    app->shape_text_string();
+    app->text_glyphs_alloc();
+    app->text_glyphs_render();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[App] %s", e.what());
