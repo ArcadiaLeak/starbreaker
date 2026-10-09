@@ -1,4 +1,5 @@
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -496,6 +497,7 @@ public:
   void text_glyphs_alloc();
   void text_glyphs_render();
   void text_glyphs_upload();
+  void text_glyphs_combine();
 
   SDL_AppResult iterate() noexcept;
 };
@@ -638,6 +640,65 @@ void AppState::text_glyphs_upload() {
   }
 }
 
+void AppState::text_glyphs_combine() {
+  float penX = 0.0f;
+  int minX = INT32_MAX, maxX = INT32_MIN;
+  int minY = INT32_MAX, maxY = INT32_MIN;
+
+  for (const GlyphData &glyphData : text_glyphs) {
+    if (glyphData.width > 0 && glyphData.height > 0) {
+      int left = static_cast<int>(
+          std::floor(penX + static_cast<float>(glyphData.x_offset) / 64.0f));
+      left += glyphData.bitmap_left;
+      int right = left + glyphData.width;
+      int top = static_cast<int>(
+          std::floor(-1.0f * static_cast<float>(glyphData.y_offset) / 64.0f));
+      top -= glyphData.bitmap_top;
+      int bottom = top + glyphData.height;
+
+      minX = std::min(minX, left);
+      maxX = std::max(maxX, right);
+      minY = std::min(minY, top);
+      maxY = std::max(maxY, bottom);
+    }
+    penX += static_cast<float>(glyphData.x_advance) / 64.0f;
+  }
+
+  int combinedWidth = maxX - minX;
+  int combinedHeight = maxY - minY;
+
+  std::vector<Vertex> vertices;
+  vertices.reserve(glyph_textures.size() * 6);
+
+  pen_x = 0.0f;
+  for (const auto &g : glyph_textures) {
+    if (g.width > 0 && g.height > 0) {
+      float x = pen_x + g.x_offset;
+      float y = -g.y_offset;
+
+      // Top-left of this glyph's quad in combined-texture space.
+      float qx = x + static_cast<float>(g.bitmap_left - min_x);
+      float qy =
+          y - static_cast<float>(g.bitmap_top) - static_cast<float>(min_y);
+      float qw = static_cast<float>(g.width);
+      float qh = static_cast<float>(g.height);
+
+      Vertex tl{qx, qy, 0.0f, 0.0f};
+      Vertex tr{qx + qw, qy, 1.0f, 0.0f};
+      Vertex bl{qx, qy + qh, 0.0f, 1.0f};
+      Vertex br{qx + qw, qy + qh, 1.0f, 1.0f};
+
+      vertices.push_back(tl);
+      vertices.push_back(tr);
+      vertices.push_back(bl);
+      vertices.push_back(tr);
+      vertices.push_back(br);
+      vertices.push_back(bl);
+    }
+    pen_x += g.x_advance;
+  }
+}
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   if (not SDL_Init(SDL_INIT_VIDEO)) {
     SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -653,6 +714,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     app->text_glyphs_alloc();
     app->text_glyphs_render();
     app->text_glyphs_upload();
+    app->text_glyphs_combine();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[App] %s", e.what());
