@@ -1,5 +1,3 @@
-#include <SDL3/SDL_stdinc.h>
-#include <SDL3/SDL_video.h>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -326,7 +324,10 @@ public:
   AppGPUUploadBuffer(AppGPUUploadBuffer &&) = delete;
   AppGPUUploadBuffer &operator=(AppGPUUploadBuffer &&) = delete;
 
+  SDL_GPUTransferBuffer *get_buffer() { return gpu_buffer; }
   void *get_mapped() { return mapped_buffer; }
+
+  void unmap();
 
 private:
   SDL_GPUDevice *gpu_device = nullptr;
@@ -360,6 +361,12 @@ AppGPUUploadBuffer::~AppGPUUploadBuffer() {
     SDL_UnmapGPUTransferBuffer(gpu_device, gpu_buffer);
   if (gpu_buffer)
     SDL_ReleaseGPUTransferBuffer(gpu_device, gpu_buffer);
+}
+
+void AppGPUUploadBuffer::unmap() {
+  if (mapped_buffer)
+    SDL_UnmapGPUTransferBuffer(gpu_device, gpu_buffer);
+  mapped_buffer = nullptr;
 }
 
 class MainGPUGraphicsPipeline {
@@ -465,6 +472,7 @@ struct GlyphData {
   unsigned int width, height;
   int bitmap_left, bitmap_top;
   std::optional<AppGPUGlyphTexture> texture;
+  std::optional<AppGPUUploadBuffer> upload_buffer;
 };
 
 class AppState {
@@ -485,9 +493,9 @@ public:
         app_window{app_device.get()}, app_sampler{app_device.get()},
         app_pipeline{app_device.get(), app_window.get()} {}
 
-  void text_glyphs_alloc() noexcept;
-  void text_glyphs_render() noexcept;
-  void text_glyphs_upload() noexcept;
+  void text_glyphs_alloc();
+  void text_glyphs_render();
+  void text_glyphs_upload();
 
   SDL_AppResult iterate() noexcept;
 };
@@ -527,7 +535,7 @@ SDL_AppResult AppState::iterate() noexcept {
   }
 }
 
-void AppState::text_glyphs_alloc() noexcept {
+void AppState::text_glyphs_alloc() {
   hb_buffer_t *textBuffer = hb_buffer_create();
 
   hb_buffer_add_utf8(textBuffer, text_string.data(), -1, 0, -1);
@@ -553,7 +561,7 @@ void AppState::text_glyphs_alloc() noexcept {
   hb_buffer_destroy(textBuffer);
 }
 
-void AppState::text_glyphs_render() noexcept {
+void AppState::text_glyphs_render() {
   for (GlyphData &glyphData : text_glyphs) {
     FT_Int32 glyphFlags =
         FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
@@ -569,6 +577,8 @@ void AppState::text_glyphs_render() noexcept {
     const FT_Bitmap &glyphBitmap = glyphSlot->bitmap;
     glyphData.width = glyphBitmap.width;
     glyphData.height = glyphBitmap.rows;
+    if (glyphData.width == 0 || glyphData.height == 0)
+      continue;
     glyphData.bitmap.resize(glyphBitmap.width * glyphBitmap.rows);
     for (unsigned int y = 0; y < glyphBitmap.rows; ++y) {
       const uint8_t *rowSource =
@@ -579,7 +589,54 @@ void AppState::text_glyphs_render() noexcept {
   }
 }
 
-void AppState::text_glyphs_upload() noexcept {}
+void AppState::text_glyphs_upload() {
+  for (GlyphData &glyphData : text_glyphs) {
+    if (glyphData.width == 0 || glyphData.height == 0)
+      continue;
+    glyphData.texture.emplace(app_device.get(), glyphData.width,
+                              glyphData.height);
+    glyphData.upload_buffer.emplace(
+        app_device.get(), static_cast<std::uint32_t>(glyphData.bitmap.size()));
+    std::memcpy(glyphData.upload_buffer->get_mapped(), glyphData.bitmap.data(),
+                glyphData.bitmap.size());
+    glyphData.upload_buffer->unmap();
+  }
+
+  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(app_device.get());
+  if (not cmd) {
+    SDL_Log("SDL_AcquireGPUCommandBuffer failed: %s", SDL_GetError());
+    std::terminate();
+  }
+  SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+
+  for (GlyphData &glyphData : text_glyphs) {
+    if (not glyphData.texture)
+      continue;
+    SDL_GPUTextureTransferInfo src{};
+    src.transfer_buffer = glyphData.upload_buffer->get_buffer();
+    src.offset = 0;
+    src.pixels_per_row = glyphData.width;
+    src.rows_per_layer = glyphData.height;
+    SDL_GPUTextureRegion dst{};
+    dst.texture = glyphData.texture->get();
+    dst.w = glyphData.width;
+    dst.h = glyphData.height;
+    dst.d = 1;
+    SDL_UploadToGPUTexture(copy, &src, &dst, false);
+  }
+
+  SDL_EndGPUCopyPass(copy);
+  if (not SDL_SubmitGPUCommandBuffer(cmd)) {
+    SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
+    std::terminate();
+  }
+
+  for (GlyphData &glyphData : text_glyphs) {
+    if (not glyphData.upload_buffer)
+      continue;
+    glyphData.upload_buffer.reset();
+  }
+}
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   if (not SDL_Init(SDL_INIT_VIDEO)) {
@@ -595,6 +652,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     *appstate = app;
     app->text_glyphs_alloc();
     app->text_glyphs_render();
+    app->text_glyphs_upload();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[App] %s", e.what());
