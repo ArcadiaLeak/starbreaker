@@ -214,8 +214,6 @@ AppGPUShader::AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo)
   shaderInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
   shaderInfo.stage = createInfo.stage;
   shaderInfo.num_samplers = createInfo.num_samplers;
-  shaderInfo.num_storage_textures = 0;
-  shaderInfo.num_storage_buffers = 0;
   shaderInfo.num_uniform_buffers = createInfo.num_uniform_buffers;
   gpu_shader = SDL_CreateGPUShader(gpu_device, &shaderInfo);
   if (not gpu_shader) {
@@ -371,15 +369,16 @@ void AppGPUUploadBuffer::unmap() {
   mapped_buffer = nullptr;
 }
 
-class TextGPUGraphicsPipeline {
+class CaptionGPUGraphicsPipeline {
 public:
-  TextGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window);
-  ~TextGPUGraphicsPipeline();
+  CaptionGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window);
+  ~CaptionGPUGraphicsPipeline();
 
-  TextGPUGraphicsPipeline(const TextGPUGraphicsPipeline &) = delete;
-  TextGPUGraphicsPipeline &operator=(const TextGPUGraphicsPipeline &) = delete;
-  TextGPUGraphicsPipeline(TextGPUGraphicsPipeline &&) = delete;
-  TextGPUGraphicsPipeline &operator=(TextGPUGraphicsPipeline &&) = delete;
+  CaptionGPUGraphicsPipeline(const CaptionGPUGraphicsPipeline &) = delete;
+  CaptionGPUGraphicsPipeline &
+  operator=(const CaptionGPUGraphicsPipeline &) = delete;
+  CaptionGPUGraphicsPipeline(CaptionGPUGraphicsPipeline &&) = delete;
+  CaptionGPUGraphicsPipeline &operator=(CaptionGPUGraphicsPipeline &&) = delete;
 
   SDL_GPUGraphicsPipeline *get() { return gpu_pipeline; }
 
@@ -388,16 +387,16 @@ private:
   SDL_GPUGraphicsPipeline *gpu_pipeline = nullptr;
 };
 
-TextGPUGraphicsPipeline::TextGPUGraphicsPipeline(SDL_GPUDevice *device,
-                                                 SDL_Window *window)
+CaptionGPUGraphicsPipeline::CaptionGPUGraphicsPipeline(SDL_GPUDevice *device,
+                                                       SDL_Window *window)
     : gpu_device{device} {
-  AppGPUShader::CreateInfo vertexInfo{.filepath = "text.vert.spv",
+  AppGPUShader::CreateInfo vertexInfo{.filepath = "caption.vert.spv",
                                       .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                       .num_samplers = 0,
                                       .num_uniform_buffers = 1};
   AppGPUShader vertexShader{gpu_device, vertexInfo};
 
-  AppGPUShader::CreateInfo fragmentInfo{.filepath = "text.frag.spv",
+  AppGPUShader::CreateInfo fragmentInfo{.filepath = "caption.frag.spv",
                                         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                         .num_samplers = 1,
                                         .num_uniform_buffers = 0};
@@ -459,7 +458,100 @@ TextGPUGraphicsPipeline::TextGPUGraphicsPipeline(SDL_GPUDevice *device,
   }
 }
 
-TextGPUGraphicsPipeline::~TextGPUGraphicsPipeline() {
+CaptionGPUGraphicsPipeline::~CaptionGPUGraphicsPipeline() {
+  if (not gpu_pipeline)
+    return;
+  SDL_ReleaseGPUGraphicsPipeline(gpu_device, gpu_pipeline);
+}
+
+class GlyphGPUGraphicsPipeline {
+public:
+  GlyphGPUGraphicsPipeline(SDL_GPUDevice *device);
+  ~GlyphGPUGraphicsPipeline();
+
+  GlyphGPUGraphicsPipeline(const GlyphGPUGraphicsPipeline &) = delete;
+  GlyphGPUGraphicsPipeline &
+  operator=(const GlyphGPUGraphicsPipeline &) = delete;
+  GlyphGPUGraphicsPipeline(GlyphGPUGraphicsPipeline &&) = delete;
+  GlyphGPUGraphicsPipeline &operator=(GlyphGPUGraphicsPipeline &&) = delete;
+
+  SDL_GPUGraphicsPipeline *get() { return gpu_pipeline; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUGraphicsPipeline *gpu_pipeline = nullptr;
+};
+
+GlyphGPUGraphicsPipeline::GlyphGPUGraphicsPipeline(SDL_GPUDevice *device)
+    : gpu_device{device} {
+  AppGPUShader::CreateInfo vertexInfo{.filepath = "caption.vert.spv",
+                                      .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+                                      .num_samplers = 0,
+                                      .num_uniform_buffers = 1};
+  AppGPUShader vertexShader{gpu_device, vertexInfo};
+
+  AppGPUShader::CreateInfo fragmentInfo{.filepath = "caption.frag.spv",
+                                        .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                        .num_samplers = 1,
+                                        .num_uniform_buffers = 0};
+  AppGPUShader fragmentShader{gpu_device, fragmentInfo};
+
+  std::array<SDL_GPUVertexAttribute, 2> attrs{};
+  attrs[0].location = 0;
+  attrs[0].buffer_slot = 0;
+  attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  attrs[0].offset = offsetof(Vertex, position);
+
+  attrs[1].location = 1;
+  attrs[1].buffer_slot = 0;
+  attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  attrs[1].offset = offsetof(Vertex, uv);
+
+  SDL_GPUVertexBufferDescription vertexDescription{};
+  vertexDescription.slot = 0;
+  vertexDescription.pitch = sizeof(Vertex);
+  vertexDescription.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+
+  SDL_GPUVertexInputState vertexInput{};
+  vertexInput.vertex_buffer_descriptions = &vertexDescription;
+  vertexInput.num_vertex_buffers = 1;
+  vertexInput.vertex_attributes = attrs.data();
+  vertexInput.num_vertex_attributes = 2;
+
+  SDL_GPUColorTargetDescription colorTarget{};
+  colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+  colorTarget.blend_state.dst_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  colorTarget.blend_state.dst_alpha_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.enable_blend = true;
+
+  SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
+  targetInfo.color_target_descriptions = &colorTarget;
+  targetInfo.num_color_targets = 1;
+
+  SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
+  pipeInfo.vertex_shader = vertexShader.get();
+  pipeInfo.fragment_shader = fragmentShader.get();
+  pipeInfo.vertex_input_state = vertexInput;
+  pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+  pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+  pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+  pipeInfo.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+  pipeInfo.target_info = targetInfo;
+
+  gpu_pipeline = SDL_CreateGPUGraphicsPipeline(gpu_device, &pipeInfo);
+  if (not gpu_pipeline) {
+    std::string errorMsg{"SDL_CreateGPUGraphicsPipeline failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+}
+
+GlyphGPUGraphicsPipeline::~GlyphGPUGraphicsPipeline() {
   if (not gpu_pipeline)
     return;
   SDL_ReleaseGPUGraphicsPipeline(gpu_device, gpu_pipeline);
@@ -557,7 +649,6 @@ struct GlyphData {
   unsigned int width, height;
   int bitmap_left, bitmap_top;
   std::optional<AppGPUGlyphTexture> texture;
-  std::optional<AppGPUUploadBuffer> upload_buffer;
 };
 
 class AppState {
@@ -568,20 +659,23 @@ private:
   AppWindow app_window;
   AppGPUSampler app_sampler;
 
-  TextGPUGraphicsPipeline text_pipeline;
-  std::string text_string = "Hello world";
-  std::vector<GlyphData> text_glyphs;
+  CaptionGPUGraphicsPipeline caption_pipeline;
+  GlyphGPUGraphicsPipeline glyph_pipeline;
+
+  std::string caption_string = "Hello world";
+  std::vector<GlyphData> caption_glyphs;
 
 public:
   AppState(FT_Library ft_library)
       : app_font{ft_library, "assets/DejaVuSans.ttf", 14}, app_device{},
         app_window{app_device.get()}, app_sampler{app_device.get()},
-        text_pipeline{app_device.get(), app_window.get()} {}
+        caption_pipeline{app_device.get(), app_window.get()},
+        glyph_pipeline{app_device.get()} {}
 
-  void text_glyphs_alloc();
-  void text_glyphs_render();
-  void text_glyphs_upload();
-  void text_glyphs_combine();
+  void caption_glyphs_alloc();
+  void caption_glyphs_render();
+  void caption_glyphs_upload();
+  void caption_glyphs_combine();
 
   SDL_AppResult iterate() noexcept;
 };
@@ -604,34 +698,34 @@ SDL_AppResult AppState::iterate() noexcept {
   return SDL_APP_CONTINUE;
 }
 
-void AppState::text_glyphs_alloc() {
-  hb_buffer_t *textBuffer = hb_buffer_create();
+void AppState::caption_glyphs_alloc() {
+  hb_buffer_t *glyphBuffer = hb_buffer_create();
 
-  hb_buffer_add_utf8(textBuffer, text_string.data(), -1, 0, -1);
-  hb_buffer_guess_segment_properties(textBuffer);
-  hb_shape(app_font.get_font(), textBuffer, nullptr, 0);
+  hb_buffer_add_utf8(glyphBuffer, caption_string.data(), -1, 0, -1);
+  hb_buffer_guess_segment_properties(glyphBuffer);
+  hb_shape(app_font.get_font(), glyphBuffer, nullptr, 0);
 
   unsigned int glyphCount = 0;
   hb_glyph_info_t *glyphInfos =
-      hb_buffer_get_glyph_infos(textBuffer, &glyphCount);
+      hb_buffer_get_glyph_infos(glyphBuffer, &glyphCount);
   hb_glyph_position_t *glyphPositions =
-      hb_buffer_get_glyph_positions(textBuffer, &glyphCount);
+      hb_buffer_get_glyph_positions(glyphBuffer, &glyphCount);
 
-  text_glyphs = std::vector<GlyphData>(glyphCount);
+  caption_glyphs = std::vector<GlyphData>(glyphCount);
   for (unsigned int i = 0; i < glyphCount; ++i) {
-    text_glyphs[i].codepoint = glyphInfos[i].codepoint;
-    text_glyphs[i].cluster = glyphInfos[i].cluster;
-    text_glyphs[i].x_advance = glyphPositions[i].x_advance;
-    text_glyphs[i].y_advance = glyphPositions[i].y_advance;
-    text_glyphs[i].x_offset = glyphPositions[i].x_offset;
-    text_glyphs[i].y_offset = glyphPositions[i].y_offset;
+    caption_glyphs[i].codepoint = glyphInfos[i].codepoint;
+    caption_glyphs[i].cluster = glyphInfos[i].cluster;
+    caption_glyphs[i].x_advance = glyphPositions[i].x_advance;
+    caption_glyphs[i].y_advance = glyphPositions[i].y_advance;
+    caption_glyphs[i].x_offset = glyphPositions[i].x_offset;
+    caption_glyphs[i].y_offset = glyphPositions[i].y_offset;
   }
 
-  hb_buffer_destroy(textBuffer);
+  hb_buffer_destroy(glyphBuffer);
 }
 
-void AppState::text_glyphs_render() {
-  for (GlyphData &glyphData : text_glyphs) {
+void AppState::caption_glyphs_render() {
+  for (GlyphData &glyphData : caption_glyphs) {
     FT_Int32 glyphFlags =
         FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
     FT_Error glyphLoadErr =
@@ -658,49 +752,46 @@ void AppState::text_glyphs_render() {
   }
 }
 
-void AppState::text_glyphs_upload() {
-  for (GlyphData &glyphData : text_glyphs) {
-    if (glyphData.width == 0 || glyphData.height == 0)
+void AppState::caption_glyphs_upload() {
+  std::vector<std::optional<AppGPUUploadBuffer>> uploadBuffers(
+      caption_glyphs.size());
+  for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
+    if (caption_glyphs[i].width == 0 || caption_glyphs[i].height == 0)
       continue;
-    glyphData.texture.emplace(app_device.get(), glyphData.width,
-                              glyphData.height);
-    glyphData.upload_buffer.emplace(
-        app_device.get(), static_cast<std::uint32_t>(glyphData.bitmap.size()));
-    std::memcpy(glyphData.upload_buffer->get_mapped(), glyphData.bitmap.data(),
-                glyphData.bitmap.size());
-    glyphData.upload_buffer->unmap();
+    caption_glyphs[i].texture.emplace(app_device.get(), caption_glyphs[i].width,
+                                      caption_glyphs[i].height);
+    uploadBuffers[i].emplace(
+        app_device.get(),
+        static_cast<std::uint32_t>(caption_glyphs[i].bitmap.size()));
+    std::memcpy(uploadBuffers[i]->get_mapped(), caption_glyphs[i].bitmap.data(),
+                caption_glyphs[i].bitmap.size());
+    uploadBuffers[i]->unmap();
   }
 
-  for (AppGPUCopyCommand copyCommand{app_device.get()};
-       GlyphData &glyphData : text_glyphs) {
-    if (not glyphData.texture)
+  AppGPUCopyCommand copyCommand{app_device.get()};
+  for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
+    if (not caption_glyphs[i].texture)
       continue;
     SDL_GPUTextureTransferInfo src{};
-    src.transfer_buffer = glyphData.upload_buffer->get_buffer();
+    src.transfer_buffer = uploadBuffers[i]->get_buffer();
     src.offset = 0;
-    src.pixels_per_row = glyphData.width;
-    src.rows_per_layer = glyphData.height;
+    src.pixels_per_row = caption_glyphs[i].width;
+    src.rows_per_layer = caption_glyphs[i].height;
     SDL_GPUTextureRegion dst{};
-    dst.texture = glyphData.texture->get();
-    dst.w = glyphData.width;
-    dst.h = glyphData.height;
+    dst.texture = caption_glyphs[i].texture->get();
+    dst.w = caption_glyphs[i].width;
+    dst.h = caption_glyphs[i].height;
     dst.d = 1;
     SDL_UploadToGPUTexture(copyCommand.get_copy_pass(), &src, &dst, false);
   }
-
-  for (GlyphData &glyphData : text_glyphs) {
-    if (not glyphData.upload_buffer)
-      continue;
-    glyphData.upload_buffer.reset();
-  }
 }
 
-void AppState::text_glyphs_combine() {
+void AppState::caption_glyphs_combine() {
   float penX = 0.0f;
   int minX = INT32_MAX, maxX = INT32_MIN;
   int minY = INT32_MAX, maxY = INT32_MIN;
 
-  for (const GlyphData &glyphData : text_glyphs) {
+  for (const GlyphData &glyphData : caption_glyphs) {
     if (glyphData.width > 0 && glyphData.height > 0) {
       int left = static_cast<int>(
           std::floor(penX + static_cast<float>(glyphData.x_offset) / 64.0f));
@@ -735,10 +826,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   try {
     AppState *app = new AppState{global_ft_library};
     *appstate = app;
-    app->text_glyphs_alloc();
-    app->text_glyphs_render();
-    app->text_glyphs_upload();
-    app->text_glyphs_combine();
+    app->caption_glyphs_alloc();
+    app->caption_glyphs_render();
+    app->caption_glyphs_upload();
+    app->caption_glyphs_combine();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[App] %s", e.what());
