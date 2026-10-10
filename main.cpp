@@ -371,15 +371,15 @@ void AppGPUUploadBuffer::unmap() {
   mapped_buffer = nullptr;
 }
 
-class MainGPUGraphicsPipeline {
+class TextGPUGraphicsPipeline {
 public:
-  MainGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window);
-  ~MainGPUGraphicsPipeline();
+  TextGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window);
+  ~TextGPUGraphicsPipeline();
 
-  MainGPUGraphicsPipeline(const MainGPUGraphicsPipeline &) = delete;
-  MainGPUGraphicsPipeline &operator=(const MainGPUGraphicsPipeline &) = delete;
-  MainGPUGraphicsPipeline(MainGPUGraphicsPipeline &&) = delete;
-  MainGPUGraphicsPipeline &operator=(MainGPUGraphicsPipeline &&) = delete;
+  TextGPUGraphicsPipeline(const TextGPUGraphicsPipeline &) = delete;
+  TextGPUGraphicsPipeline &operator=(const TextGPUGraphicsPipeline &) = delete;
+  TextGPUGraphicsPipeline(TextGPUGraphicsPipeline &&) = delete;
+  TextGPUGraphicsPipeline &operator=(TextGPUGraphicsPipeline &&) = delete;
 
   SDL_GPUGraphicsPipeline *get() { return gpu_pipeline; }
 
@@ -388,7 +388,7 @@ private:
   SDL_GPUGraphicsPipeline *gpu_pipeline = nullptr;
 };
 
-MainGPUGraphicsPipeline::MainGPUGraphicsPipeline(SDL_GPUDevice *device,
+TextGPUGraphicsPipeline::TextGPUGraphicsPipeline(SDL_GPUDevice *device,
                                                  SDL_Window *window)
     : gpu_device{device} {
   AppGPUShader::CreateInfo vertexInfo{.filepath = "text.vert.spv",
@@ -459,7 +459,7 @@ MainGPUGraphicsPipeline::MainGPUGraphicsPipeline(SDL_GPUDevice *device,
   }
 }
 
-MainGPUGraphicsPipeline::~MainGPUGraphicsPipeline() {
+TextGPUGraphicsPipeline::~TextGPUGraphicsPipeline() {
   if (not gpu_pipeline)
     return;
   SDL_ReleaseGPUGraphicsPipeline(gpu_device, gpu_pipeline);
@@ -510,6 +510,44 @@ AppGPUSwapchainCommand::~AppGPUSwapchainCommand() {
   std::terminate();
 }
 
+class AppGPUCopyCommand {
+public:
+  AppGPUCopyCommand(SDL_GPUDevice *device);
+  ~AppGPUCopyCommand();
+
+  AppGPUCopyCommand(const AppGPUCopyCommand &) = delete;
+  AppGPUCopyCommand &operator=(const AppGPUCopyCommand &) = delete;
+  AppGPUCopyCommand(AppGPUCopyCommand &&) = delete;
+  AppGPUCopyCommand &operator=(AppGPUCopyCommand &&) = delete;
+
+  SDL_GPUCommandBuffer *get_command() { return gpu_command; }
+  SDL_GPUCopyPass *get_copy_pass() { return gpu_copy_pass; }
+
+private:
+  SDL_GPUDevice *gpu_device = nullptr;
+  SDL_GPUCommandBuffer *gpu_command = nullptr;
+  SDL_GPUCopyPass *gpu_copy_pass = nullptr;
+};
+
+AppGPUCopyCommand::AppGPUCopyCommand(SDL_GPUDevice *device)
+    : gpu_device{device} {
+  gpu_command = SDL_AcquireGPUCommandBuffer(gpu_device);
+  if (not gpu_command) {
+    std::string errorMsg{"SDL_AcquireGPUCommandBuffer failed: "};
+    errorMsg.append(SDL_GetError());
+    throw std::runtime_error{errorMsg};
+  }
+  gpu_copy_pass = SDL_BeginGPUCopyPass(gpu_command);
+}
+
+AppGPUCopyCommand::~AppGPUCopyCommand() {
+  SDL_EndGPUCopyPass(gpu_copy_pass);
+  if (SDL_SubmitGPUCommandBuffer(gpu_command))
+    return;
+  SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
+  std::terminate();
+}
+
 struct GlyphData {
   hb_codepoint_t codepoint;
   std::uint32_t cluster;
@@ -529,8 +567,8 @@ private:
   AppGPUDevice app_device;
   AppWindow app_window;
   AppGPUSampler app_sampler;
-  MainGPUGraphicsPipeline app_pipeline;
 
+  TextGPUGraphicsPipeline text_pipeline;
   std::string text_string = "Hello world";
   std::vector<GlyphData> text_glyphs;
 
@@ -538,7 +576,7 @@ public:
   AppState(FT_Library ft_library)
       : app_font{ft_library, "assets/DejaVuSans.ttf", 14}, app_device{},
         app_window{app_device.get()}, app_sampler{app_device.get()},
-        app_pipeline{app_device.get(), app_window.get()} {}
+        text_pipeline{app_device.get(), app_window.get()} {}
 
   void text_glyphs_alloc();
   void text_glyphs_render();
@@ -633,14 +671,8 @@ void AppState::text_glyphs_upload() {
     glyphData.upload_buffer->unmap();
   }
 
-  SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(app_device.get());
-  if (not cmd) {
-    SDL_Log("SDL_AcquireGPUCommandBuffer failed: %s", SDL_GetError());
-    std::terminate();
-  }
-  SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
-
-  for (GlyphData &glyphData : text_glyphs) {
+  for (AppGPUCopyCommand copyCommand{app_device.get()};
+       GlyphData &glyphData : text_glyphs) {
     if (not glyphData.texture)
       continue;
     SDL_GPUTextureTransferInfo src{};
@@ -653,13 +685,7 @@ void AppState::text_glyphs_upload() {
     dst.w = glyphData.width;
     dst.h = glyphData.height;
     dst.d = 1;
-    SDL_UploadToGPUTexture(copy, &src, &dst, false);
-  }
-
-  SDL_EndGPUCopyPass(copy);
-  if (not SDL_SubmitGPUCommandBuffer(cmd)) {
-    SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
-    std::terminate();
+    SDL_UploadToGPUTexture(copyCommand.get_copy_pass(), &src, &dst, false);
   }
 
   for (GlyphData &glyphData : text_glyphs) {
