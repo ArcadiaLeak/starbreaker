@@ -229,15 +229,15 @@ AppGPUShader::~AppGPUShader() {
   SDL_ReleaseGPUShader(gpu_device, gpu_shader);
 }
 
-class AppGPUSampler {
+class CaptionGPUSampler {
 public:
-  AppGPUSampler(SDL_GPUDevice *device);
-  ~AppGPUSampler();
+  CaptionGPUSampler(SDL_GPUDevice *device);
+  ~CaptionGPUSampler();
 
-  AppGPUSampler(const AppGPUSampler &) = delete;
-  AppGPUSampler &operator=(const AppGPUSampler &) = delete;
-  AppGPUSampler(AppGPUSampler &&) = delete;
-  AppGPUSampler &operator=(AppGPUSampler &&) = delete;
+  CaptionGPUSampler(const CaptionGPUSampler &) = delete;
+  CaptionGPUSampler &operator=(const CaptionGPUSampler &) = delete;
+  CaptionGPUSampler(CaptionGPUSampler &&) = delete;
+  CaptionGPUSampler &operator=(CaptionGPUSampler &&) = delete;
 
   SDL_GPUSampler *get() { return gpu_sampler; }
 
@@ -246,7 +246,8 @@ private:
   SDL_GPUSampler *gpu_sampler = nullptr;
 };
 
-AppGPUSampler::AppGPUSampler(SDL_GPUDevice *device) : gpu_device{device} {
+CaptionGPUSampler::CaptionGPUSampler(SDL_GPUDevice *device)
+    : gpu_device{device} {
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
   samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -263,7 +264,7 @@ AppGPUSampler::AppGPUSampler(SDL_GPUDevice *device) : gpu_device{device} {
   }
 }
 
-AppGPUSampler::~AppGPUSampler() {
+CaptionGPUSampler::~CaptionGPUSampler() {
   if (not gpu_sampler)
     return;
   SDL_ReleaseGPUSampler(gpu_device, gpu_sampler);
@@ -657,8 +658,8 @@ private:
 
   AppGPUDevice app_device;
   AppWindow app_window;
-  AppGPUSampler app_sampler;
 
+  CaptionGPUSampler caption_sampler;
   CaptionGPUGraphicsPipeline caption_pipeline;
   GlyphGPUGraphicsPipeline glyph_pipeline;
 
@@ -668,7 +669,7 @@ private:
 public:
   AppState(FT_Library ft_library)
       : app_font{ft_library, "assets/DejaVuSans.ttf", 14}, app_device{},
-        app_window{app_device.get()}, app_sampler{app_device.get()},
+        app_window{app_device.get()}, caption_sampler{app_device.get()},
         caption_pipeline{app_device.get(), app_window.get()},
         glyph_pipeline{app_device.get()} {}
 

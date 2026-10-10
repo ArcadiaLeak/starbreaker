@@ -1,7 +1,5 @@
-// Fragment stage — matches the vertex stage's varying layout.
-
 [[vk::binding(0, 2)]]
-Sampler2D atlasTexture : register(t0, space2);
+Sampler2D captionTexture : register(t0, space2);
 
 struct VSOutput {
     float4 position : SV_Position;
@@ -11,5 +9,5 @@ struct VSOutput {
 [shader("fragment")]
 float4 fs_main(VSOutput input) : SV_Target
 {
-    return atlasTexture.Sample(input.uv);
+    return captionTexture.Sample(input.uv);
 }

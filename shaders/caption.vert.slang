@@ -1,6 +1,6 @@
 struct Transform2D {
-    float2 scale;    // (2/W, 2/H)
-    float2 offset;   // (-1, -1) plus centering term
+    float2 scale;
+    float2 offset;
 };
 
 [[vk::binding(0, 1)]]

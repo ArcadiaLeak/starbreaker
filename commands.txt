@@ -1,1 +1,4 @@
 slangc shaders/fullscreen.slang -profile glsl_450 -target spirv -entry fs_main -entry vs_main -fvk-use-entrypoint-name -o fullscreen.spv
+slangc glyph_quad.vert.slang -target spirv -entry vertexMain -stage vertex -o glyph_quad.vert.spv
+slangc glyph_quad.frag.slang -target spirv -entry fragmentMain -stage fragment -o glyph_quad.frag.spv
+g++ -std=c++23 -g -O0 main.cpp -o build/starbreaker $(pkg-config --cflags --libs freetype2) -lSDL3 -lfreetype -lharfbuzz
