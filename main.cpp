@@ -35,7 +35,8 @@ public:
   FT_Face get_face() const noexcept { return ft_face; }
   hb_font_t *get_font() const noexcept { return hb_font; }
 
-  AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height);
+  AppFont(FT_Library ftLib, const char *filepath, FT_F26Dot6 fontSize,
+          float displayScale);
   ~AppFont();
 
   AppFont(const AppFont &) = delete;
@@ -44,11 +45,13 @@ public:
   AppFont &operator=(AppFont &&) = delete;
 };
 
-AppFont::AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height)
-    : ft_library{ft_lib} {
+AppFont::AppFont(FT_Library ftLib, const char *filepath, FT_F26Dot6 fontSize,
+                 float displayScale)
+    : ft_library{ftLib} {
   if (FT_New_Face(ft_library, filepath, 0, &ft_face))
     throw std::runtime_error{"FT_New_Face failed!"};
-  if (FT_Set_Pixel_Sizes(ft_face, 0, pixel_height)) {
+  FT_UInt fontDPI = static_cast<FT_UInt>(96.0f * displayScale);
+  if (FT_Set_Char_Size(ft_face, 0, fontSize, fontDPI, fontDPI)) {
     FT_Done_Face(ft_face);
     throw std::runtime_error{"FT_Set_Pixel_Sizes failed!"};
   }
@@ -120,10 +123,12 @@ public:
   AppWindow &operator=(AppWindow &&) = delete;
 
   SDL_Window *get() { return window; }
+  float get_display_scale() { return display_scale; }
 
 private:
   SDL_Window *window = nullptr;
   SDL_GPUDevice *gpu_device = nullptr;
+  float display_scale = 0.0f;
 };
 
 AppWindow::AppWindow(SDL_GPUDevice *device) : gpu_device{device} {
@@ -132,6 +137,11 @@ AppWindow::AppWindow(SDL_GPUDevice *device) : gpu_device{device} {
                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
   if (not window)
     throw std::runtime_error{"SDL_CreateWindow failed!"};
+  display_scale = SDL_GetWindowDisplayScale(window);
+  if (display_scale == 0.0f) {
+    SDL_DestroyWindow(window);
+    throw std::runtime_error{"SDL_GetWindowDisplayScale failed!"};
+  }
   if (not SDL_ClaimWindowForGPUDevice(device, window)) {
     SDL_DestroyWindow(window);
     throw std::runtime_error{"SDL_ClaimWindowForGPUDevice failed!"};
@@ -653,7 +663,8 @@ struct GlyphData {
 
 class AppState {
 private:
-  AppFont app_font;
+  FT_Library ft_library;
+  std::optional<AppFont> app_font;
 
   AppGPUDevice app_device;
   AppWindow app_window;
@@ -669,9 +680,9 @@ private:
   std::vector<GlyphData> caption_glyphs;
 
 public:
-  AppState(FT_Library ft_library)
-      : app_font{ft_library, "assets/DejaVuSans.ttf", 14}, app_device{},
-        app_window{app_device.get()}, caption_sampler{app_device.get()},
+  AppState(FT_Library ftLibrary)
+      : ft_library{ftLibrary}, app_device{}, app_window{app_device.get()},
+        caption_sampler{app_device.get()},
         caption_pipeline{app_device.get(), app_window.get()},
         glyph_pipeline{app_device.get()} {}
 
@@ -730,11 +741,13 @@ SDL_AppResult AppState::iterate() noexcept {
 }
 
 void AppState::caption_glyphs_alloc() {
+  app_font.emplace(ft_library, "assets/DejaVuSans.ttf", 10 * 64,
+                   app_window.get_display_scale());
   hb_buffer_t *glyphBuffer = hb_buffer_create();
 
   hb_buffer_add_utf8(glyphBuffer, caption_string.data(), -1, 0, -1);
   hb_buffer_guess_segment_properties(glyphBuffer);
-  hb_shape(app_font.get_font(), glyphBuffer, nullptr, 0);
+  hb_shape(app_font->get_font(), glyphBuffer, nullptr, 0);
 
   unsigned int glyphCount = 0;
   hb_glyph_info_t *glyphInfos =
@@ -757,14 +770,14 @@ void AppState::caption_glyphs_alloc() {
 void AppState::caption_glyphs_render() {
   for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
     FT_Int32 flags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
-    FT_Error loadErr =
-        FT_Load_Glyph(app_font.get_face(), caption_glyphs[i].codepoint, flags);
-    if (loadErr != 0) {
+    if (FT_Load_Glyph(app_font->get_face(), caption_glyphs[i].codepoint,
+                      flags) != 0) {
       SDL_Log("FT_Load_Glyph failed for glyph: %d",
               caption_glyphs[i].codepoint);
       continue;
     }
-    FT_GlyphSlot slot = app_font.get_face()->glyph;
+    FT_Face face = app_font->get_face();
+    FT_GlyphSlot slot = face->glyph;
     caption_glyphs[i].bitmap_left = slot->bitmap_left;
     caption_glyphs[i].bitmap_top = slot->bitmap_top;
     caption_glyphs[i].rsb_delta = slot->rsb_delta;
@@ -906,10 +919,11 @@ void AppState::caption_glyphs_combine() {
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
-  if (not SDL_Init(SDL_INIT_VIDEO)) {
-    SDL_Log("SDL_Init failed: %s", SDL_GetError());
+  if (not SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+    SDL_Log("SDL_Init_Subsystem failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
+  SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "waitevent");
   if (FT_Init_FreeType(&global_ft_library)) {
     SDL_Log("FT_Init_FreeType failed!");
     return SDL_APP_FAILURE;
@@ -935,6 +949,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     FT_Done_FreeType(global_ft_library);
     global_ft_library = nullptr;
   }
+  SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
 SDL_AppResult SDL_AppIterate(void *appstate) {
