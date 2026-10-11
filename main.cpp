@@ -533,6 +533,7 @@ public:
 
   SDL_GPUCommandBuffer *get_command() { return gpu_command; }
   SDL_GPUTexture *get_texture() { return gpu_texture; }
+  SDL_GPURenderPass *get_render_pass() { return render_pass; }
 
 private:
   SDL_GPUDevice *gpu_device = nullptr;
@@ -660,6 +661,9 @@ private:
   CaptionGPUSampler caption_sampler;
   CaptionGPUGraphicsPipeline caption_pipeline;
   GlyphGPUGraphicsPipeline glyph_pipeline;
+
+  std::optional<AppGPUTexture> caption_texture;
+  std::uint32_t caption_width, caption_height;
 
   std::string caption_string = "Hello world";
   std::vector<GlyphData> caption_glyphs;
@@ -806,14 +810,54 @@ void AppState::caption_glyphs_combine() {
     maxY = std::max(maxY, bottom);
   }
 
-  int combinedWidth = maxX - minX;
-  int combinedHeight = maxY - minY;
+  caption_width = static_cast<std::uint32_t>(maxX - minX);
+  caption_height = static_cast<std::uint32_t>(maxY - minY);
 
-  AppGPUTexture::CreateInfo textureInfo{
-      .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
-      .texture_width = static_cast<std::uint32_t>(combinedWidth),
-      .texture_height = static_cast<std::uint32_t>(combinedHeight)};
-  AppGPUTexture combinedTexture{app_device.get(), textureInfo};
+  AppGPURenderCommand::CreateInfo renderInfo{
+      .texture_width = caption_width,
+      .texture_height = caption_height,
+      .clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}};
+  AppGPURenderCommand renderCommand{app_device.get(), renderInfo};
+  caption_texture.emplace(app_device.get(), renderCommand.get_texture());
+
+  SDL_BindGPUGraphicsPipeline(renderCommand.get_render_pass(),
+                              glyph_pipeline.get());
+  struct GlyphUniforms {
+    float viewport[2];
+    float rect_pos[2];
+    float rect_size[2];
+  };
+  const float viewport[2] = {static_cast<float>(caption_width),
+                             static_cast<float>(caption_height)};
+  accumulatedX = 0.0f;
+  for (GlyphData &glyphData : caption_glyphs) {
+    float penX = accumulatedX;
+    accumulatedX += static_cast<float>(glyphData.x_advance) / 64.0f;
+
+    if (glyphData.width == 0 || glyphData.height == 0)
+      continue;
+
+    GlyphUniforms uniforms{};
+    uniforms.viewport[0] = viewport[0];
+    uniforms.viewport[1] = viewport[1];
+    uniforms.rect_pos[0] = penX +
+                           static_cast<float>(glyphData.x_offset) / 64.0f +
+                           static_cast<float>(glyphData.bitmap_left - minX);
+    uniforms.rect_pos[1] =
+        -1.0f * static_cast<float>(glyphData.y_offset) / 64.0f -
+        static_cast<float>(glyphData.bitmap_top) - static_cast<float>(minY);
+    uniforms.rect_size[0] = static_cast<float>(glyphData.width);
+    uniforms.rect_size[1] = static_cast<float>(glyphData.height);
+    SDL_PushGPUVertexUniformData(renderCommand.get_command(), 0, &uniforms,
+                                 sizeof(GlyphUniforms));
+
+    SDL_GPUTextureSamplerBinding sb{};
+    sb.texture = glyphData.texture->get();
+    sb.sampler = caption_sampler.get();
+    SDL_BindGPUFragmentSamplers(renderCommand.get_render_pass(), 0, &sb, 1);
+
+    SDL_DrawGPUPrimitives(renderCommand.get_render_pass(), 4, 1, 0, 0);
+  }
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
