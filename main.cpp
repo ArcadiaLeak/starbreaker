@@ -533,6 +533,8 @@ public:
 
   SDL_GPUCommandBuffer *get_command() { return gpu_command; }
   SDL_GPUTexture *get_texture() { return gpu_texture; }
+  std::uint32_t get_texture_width() { return texture_width; }
+  std::uint32_t get_texture_height() { return texture_height; }
   SDL_GPURenderPass *get_render_pass() { return render_pass; }
 
 private:
@@ -689,6 +691,43 @@ SDL_AppResult AppState::iterate() noexcept {
       .clear_color = SDL_FColor{0.08f, 0.08f, 0.10f, 1.0f}};
   AppGPURenderCommand swapchainCommand{app_device.get(), commandInfo};
 
+  SDL_BindGPUGraphicsPipeline(swapchainCommand.get_render_pass(),
+                              caption_pipeline.get());
+  struct QuadUniforms {
+    float viewport[2];
+    float rect_pos[2];
+    float rect_size[2];
+  };
+  struct BlitUniforms {
+    float tint[4];
+  };
+
+  QuadUniforms uniforms{};
+  uniforms.viewport[0] =
+      static_cast<float>(swapchainCommand.get_texture_width());
+  uniforms.viewport[1] =
+      static_cast<float>(swapchainCommand.get_texture_height());
+  uniforms.rect_pos[0] = 10.0f;
+  uniforms.rect_pos[1] = 10.0f;
+  uniforms.rect_size[0] = static_cast<float>(caption_width);
+  uniforms.rect_size[1] = static_cast<float>(caption_height);
+  SDL_PushGPUVertexUniformData(swapchainCommand.get_command(), 0, &uniforms,
+                               sizeof(QuadUniforms));
+
+  BlitUniforms blit{};
+  blit.tint[0] = 1.0f;
+  blit.tint[1] = 1.0f;
+  blit.tint[2] = 1.0f;
+  blit.tint[3] = 1.0f;
+  SDL_PushGPUFragmentUniformData(swapchainCommand.get_command(), 0, &blit,
+                                 sizeof(BlitUniforms));
+
+  SDL_GPUTextureSamplerBinding sb{};
+  sb.texture = caption_texture->get();
+  sb.sampler = caption_sampler.get();
+  SDL_BindGPUFragmentSamplers(swapchainCommand.get_render_pass(), 0, &sb, 1);
+
+  SDL_DrawGPUPrimitives(swapchainCommand.get_render_pass(), 4, 1, 0, 0);
   return SDL_APP_CONTINUE;
 }
 
@@ -785,8 +824,10 @@ void AppState::caption_glyphs_upload() {
 
 void AppState::caption_glyphs_combine() {
   float accumulatedX = 0.0f;
-  int minX = INT32_MAX, maxX = INT32_MIN;
-  int minY = INT32_MAX, maxY = INT32_MIN;
+  float minX = std::numeric_limits<float>::max(),
+        maxX = std::numeric_limits<float>::lowest();
+  float minY = std::numeric_limits<float>::max(),
+        maxY = std::numeric_limits<float>::lowest();
 
   for (const GlyphData &glyphData : caption_glyphs) {
     float penX = accumulatedX;
@@ -795,14 +836,12 @@ void AppState::caption_glyphs_combine() {
     if (glyphData.width == 0 || glyphData.height == 0)
       continue;
 
-    int left = static_cast<int>(
-        std::floor(penX + static_cast<float>(glyphData.x_offset) / 64.0f));
-    left += glyphData.bitmap_left;
-    int right = left + glyphData.width;
-    int top = static_cast<int>(
-        std::floor(-1.0f * static_cast<float>(glyphData.y_offset) / 64.0f));
-    top -= glyphData.bitmap_top;
-    int bottom = top + glyphData.height;
+    float left = penX + static_cast<float>(glyphData.x_offset) / 64.0f +
+                 static_cast<float>(glyphData.bitmap_left);
+    float right = left + static_cast<float>(glyphData.width);
+    float top = -1.0f * static_cast<float>(glyphData.y_offset) / 64.0f -
+                static_cast<float>(glyphData.bitmap_top);
+    float bottom = top + static_cast<float>(glyphData.height);
 
     minX = std::min(minX, left);
     maxX = std::max(maxX, right);
@@ -810,8 +849,8 @@ void AppState::caption_glyphs_combine() {
     maxY = std::max(maxY, bottom);
   }
 
-  caption_width = static_cast<std::uint32_t>(maxX - minX);
-  caption_height = static_cast<std::uint32_t>(maxY - minY);
+  caption_width = static_cast<std::uint32_t>(std::ceil(maxX - minX));
+  caption_height = static_cast<std::uint32_t>(std::ceil(maxY - minY));
 
   AppGPURenderCommand::CreateInfo renderInfo{
       .texture_width = caption_width,
@@ -842,10 +881,10 @@ void AppState::caption_glyphs_combine() {
     uniforms.viewport[1] = viewport[1];
     uniforms.rect_pos[0] = penX +
                            static_cast<float>(glyphData.x_offset) / 64.0f +
-                           static_cast<float>(glyphData.bitmap_left - minX);
+                           static_cast<float>(glyphData.bitmap_left) - minX;
     uniforms.rect_pos[1] =
         -1.0f * static_cast<float>(glyphData.y_offset) / 64.0f -
-        static_cast<float>(glyphData.bitmap_top) - static_cast<float>(minY);
+        static_cast<float>(glyphData.bitmap_top) - minY;
     uniforms.rect_size[0] = static_cast<float>(glyphData.width);
     uniforms.rect_size[1] = static_cast<float>(glyphData.height);
     SDL_PushGPUVertexUniformData(renderCommand.get_command(), 0, &uniforms,
