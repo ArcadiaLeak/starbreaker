@@ -400,30 +400,8 @@ CaptionGPUGraphicsPipeline::CaptionGPUGraphicsPipeline(SDL_GPUDevice *device,
   AppGPUShader::CreateInfo fragmentInfo{.filepath = "caption.frag.spv",
                                         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                         .num_samplers = 1,
-                                        .num_uniform_buffers = 0};
+                                        .num_uniform_buffers = 1};
   AppGPUShader fragmentShader{gpu_device, fragmentInfo};
-
-  std::array<SDL_GPUVertexAttribute, 2> attrs{};
-  attrs[0].location = 0;
-  attrs[0].buffer_slot = 0;
-  attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  attrs[0].offset = offsetof(Vertex, position);
-
-  attrs[1].location = 1;
-  attrs[1].buffer_slot = 0;
-  attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  attrs[1].offset = offsetof(Vertex, uv);
-
-  SDL_GPUVertexBufferDescription vertexDescription{};
-  vertexDescription.slot = 0;
-  vertexDescription.pitch = sizeof(Vertex);
-  vertexDescription.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-
-  SDL_GPUVertexInputState vertexInput{};
-  vertexInput.vertex_buffer_descriptions = &vertexDescription;
-  vertexInput.num_vertex_buffers = 1;
-  vertexInput.vertex_attributes = attrs.data();
-  vertexInput.num_vertex_attributes = 2;
 
   SDL_GPUColorTargetDescription colorTarget{};
   colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device, window);
@@ -435,6 +413,9 @@ CaptionGPUGraphicsPipeline::CaptionGPUGraphicsPipeline(SDL_GPUDevice *device,
   colorTarget.blend_state.dst_alpha_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
   colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.color_write_mask =
+      SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
+      SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
   colorTarget.blend_state.enable_blend = true;
 
   SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
@@ -444,11 +425,7 @@ CaptionGPUGraphicsPipeline::CaptionGPUGraphicsPipeline(SDL_GPUDevice *device,
   SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
   pipeInfo.vertex_shader = vertexShader.get();
   pipeInfo.fragment_shader = fragmentShader.get();
-  pipeInfo.vertex_input_state = vertexInput;
-  pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-  pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
-  pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-  pipeInfo.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+  pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
   pipeInfo.target_info = targetInfo;
 
   gpu_pipeline = SDL_CreateGPUGraphicsPipeline(gpu_device, &pipeInfo);
@@ -491,60 +468,34 @@ GlyphGPUGraphicsPipeline::GlyphGPUGraphicsPipeline(SDL_GPUDevice *device)
                                       .num_uniform_buffers = 1};
   AppGPUShader vertexShader{gpu_device, vertexInfo};
 
-  AppGPUShader::CreateInfo fragmentInfo{.filepath = "caption.frag.spv",
+  AppGPUShader::CreateInfo fragmentInfo{.filepath = "glyph.frag.spv",
                                         .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                         .num_samplers = 1,
                                         .num_uniform_buffers = 0};
   AppGPUShader fragmentShader{gpu_device, fragmentInfo};
 
-  std::array<SDL_GPUVertexAttribute, 2> attrs{};
-  attrs[0].location = 0;
-  attrs[0].buffer_slot = 0;
-  attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  attrs[0].offset = offsetof(Vertex, position);
+  SDL_GPUColorTargetBlendState blendState{};
+  blendState.enable_blend = true;
+  blendState.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  blendState.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  blendState.color_blend_op = SDL_GPU_BLENDOP_MAX;
+  blendState.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  blendState.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  blendState.alpha_blend_op = SDL_GPU_BLENDOP_MAX;
+  blendState.color_write_mask = SDL_GPU_COLORCOMPONENT_R;
 
-  attrs[1].location = 1;
-  attrs[1].buffer_slot = 0;
-  attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  attrs[1].offset = offsetof(Vertex, uv);
+  SDL_GPUColorTargetDescription colorTargetDescription{};
+  colorTargetDescription.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+  colorTargetDescription.blend_state = blendState;
 
-  SDL_GPUVertexBufferDescription vertexDescription{};
-  vertexDescription.slot = 0;
-  vertexDescription.pitch = sizeof(Vertex);
-  vertexDescription.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+  SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
+  pipelineInfo.vertex_shader = vertexShader.get();
+  pipelineInfo.fragment_shader = fragmentShader.get();
+  pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
+  pipelineInfo.target_info.color_target_descriptions = &colorTargetDescription;
+  pipelineInfo.target_info.num_color_targets = 1;
 
-  SDL_GPUVertexInputState vertexInput{};
-  vertexInput.vertex_buffer_descriptions = &vertexDescription;
-  vertexInput.num_vertex_buffers = 1;
-  vertexInput.vertex_attributes = attrs.data();
-  vertexInput.num_vertex_attributes = 2;
-
-  SDL_GPUColorTargetDescription colorTarget{};
-  colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-  colorTarget.blend_state.dst_color_blendfactor =
-      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-  colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-  colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-  colorTarget.blend_state.dst_alpha_blendfactor =
-      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-  colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-  colorTarget.blend_state.enable_blend = true;
-
-  SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
-  targetInfo.color_target_descriptions = &colorTarget;
-  targetInfo.num_color_targets = 1;
-
-  SDL_GPUGraphicsPipelineCreateInfo pipeInfo{};
-  pipeInfo.vertex_shader = vertexShader.get();
-  pipeInfo.fragment_shader = fragmentShader.get();
-  pipeInfo.vertex_input_state = vertexInput;
-  pipeInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-  pipeInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
-  pipeInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-  pipeInfo.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
-  pipeInfo.target_info = targetInfo;
-
-  gpu_pipeline = SDL_CreateGPUGraphicsPipeline(gpu_device, &pipeInfo);
+  gpu_pipeline = SDL_CreateGPUGraphicsPipeline(gpu_device, &pipelineInfo);
   if (not gpu_pipeline) {
     std::string errorMsg{"SDL_CreateGPUGraphicsPipeline failed: "};
     errorMsg.append(SDL_GetError());
