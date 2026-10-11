@@ -270,16 +270,23 @@ CaptionGPUSampler::~CaptionGPUSampler() {
   SDL_ReleaseGPUSampler(gpu_device, gpu_sampler);
 }
 
-class AppGPUGlyphTexture {
+class AppGPUTexture {
 public:
-  AppGPUGlyphTexture(SDL_GPUDevice *device, std::uint32_t textureWidth,
-                     std::uint32_t textureHeight);
-  ~AppGPUGlyphTexture();
+  struct CreateInfo {
+    SDL_GPUTextureUsageFlags usage;
+    std::uint32_t texture_width;
+    std::uint32_t texture_height;
+  };
 
-  AppGPUGlyphTexture(const AppGPUGlyphTexture &) = delete;
-  AppGPUGlyphTexture &operator=(const AppGPUGlyphTexture &) = delete;
-  AppGPUGlyphTexture(AppGPUGlyphTexture &&) = delete;
-  AppGPUGlyphTexture &operator=(AppGPUGlyphTexture &&) = delete;
+  AppGPUTexture(SDL_GPUDevice *device, SDL_GPUTexture *texture)
+      : gpu_device{device}, gpu_texture{texture} {}
+  AppGPUTexture(SDL_GPUDevice *device, CreateInfo createInfo);
+  ~AppGPUTexture();
+
+  AppGPUTexture(const AppGPUTexture &) = delete;
+  AppGPUTexture &operator=(const AppGPUTexture &) = delete;
+  AppGPUTexture(AppGPUTexture &&) = delete;
+  AppGPUTexture &operator=(AppGPUTexture &&) = delete;
 
   SDL_GPUTexture *get() { return gpu_texture; }
 
@@ -288,16 +295,14 @@ private:
   SDL_GPUTexture *gpu_texture = nullptr;
 };
 
-AppGPUGlyphTexture::AppGPUGlyphTexture(SDL_GPUDevice *device,
-                                       std::uint32_t textureWidth,
-                                       std::uint32_t textureHeight)
+AppGPUTexture::AppGPUTexture(SDL_GPUDevice *device, CreateInfo createInfo)
     : gpu_device{device} {
   SDL_GPUTextureCreateInfo textureInfo{};
   textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
   textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
-  textureInfo.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-  textureInfo.width = textureWidth;
-  textureInfo.height = textureHeight;
+  textureInfo.usage = createInfo.usage;
+  textureInfo.width = createInfo.texture_width;
+  textureInfo.height = createInfo.texture_height;
   textureInfo.layer_count_or_depth = 1;
   textureInfo.num_levels = 1;
   textureInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
@@ -309,7 +314,7 @@ AppGPUGlyphTexture::AppGPUGlyphTexture(SDL_GPUDevice *device,
   }
 }
 
-AppGPUGlyphTexture::~AppGPUGlyphTexture() {
+AppGPUTexture::~AppGPUTexture() {
   if (not gpu_texture)
     return;
   SDL_ReleaseGPUTexture(gpu_device, gpu_texture);
@@ -509,28 +514,36 @@ GlyphGPUGraphicsPipeline::~GlyphGPUGraphicsPipeline() {
   SDL_ReleaseGPUGraphicsPipeline(gpu_device, gpu_pipeline);
 }
 
-class AppGPUSwapchainCommand {
+class AppGPURenderCommand {
 public:
-  AppGPUSwapchainCommand(SDL_GPUDevice *device, SDL_Window *window);
-  ~AppGPUSwapchainCommand();
+  struct CreateInfo {
+    SDL_Window *swapchain_window;
+    std::uint32_t texture_width;
+    std::uint32_t texture_height;
+    SDL_FColor clear_color;
+  };
 
-  AppGPUSwapchainCommand(const AppGPUSwapchainCommand &) = delete;
-  AppGPUSwapchainCommand &operator=(const AppGPUSwapchainCommand &) = delete;
-  AppGPUSwapchainCommand(AppGPUSwapchainCommand &&) = delete;
-  AppGPUSwapchainCommand &operator=(AppGPUSwapchainCommand &&) = delete;
+  AppGPURenderCommand(SDL_GPUDevice *device, CreateInfo createInfo);
+  ~AppGPURenderCommand();
+
+  AppGPURenderCommand(const AppGPURenderCommand &) = delete;
+  AppGPURenderCommand &operator=(const AppGPURenderCommand &) = delete;
+  AppGPURenderCommand(AppGPURenderCommand &&) = delete;
+  AppGPURenderCommand &operator=(AppGPURenderCommand &&) = delete;
 
   SDL_GPUCommandBuffer *get_command() { return gpu_command; }
-  SDL_GPUTexture *get_swapchain() { return swapchain; }
+  SDL_GPUTexture *get_texture() { return gpu_texture; }
 
 private:
   SDL_GPUDevice *gpu_device = nullptr;
   SDL_GPUCommandBuffer *gpu_command = nullptr;
-  SDL_GPUTexture *swapchain = nullptr;
-  std::uint32_t swapchain_width = 0, swapchain_height = 0;
+  SDL_GPUTexture *gpu_texture = nullptr;
+  std::uint32_t texture_width = 0, texture_height = 0;
+  SDL_GPURenderPass *render_pass = nullptr;
 };
 
-AppGPUSwapchainCommand::AppGPUSwapchainCommand(SDL_GPUDevice *device,
-                                               SDL_Window *window)
+AppGPURenderCommand::AppGPURenderCommand(SDL_GPUDevice *device,
+                                         CreateInfo createInfo)
     : gpu_device{device} {
   gpu_command = SDL_AcquireGPUCommandBuffer(gpu_device);
   if (not gpu_command) {
@@ -538,16 +551,50 @@ AppGPUSwapchainCommand::AppGPUSwapchainCommand(SDL_GPUDevice *device,
     errorMsg.append(SDL_GetError());
     throw std::runtime_error{errorMsg};
   }
-  if (not SDL_WaitAndAcquireGPUSwapchainTexture(gpu_command, window, &swapchain,
-                                                &swapchain_width,
-                                                &swapchain_height)) {
-    std::string errorMsg{"SDL_WaitAndAcquireGPUSwapchainTexture failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+
+  if (createInfo.swapchain_window) {
+    if (not SDL_WaitAndAcquireGPUSwapchainTexture(
+            gpu_command, createInfo.swapchain_window, &gpu_texture,
+            &texture_width, &texture_height)) {
+      std::string errorMsg{"SDL_WaitAndAcquireGPUSwapchainTexture failed: "};
+      errorMsg.append(SDL_GetError());
+      throw std::runtime_error{errorMsg};
+    }
+  } else {
+    texture_height = createInfo.texture_height;
+    texture_width = createInfo.texture_width;
+
+    SDL_GPUTextureCreateInfo textureInfo{};
+    textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
+    textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+    textureInfo.usage =
+        SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    textureInfo.width = texture_width;
+    textureInfo.height = texture_height;
+    textureInfo.layer_count_or_depth = 1;
+    textureInfo.num_levels = 1;
+    textureInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    gpu_texture = SDL_CreateGPUTexture(device, &textureInfo);
+    if (not gpu_texture) {
+      std::string errorMsg{"SDL_CreateGPUTexture failed: "};
+      errorMsg.append(SDL_GetError());
+      throw std::runtime_error{errorMsg};
+    }
+  }
+
+  if (gpu_texture) {
+    SDL_GPUColorTargetInfo colorTarget{};
+    colorTarget.texture = gpu_texture;
+    colorTarget.clear_color = createInfo.clear_color;
+    colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+    colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+    render_pass = SDL_BeginGPURenderPass(gpu_command, &colorTarget, 1, nullptr);
   }
 }
 
-AppGPUSwapchainCommand::~AppGPUSwapchainCommand() {
+AppGPURenderCommand::~AppGPURenderCommand() {
+  if (gpu_texture)
+    SDL_EndGPURenderPass(render_pass);
   if (SDL_SubmitGPUCommandBuffer(gpu_command))
     return;
   SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
@@ -565,12 +612,12 @@ public:
   AppGPUCopyCommand &operator=(AppGPUCopyCommand &&) = delete;
 
   SDL_GPUCommandBuffer *get_command() { return gpu_command; }
-  SDL_GPUCopyPass *get_copy_pass() { return gpu_copy_pass; }
+  SDL_GPUCopyPass *get_copy_pass() { return copy_pass; }
 
 private:
   SDL_GPUDevice *gpu_device = nullptr;
   SDL_GPUCommandBuffer *gpu_command = nullptr;
-  SDL_GPUCopyPass *gpu_copy_pass = nullptr;
+  SDL_GPUCopyPass *copy_pass = nullptr;
 };
 
 AppGPUCopyCommand::AppGPUCopyCommand(SDL_GPUDevice *device)
@@ -581,11 +628,11 @@ AppGPUCopyCommand::AppGPUCopyCommand(SDL_GPUDevice *device)
     errorMsg.append(SDL_GetError());
     throw std::runtime_error{errorMsg};
   }
-  gpu_copy_pass = SDL_BeginGPUCopyPass(gpu_command);
+  copy_pass = SDL_BeginGPUCopyPass(gpu_command);
 }
 
 AppGPUCopyCommand::~AppGPUCopyCommand() {
-  SDL_EndGPUCopyPass(gpu_copy_pass);
+  SDL_EndGPUCopyPass(copy_pass);
   if (SDL_SubmitGPUCommandBuffer(gpu_command))
     return;
   SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
@@ -600,7 +647,7 @@ struct GlyphData {
   std::vector<unsigned char> bitmap;
   unsigned int width, height;
   int bitmap_left, bitmap_top;
-  std::optional<AppGPUGlyphTexture> texture;
+  std::optional<AppGPUTexture> texture;
 };
 
 class AppState {
@@ -633,19 +680,10 @@ public:
 };
 
 SDL_AppResult AppState::iterate() noexcept {
-  AppGPUSwapchainCommand swapchainCommand{app_device.get(), app_window.get()};
-
-  if (SDL_GPUTexture *swapchain = swapchainCommand.get_swapchain(); swapchain) {
-    SDL_GPUColorTargetInfo colorTarget{};
-    colorTarget.texture = swapchain;
-    colorTarget.clear_color = {0.08f, 0.08f, 0.10f, 1.0f};
-    colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
-    colorTarget.store_op = SDL_GPU_STOREOP_STORE;
-
-    SDL_GPURenderPass *renderPass = SDL_BeginGPURenderPass(
-        swapchainCommand.get_command(), &colorTarget, 1, nullptr);
-    SDL_EndGPURenderPass(renderPass);
-  }
+  AppGPURenderCommand::CreateInfo commandInfo{
+      .swapchain_window = app_window.get(),
+      .clear_color = SDL_FColor{0.08f, 0.08f, 0.10f, 1.0f}};
+  AppGPURenderCommand swapchainCommand{app_device.get(), commandInfo};
 
   return SDL_APP_CONTINUE;
 }
@@ -710,8 +748,11 @@ void AppState::caption_glyphs_upload() {
   for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
     if (caption_glyphs[i].width == 0 || caption_glyphs[i].height == 0)
       continue;
-    caption_glyphs[i].texture.emplace(app_device.get(), caption_glyphs[i].width,
-                                      caption_glyphs[i].height);
+    AppGPUTexture::CreateInfo textureInfo{
+        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        .texture_width = caption_glyphs[i].width,
+        .texture_height = caption_glyphs[i].height};
+    caption_glyphs[i].texture.emplace(app_device.get(), textureInfo);
     uploadBuffers[i].emplace(
         app_device.get(),
         static_cast<std::uint32_t>(caption_glyphs[i].bitmap.size()));
@@ -739,31 +780,40 @@ void AppState::caption_glyphs_upload() {
 }
 
 void AppState::caption_glyphs_combine() {
-  float penX = 0.0f;
+  float accumulatedX = 0.0f;
   int minX = INT32_MAX, maxX = INT32_MIN;
   int minY = INT32_MAX, maxY = INT32_MIN;
 
   for (const GlyphData &glyphData : caption_glyphs) {
-    if (glyphData.width > 0 && glyphData.height > 0) {
-      int left = static_cast<int>(
-          std::floor(penX + static_cast<float>(glyphData.x_offset) / 64.0f));
-      left += glyphData.bitmap_left;
-      int right = left + glyphData.width;
-      int top = static_cast<int>(
-          std::floor(-1.0f * static_cast<float>(glyphData.y_offset) / 64.0f));
-      top -= glyphData.bitmap_top;
-      int bottom = top + glyphData.height;
+    float penX = accumulatedX;
+    accumulatedX += static_cast<float>(glyphData.x_advance) / 64.0f;
 
-      minX = std::min(minX, left);
-      maxX = std::max(maxX, right);
-      minY = std::min(minY, top);
-      maxY = std::max(maxY, bottom);
-    }
-    penX += static_cast<float>(glyphData.x_advance) / 64.0f;
+    if (glyphData.width == 0 || glyphData.height == 0)
+      continue;
+
+    int left = static_cast<int>(
+        std::floor(penX + static_cast<float>(glyphData.x_offset) / 64.0f));
+    left += glyphData.bitmap_left;
+    int right = left + glyphData.width;
+    int top = static_cast<int>(
+        std::floor(-1.0f * static_cast<float>(glyphData.y_offset) / 64.0f));
+    top -= glyphData.bitmap_top;
+    int bottom = top + glyphData.height;
+
+    minX = std::min(minX, left);
+    maxX = std::max(maxX, right);
+    minY = std::min(minY, top);
+    maxY = std::max(maxY, bottom);
   }
 
   int combinedWidth = maxX - minX;
   int combinedHeight = maxY - minY;
+
+  AppGPUTexture::CreateInfo textureInfo{
+      .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
+      .texture_width = static_cast<std::uint32_t>(combinedWidth),
+      .texture_height = static_cast<std::uint32_t>(combinedHeight)};
+  AppGPUTexture combinedTexture{app_device.get(), textureInfo};
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
