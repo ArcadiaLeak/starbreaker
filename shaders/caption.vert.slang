@@ -13,7 +13,7 @@ struct GlyphUniforms {
 ConstantBuffer<GlyphUniforms> u;
 
 [shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VertexID)
+VSOutput vs_main(uint vertexID : SV_VulkanVertexID)
 {
     VSOutput output;
 

@@ -1,4 +1,3 @@
-#include <SDL3/SDL_video.h>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -54,7 +53,6 @@ AppFont::AppFont(FT_Library ft_lib, const char *filepath, FT_UInt pixel_height)
     throw std::runtime_error{"FT_Set_Pixel_Sizes failed!"};
   }
   hb_font = hb_ft_font_create(ft_face, nullptr);
-  hb_ft_font_set_load_flags(hb_font, FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
 }
 
 AppFont::~AppFont() {
@@ -645,8 +643,8 @@ AppGPUCopyCommand::~AppGPUCopyCommand() {
 struct GlyphData {
   hb_codepoint_t codepoint;
   std::uint32_t cluster;
-  hb_position_t x_advance, y_advance;
-  hb_position_t x_offset, y_offset;
+  hb_position_t x_advance, x_offset, y_offset;
+  FT_Pos rsb_delta;
   std::vector<unsigned char> bitmap;
   unsigned int width, height;
   int bitmap_left, bitmap_top;
@@ -667,7 +665,7 @@ private:
   std::optional<AppGPUTexture> caption_texture;
   std::uint32_t caption_width, caption_height;
 
-  std::string caption_string = "Hello world";
+  std::string caption_string = "Hello world kerning Text";
   std::vector<GlyphData> caption_glyphs;
 
 public:
@@ -749,7 +747,6 @@ void AppState::caption_glyphs_alloc() {
     caption_glyphs[i].codepoint = glyphInfos[i].codepoint;
     caption_glyphs[i].cluster = glyphInfos[i].cluster;
     caption_glyphs[i].x_advance = glyphPositions[i].x_advance;
-    caption_glyphs[i].y_advance = glyphPositions[i].y_advance;
     caption_glyphs[i].x_offset = glyphPositions[i].x_offset;
     caption_glyphs[i].y_offset = glyphPositions[i].y_offset;
   }
@@ -758,29 +755,36 @@ void AppState::caption_glyphs_alloc() {
 }
 
 void AppState::caption_glyphs_render() {
-  for (GlyphData &glyphData : caption_glyphs) {
-    FT_Int32 glyphFlags =
-        FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
-    FT_Error glyphLoadErr =
-        FT_Load_Glyph(app_font.get_face(), glyphData.codepoint, glyphFlags);
-    if (glyphLoadErr != 0) {
-      SDL_Log("FT_Load_Glyph failed for glyph: %d", glyphData.codepoint);
+  for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
+    FT_Int32 flags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
+    FT_Error loadErr =
+        FT_Load_Glyph(app_font.get_face(), caption_glyphs[i].codepoint, flags);
+    if (loadErr != 0) {
+      SDL_Log("FT_Load_Glyph failed for glyph: %d",
+              caption_glyphs[i].codepoint);
       continue;
     }
-    FT_GlyphSlot glyphSlot = app_font.get_face()->glyph;
-    glyphData.bitmap_left = glyphSlot->bitmap_left;
-    glyphData.bitmap_top = glyphSlot->bitmap_top;
-    const FT_Bitmap &glyphBitmap = glyphSlot->bitmap;
-    glyphData.width = glyphBitmap.width;
-    glyphData.height = glyphBitmap.rows;
-    if (glyphData.width == 0 || glyphData.height == 0)
+    FT_GlyphSlot slot = app_font.get_face()->glyph;
+    caption_glyphs[i].bitmap_left = slot->bitmap_left;
+    caption_glyphs[i].bitmap_top = slot->bitmap_top;
+    caption_glyphs[i].rsb_delta = slot->rsb_delta;
+    if (i != 0) {
+      FT_Pos delta_diff = caption_glyphs[i - 1].rsb_delta - slot->lsb_delta;
+      if (delta_diff > 32)
+        caption_glyphs[i].x_offset -= 64;
+      else if (delta_diff < -31)
+        caption_glyphs[i].x_offset += 64;
+    }
+    const FT_Bitmap &bitmap = slot->bitmap;
+    caption_glyphs[i].width = bitmap.width;
+    caption_glyphs[i].height = bitmap.rows;
+    if (caption_glyphs[i].width == 0 || caption_glyphs[i].height == 0)
       continue;
-    glyphData.bitmap.resize(glyphBitmap.width * glyphBitmap.rows);
-    for (unsigned int y = 0; y < glyphBitmap.rows; ++y) {
-      const uint8_t *rowSource =
-          glyphBitmap.buffer + y * std::abs(glyphBitmap.pitch);
-      uint8_t *rowTarget = glyphData.bitmap.data() + y * glyphBitmap.width;
-      std::memcpy(rowTarget, rowSource, glyphBitmap.width);
+    caption_glyphs[i].bitmap.resize(bitmap.width * bitmap.rows);
+    for (unsigned int y = 0; y < bitmap.rows; ++y) {
+      const uint8_t *rowSource = bitmap.buffer + y * std::abs(bitmap.pitch);
+      uint8_t *rowTarget = caption_glyphs[i].bitmap.data() + y * bitmap.width;
+      std::memcpy(rowTarget, rowSource, bitmap.width);
     }
   }
 }
@@ -823,25 +827,25 @@ void AppState::caption_glyphs_upload() {
 }
 
 void AppState::caption_glyphs_combine() {
-  float accumulatedX = 0.0f;
-  float minX = std::numeric_limits<float>::max(),
-        maxX = std::numeric_limits<float>::lowest();
-  float minY = std::numeric_limits<float>::max(),
-        maxY = std::numeric_limits<float>::lowest();
+  hb_position_t accumulatedX{};
+  hb_position_t minX = std::numeric_limits<hb_position_t>::max(),
+                maxX = std::numeric_limits<hb_position_t>::min();
+  hb_position_t minY = std::numeric_limits<hb_position_t>::max(),
+                maxY = std::numeric_limits<hb_position_t>::min();
 
   for (const GlyphData &glyphData : caption_glyphs) {
-    float penX = accumulatedX;
-    accumulatedX += static_cast<float>(glyphData.x_advance) / 64.0f;
+    hb_position_t penX = accumulatedX;
+    accumulatedX += glyphData.x_advance;
 
     if (glyphData.width == 0 || glyphData.height == 0)
       continue;
 
-    float left = penX + static_cast<float>(glyphData.x_offset) / 64.0f +
-                 static_cast<float>(glyphData.bitmap_left);
-    float right = left + static_cast<float>(glyphData.width);
-    float top = -1.0f * static_cast<float>(glyphData.y_offset) / 64.0f -
-                static_cast<float>(glyphData.bitmap_top);
-    float bottom = top + static_cast<float>(glyphData.height);
+    hb_position_t left = penX + glyphData.x_offset + glyphData.bitmap_left * 64;
+    hb_position_t right =
+        left + static_cast<hb_position_t>(glyphData.width) * 64;
+    hb_position_t top = -glyphData.y_offset - glyphData.bitmap_top * 64;
+    hb_position_t bottom =
+        top + static_cast<hb_position_t>(glyphData.height) * 64;
 
     minX = std::min(minX, left);
     maxX = std::max(maxX, right);
@@ -849,8 +853,10 @@ void AppState::caption_glyphs_combine() {
     maxY = std::max(maxY, bottom);
   }
 
-  caption_width = static_cast<std::uint32_t>(std::ceil(maxX - minX));
-  caption_height = static_cast<std::uint32_t>(std::ceil(maxY - minY));
+  caption_width = static_cast<std::uint32_t>(
+      std::ceil(static_cast<float>(maxX - minX) / 64.0f));
+  caption_height = static_cast<std::uint32_t>(
+      std::ceil(static_cast<float>(maxY - minY) / 64.0f));
 
   AppGPURenderCommand::CreateInfo renderInfo{
       .texture_width = caption_width,
@@ -866,25 +872,25 @@ void AppState::caption_glyphs_combine() {
     float rect_pos[2];
     float rect_size[2];
   };
-  const float viewport[2] = {static_cast<float>(caption_width),
-                             static_cast<float>(caption_height)};
-  accumulatedX = 0.0f;
-  for (GlyphData &glyphData : caption_glyphs) {
-    float penX = accumulatedX;
-    accumulatedX += static_cast<float>(glyphData.x_advance) / 64.0f;
+
+  for (accumulatedX = 0; GlyphData &glyphData : caption_glyphs) {
+    hb_position_t penX = accumulatedX;
+    accumulatedX += glyphData.x_advance;
 
     if (glyphData.width == 0 || glyphData.height == 0)
       continue;
 
     GlyphUniforms uniforms{};
-    uniforms.viewport[0] = viewport[0];
-    uniforms.viewport[1] = viewport[1];
-    uniforms.rect_pos[0] = penX +
-                           static_cast<float>(glyphData.x_offset) / 64.0f +
-                           static_cast<float>(glyphData.bitmap_left) - minX;
+    uniforms.viewport[0] = static_cast<float>(caption_width);
+    uniforms.viewport[1] = static_cast<float>(caption_height);
+    uniforms.rect_pos[0] =
+        static_cast<float>(penX + glyphData.x_offset +
+                           glyphData.bitmap_left * 64 - minX) /
+        64.0f;
     uniforms.rect_pos[1] =
-        -1.0f * static_cast<float>(glyphData.y_offset) / 64.0f -
-        static_cast<float>(glyphData.bitmap_top) - minY;
+        static_cast<float>(-glyphData.y_offset - glyphData.bitmap_top * 64 -
+                           minY) /
+        64.0f;
     uniforms.rect_size[0] = static_cast<float>(glyphData.width);
     uniforms.rect_size[1] = static_cast<float>(glyphData.height);
     SDL_PushGPUVertexUniformData(renderCommand.get_command(), 0, &uniforms,
