@@ -716,8 +716,13 @@ SDL_AppResult AppState::iterate() noexcept {
       static_cast<float>(swapchainCommand.get_texture_width());
   uniforms.viewport[1] =
       static_cast<float>(swapchainCommand.get_texture_height());
-  uniforms.rect_pos[0] = 10.0f;
-  uniforms.rect_pos[1] = 10.0f;
+  uniforms.rect_pos[0] = std::trunc(
+      static_cast<float>(swapchainCommand.get_texture_width() - caption_width) /
+      2.0f);
+  uniforms.rect_pos[1] =
+      std::trunc(static_cast<float>(swapchainCommand.get_texture_height() -
+                                    caption_height) /
+                 2.0f);
   uniforms.rect_size[0] = static_cast<float>(caption_width);
   uniforms.rect_size[1] = static_cast<float>(caption_height);
   SDL_PushGPUVertexUniformData(swapchainCommand.get_command(), 0, &uniforms,
@@ -923,7 +928,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_Log("SDL_Init_Subsystem failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "waitevent");
   if (FT_Init_FreeType(&global_ft_library)) {
     SDL_Log("FT_Init_FreeType failed!");
     return SDL_APP_FAILURE;
@@ -958,8 +962,14 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
 }
 
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
-  if (event->type == SDL_EVENT_QUIT || event->type == SDL_EVENT_KEY_DOWN)
+  if (event->type == SDL_EVENT_QUIT)
     return SDL_APP_SUCCESS;
-  else
+
+  if (event->type == SDL_EVENT_MOUSE_BUTTON_UP ||
+      event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+    SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
     return SDL_APP_CONTINUE;
+  }
+
+  return SDL_APP_CONTINUE;
 }
