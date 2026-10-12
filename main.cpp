@@ -1,4 +1,3 @@
-#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -131,20 +130,33 @@ private:
   float display_scale = 0.0f;
 };
 
+constexpr int INITIAL_WINDOW_WIDTH = 800;
+constexpr int INITIAL_WINDOW_HEIGHT = 600;
+
 AppWindow::AppWindow(SDL_GPUDevice *device) : gpu_device{device} {
   window =
-      SDL_CreateWindow("Hello GPU", 800, 600,
+      SDL_CreateWindow("Hello GPU", INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT,
                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-  if (not window)
-    throw std::runtime_error{"SDL_CreateWindow failed!"};
+  if (not window) {
+    std::string errorMsg{"SDL_CreateWindow failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
+  }
   display_scale = SDL_GetWindowDisplayScale(window);
   if (display_scale == 0.0f) {
     SDL_DestroyWindow(window);
-    throw std::runtime_error{"SDL_GetWindowDisplayScale failed!"};
+    std::string errorMsg{"SDL_GetWindowDisplayScale failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
+  }
+  if (not SDL_SetWindowMinimumSize(window, INITIAL_WINDOW_WIDTH,
+                                   INITIAL_WINDOW_HEIGHT)) {
+    SDL_DestroyWindow(window);
+    std::string errorMsg{"SDL_SetWindowMinimumSize failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   if (not SDL_ClaimWindowForGPUDevice(device, window)) {
     SDL_DestroyWindow(window);
-    throw std::runtime_error{"SDL_ClaimWindowForGPUDevice failed!"};
+    std::string errorMsg{"SDL_ClaimWindowForGPUDevice failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
 }
 
@@ -674,7 +686,7 @@ private:
   GlyphGPUGraphicsPipeline glyph_pipeline;
 
   std::optional<AppGPUTexture> caption_texture;
-  std::uint32_t caption_width, caption_height;
+  SDL_Rect caption_rect;
 
   std::string caption_string = "Hello world kerning Text";
   std::vector<GlyphData> caption_glyphs;
@@ -692,6 +704,7 @@ public:
   void caption_glyphs_combine();
 
   SDL_AppResult iterate() noexcept;
+  SDL_AppResult handle_event(SDL_Event *event) noexcept;
 };
 
 SDL_AppResult AppState::iterate() noexcept {
@@ -716,15 +729,10 @@ SDL_AppResult AppState::iterate() noexcept {
       static_cast<float>(swapchainCommand.get_texture_width());
   uniforms.viewport[1] =
       static_cast<float>(swapchainCommand.get_texture_height());
-  uniforms.rect_pos[0] = std::trunc(
-      static_cast<float>(swapchainCommand.get_texture_width() - caption_width) /
-      2.0f);
-  uniforms.rect_pos[1] =
-      std::trunc(static_cast<float>(swapchainCommand.get_texture_height() -
-                                    caption_height) /
-                 2.0f);
-  uniforms.rect_size[0] = static_cast<float>(caption_width);
-  uniforms.rect_size[1] = static_cast<float>(caption_height);
+  uniforms.rect_pos[0] = static_cast<float>(caption_rect.x);
+  uniforms.rect_pos[1] = static_cast<float>(caption_rect.y);
+  uniforms.rect_size[0] = static_cast<float>(caption_rect.w);
+  uniforms.rect_size[1] = static_cast<float>(caption_rect.h);
   SDL_PushGPUVertexUniformData(swapchainCommand.get_command(), 0, &uniforms,
                                sizeof(QuadUniforms));
 
@@ -743,6 +751,21 @@ SDL_AppResult AppState::iterate() noexcept {
 
   SDL_DrawGPUPrimitives(swapchainCommand.get_render_pass(), 4, 1, 0, 0);
   return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
+  if (event->type == SDL_EVENT_QUIT)
+    return SDL_APP_SUCCESS;
+  else if (event->type == SDL_EVENT_MOUSE_BUTTON_UP ||
+           event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+    SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
+    return SDL_APP_CONTINUE;
+  } else if (event->type == SDL_EVENT_WINDOW_RESIZED) {
+    caption_rect.x = (event->window.data1 - caption_rect.w) / 2;
+    caption_rect.y = (event->window.data2 - caption_rect.h) / 2;
+    return SDL_APP_CONTINUE;
+  } else
+    return SDL_APP_CONTINUE;
 }
 
 void AppState::caption_glyphs_alloc() {
@@ -871,14 +894,16 @@ void AppState::caption_glyphs_combine() {
     maxY = std::max(maxY, bottom);
   }
 
-  caption_width = static_cast<std::uint32_t>(
+  caption_rect.w = static_cast<std::int32_t>(
       std::ceil(static_cast<float>(maxX - minX) / 64.0f));
-  caption_height = static_cast<std::uint32_t>(
+  caption_rect.h = static_cast<std::int32_t>(
       std::ceil(static_cast<float>(maxY - minY) / 64.0f));
+  caption_rect.x = (INITIAL_WINDOW_WIDTH - caption_rect.w) / 2;
+  caption_rect.y = (INITIAL_WINDOW_HEIGHT - caption_rect.h) / 2;
 
   AppGPURenderCommand::CreateInfo renderInfo{
-      .texture_width = caption_width,
-      .texture_height = caption_height,
+      .texture_width = static_cast<std::uint32_t>(caption_rect.w),
+      .texture_height = static_cast<std::uint32_t>(caption_rect.h),
       .clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}};
   AppGPURenderCommand renderCommand{app_device.get(), renderInfo};
   caption_texture.emplace(app_device.get(), renderCommand.get_texture());
@@ -899,8 +924,8 @@ void AppState::caption_glyphs_combine() {
       continue;
 
     GlyphUniforms uniforms{};
-    uniforms.viewport[0] = static_cast<float>(caption_width);
-    uniforms.viewport[1] = static_cast<float>(caption_height);
+    uniforms.viewport[0] = static_cast<float>(caption_rect.w);
+    uniforms.viewport[1] = static_cast<float>(caption_rect.h);
     uniforms.rect_pos[0] =
         static_cast<float>(penX + glyphData.x_offset +
                            glyphData.bitmap_left * 64 - minX) /
@@ -957,19 +982,11 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
 }
 
 SDL_AppResult SDL_AppIterate(void *appstate) {
-  AppState *app = (AppState *)appstate;
+  AppState *app = static_cast<AppState *>(appstate);
   return app->iterate();
 }
 
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
-  if (event->type == SDL_EVENT_QUIT)
-    return SDL_APP_SUCCESS;
-
-  if (event->type == SDL_EVENT_MOUSE_BUTTON_UP ||
-      event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-    SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
-    return SDL_APP_CONTINUE;
-  }
-
-  return SDL_APP_CONTINUE;
+  AppState *app = static_cast<AppState *>(appstate);
+  return app->handle_event(event);
 }
