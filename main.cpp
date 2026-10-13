@@ -2,8 +2,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -23,63 +25,42 @@ struct Vertex {
   float uv[2];
 };
 
-static FT_Library global_ft_library = nullptr;
+static FT_Library globalFTLibrary = nullptr;
 
-class AppFont {
-private:
-  FT_Face ft_face = nullptr;
-  hb_font_t *hb_font = nullptr;
-
-public:
-  FT_Face get_face() const noexcept { return ft_face; }
-  hb_font_t *get_font() const noexcept { return hb_font; }
-
-  AppFont(FT_Library library, const char *filepath, FT_F26Dot6 fontSize,
-          float displayScale);
-  ~AppFont();
-
-  AppFont(const AppFont &) = delete;
-  AppFont &operator=(const AppFont &) = delete;
-  AppFont(AppFont &&) = delete;
-  AppFont &operator=(AppFont &&) = delete;
+struct FreetypeFaceDeleter {
+  void operator()(FT_Face facePtr) const { FT_Done_Face(facePtr); }
 };
+using UniqueFreetypeFace = std::unique_ptr<FT_FaceRec, FreetypeFaceDeleter>;
 
-AppFont::AppFont(FT_Library library, const char *filepath, FT_F26Dot6 fontSize,
-                 float displayScale) {
-  if (FT_New_Face(library, filepath, 0, &ft_face))
+struct HarfbuzzFontDeleter {
+  void operator()(hb_font_t *fontPtr) const { hb_font_destroy(fontPtr); }
+};
+using UniqueHarfbuzzFont = std::unique_ptr<hb_font_t, HarfbuzzFontDeleter>;
+
+UniqueHarfbuzzFont createHarfbuzzFont(FT_Library library, const char *filepath,
+                                      FT_F26Dot6 fontSize, float displayScale) {
+  UniqueFreetypeFace face{};
+  FT_Face face_ptr;
+  if (FT_New_Face(library, filepath, 0, &face_ptr))
     throw std::runtime_error{"FT_New_Face failed!"};
+  face.reset(face_ptr);
   FT_UInt fontDPI = static_cast<FT_UInt>(96.0f * displayScale);
-  if (FT_Set_Char_Size(ft_face, 0, fontSize, fontDPI, fontDPI)) {
-    FT_Done_Face(ft_face);
+  if (FT_Set_Char_Size(face.get(), 0, fontSize, fontDPI, fontDPI))
     throw std::runtime_error{"FT_Set_Pixel_Sizes failed!"};
-  }
-  hb_font = hb_ft_font_create(ft_face, nullptr);
+  return UniqueHarfbuzzFont{hb_ft_font_create_referenced(face.get())};
 }
 
-AppFont::~AppFont() {
-  if (hb_font)
-    hb_font_destroy(hb_font);
-  if (ft_face)
-    FT_Done_Face(ft_face);
-}
-
-class AppGPUDevice {
-public:
-  AppGPUDevice();
-  ~AppGPUDevice();
-
-  AppGPUDevice(const AppGPUDevice &) = delete;
-  AppGPUDevice &operator=(const AppGPUDevice &) = delete;
-  AppGPUDevice(AppGPUDevice &&) = delete;
-  AppGPUDevice &operator=(AppGPUDevice &&) = delete;
-
-  SDL_GPUDevice *get() { return gpu_device; }
-
-private:
-  SDL_GPUDevice *gpu_device = nullptr;
+struct GPUDeviceDeleter {
+  void operator()(SDL_GPUDevice *device) const;
 };
+using UniqueGPUDevice = std::unique_ptr<SDL_GPUDevice, GPUDeviceDeleter>;
+void GPUDeviceDeleter::operator()(SDL_GPUDevice *device) const {
+  if (not SDL_WaitForGPUIdle(device))
+    SDL_Log("SDL_WaitForGPUIdle failed: %s", SDL_GetError());
+  SDL_DestroyGPUDevice(device);
+}
 
-AppGPUDevice::AppGPUDevice() {
+UniqueGPUDevice createGPUDevice() {
   SDL_GPUVulkanOptions vulkan_options{};
   vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
 
@@ -93,110 +74,84 @@ AppGPUDevice::AppGPUDevice() {
   SDL_SetPointerProperty(device_props,
                          SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER,
                          &vulkan_options);
-  gpu_device = SDL_CreateGPUDeviceWithProperties(device_props);
+  SDL_GPUDevice *device = SDL_CreateGPUDeviceWithProperties(device_props);
   SDL_DestroyProperties(device_props);
 
-  if (not gpu_device)
+  if (not device)
     throw std::runtime_error{"Failed to create GPU device!"};
+  return UniqueGPUDevice{device};
 }
-
-AppGPUDevice::~AppGPUDevice() {
-  if (not gpu_device)
-    return;
-  if (not SDL_WaitForGPUIdle(gpu_device)) {
-    SDL_Log("SDL_WaitForGPUIdle failed: %s", SDL_GetError());
-    std::terminate();
-  }
-  SDL_DestroyGPUDevice(gpu_device);
-}
-
-class AppWindow {
-public:
-  AppWindow(SDL_GPUDevice *device);
-  ~AppWindow();
-
-  AppWindow(const AppWindow &) = delete;
-  AppWindow &operator=(const AppWindow &) = delete;
-  AppWindow(AppWindow &&) = delete;
-  AppWindow &operator=(AppWindow &&) = delete;
-
-  SDL_Window *get() { return window; }
-  float get_display_scale() { return display_scale; }
-
-private:
-  SDL_Window *window = nullptr;
-  SDL_GPUDevice *gpu_device = nullptr;
-  float display_scale = 0.0f;
-};
 
 constexpr int INITIAL_WINDOW_WIDTH = 800;
 constexpr int INITIAL_WINDOW_HEIGHT = 600;
 
-AppWindow::AppWindow(SDL_GPUDevice *device) : gpu_device{device} {
-  window =
+struct WindowDeleter {
+  void operator()(SDL_Window *window) const;
+};
+using UniqueWindow = std::unique_ptr<SDL_Window, WindowDeleter>;
+void WindowDeleter::operator()(SDL_Window *window) const {
+  SDL_DestroyWindow(window);
+}
+
+UniqueWindow createWindow() {
+  SDL_Window *window =
       SDL_CreateWindow("Hello GPU", INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT,
                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
   if (not window) {
     std::string errorMsg{"SDL_CreateWindow failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
-  display_scale = SDL_GetWindowDisplayScale(window);
-  if (display_scale == 0.0f) {
-    SDL_DestroyWindow(window);
-    std::string errorMsg{"SDL_GetWindowDisplayScale failed: "};
-    throw std::runtime_error{errorMsg + SDL_GetError()};
-  }
-  if (not SDL_SetWindowMinimumSize(window, INITIAL_WINDOW_WIDTH,
-                                   INITIAL_WINDOW_HEIGHT)) {
-    SDL_DestroyWindow(window);
-    std::string errorMsg{"SDL_SetWindowMinimumSize failed: "};
-    throw std::runtime_error{errorMsg + SDL_GetError()};
-  }
+  return UniqueWindow{window};
+}
+
+struct WindowForGPUDeviceDeleter {
+  SDL_GPUDevice *device;
+  void operator()(SDL_Window *window) const;
+};
+using UniqueWindowForGPUDevice =
+    std::unique_ptr<SDL_Window, WindowForGPUDeviceDeleter>;
+void WindowForGPUDeviceDeleter::operator()(SDL_Window *window) const {
+  SDL_ReleaseWindowFromGPUDevice(device, window);
+}
+
+UniqueWindowForGPUDevice claimWindowForGPUDevice(SDL_GPUDevice *device,
+                                                 SDL_Window *window) {
   if (not SDL_ClaimWindowForGPUDevice(device, window)) {
-    SDL_DestroyWindow(window);
     std::string errorMsg{"SDL_ClaimWindowForGPUDevice failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
+  return UniqueWindowForGPUDevice{window, WindowForGPUDeviceDeleter{device}};
 }
 
-AppWindow::~AppWindow() {
-  if (not window)
-    return;
-  SDL_ReleaseWindowFromGPUDevice(gpu_device, window);
-  SDL_DestroyWindow(window);
+float getWindowDisplayScale(SDL_Window *window) {
+  float scale = SDL_GetWindowDisplayScale(window);
+  if (scale == 0.0f) {
+    std::string errorMsg{"SDL_GetWindowDisplayScale failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
+  }
+  return scale;
 }
 
-class AppFile {
-public:
-  AppFile(const char *filepath);
-  ~AppFile();
-
-  AppFile(const AppFile &) = delete;
-  AppFile &operator=(const AppFile &) = delete;
-  AppFile(AppFile &&) = delete;
-  AppFile &operator=(AppFile &&) = delete;
-
-  void *get_data() { return file_data; }
-  std::size_t get_size() { return file_size; }
-
-private:
-  void *file_data = nullptr;
-  size_t file_size = 0;
-};
-
-AppFile::AppFile(const char *filepath) {
-  file_data = SDL_LoadFile(filepath, &file_size);
-  if (not file_data) {
-    std::string errorMsg{"Failed to load file: "};
-    errorMsg.append(filepath);
-    throw std::runtime_error{errorMsg};
+void setWindowMinimumSize(SDL_Window *window) {
+  if (not SDL_SetWindowMinimumSize(window, INITIAL_WINDOW_WIDTH,
+                                   INITIAL_WINDOW_HEIGHT)) {
+    std::string errorMsg{"SDL_SetWindowMinimumSize failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
 }
 
-AppFile::~AppFile() {
-  if (not file_data)
-    return;
-  SDL_free(file_data);
+struct FileContentDeleter {
+  void operator()(void *fileContent) const { SDL_free(fileContent); }
+};
+using UniqueFileContent = std::unique_ptr<void, FileContentDeleter>;
+
+UniqueFileContent loadFile(const char *filepath, size_t *datasize) {
+  void *fileContent = SDL_LoadFile(filepath, datasize);
+  if (fileContent)
+    return UniqueFileContent{fileContent};
+  std::string errorMsg =
+      std::format("Failed to load file: {}. {}", filepath, SDL_GetError());
+  throw std::runtime_error{std::move(errorMsg)};
 }
 
 class AppGPUShader {
@@ -225,11 +180,10 @@ private:
 
 AppGPUShader::AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo)
     : gpu_device{device} {
-  AppFile appFile{createInfo.filepath};
-
   SDL_GPUShaderCreateInfo shaderInfo{};
-  shaderInfo.code_size = appFile.get_size();
-  shaderInfo.code = static_cast<const Uint8 *>(appFile.get_data());
+  UniqueFileContent shaderCode =
+      loadFile(createInfo.filepath, &shaderInfo.code_size);
+  shaderInfo.code = static_cast<const Uint8 *>(shaderCode.get());
   shaderInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
   shaderInfo.stage = createInfo.stage;
   shaderInfo.num_samplers = createInfo.num_samplers;
@@ -237,8 +191,7 @@ AppGPUShader::AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo)
   gpu_shader = SDL_CreateGPUShader(gpu_device, &shaderInfo);
   if (not gpu_shader) {
     std::string errorMsg{"SDL_CreateGPUShader failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
 }
 
@@ -290,13 +243,13 @@ CaptionGPUSampler::~CaptionGPUSampler() {
 }
 
 struct GPUTextureDeleter {
-  SDL_GPUDevice *gpu_device = nullptr;
-  void operator()(SDL_GPUTexture *gpu_texture) const {
-    if (gpu_texture)
-      SDL_ReleaseGPUTexture(gpu_device, gpu_texture);
-  }
+  SDL_GPUDevice *device = nullptr;
+  void operator()(SDL_GPUTexture *texture) const;
 };
 using UniqueGPUTexture = std::unique_ptr<SDL_GPUTexture, GPUTextureDeleter>;
+void GPUTextureDeleter::operator()(SDL_GPUTexture *texture) const {
+  SDL_ReleaseGPUTexture(device, texture);
+}
 
 struct GPUTextureCreateInfo {
   SDL_GPUTextureUsageFlags usage;
@@ -352,15 +305,13 @@ AppGPUUploadBuffer::AppGPUUploadBuffer(SDL_GPUDevice *device,
   gpu_buffer = SDL_CreateGPUTransferBuffer(gpu_device, &bufferInfo);
   if (not gpu_buffer) {
     std::string errorMsg{"SDL_CreateGPUTransferBuffer failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   mapped_buffer = SDL_MapGPUTransferBuffer(gpu_device, gpu_buffer, false);
   if (not mapped_buffer) {
     SDL_ReleaseGPUTransferBuffer(gpu_device, gpu_buffer);
     std::string errorMsg{"SDL_MapGPUTransferBuffer failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
 }
 
@@ -652,7 +603,7 @@ struct GlyphInfo {
   int bitmap_left, bitmap_top;
 };
 
-struct GlyphGraphics {
+struct GlyphImage {
   std::vector<unsigned char> bitmap;
   UniqueGPUTexture texture;
 };
@@ -663,20 +614,27 @@ private:
   private:
     AppState *app;
 
-    void glyphs_alloc();
+    unsigned int glyph_count;
+    std::vector<GlyphInfo> glyph_infos;
+    std::vector<GlyphImage> glyph_images;
+    UniqueGPUTexture combined_texture;
+    SDL_Rect combined_rect;
+
+    void glyphs_alloc(std::string_view textView);
     void glyphs_render();
     void glyphs_upload();
     void glyphs_combine();
 
   public:
     GlyphCompositor(AppState *appstate);
-    void operator()();
+    void operator()(std::string_view textView);
   };
 
-  std::optional<AppFont> app_font;
+  UniqueHarfbuzzFont harfbuzz_font;
 
-  AppGPUDevice app_device;
-  AppWindow app_window;
+  UniqueGPUDevice gpu_device;
+  UniqueWindow main_window;
+  UniqueWindowForGPUDevice main_window_for_gpu_device;
 
   CaptionGPUSampler caption_sampler;
   CaptionGPUGraphicsPipeline caption_pipeline;
@@ -688,14 +646,7 @@ private:
   SDL_Rect caption_rect;
 
 public:
-  AppState(FT_Library library)
-      : app_device{}, app_window{app_device.get()},
-        caption_sampler{app_device.get()},
-        caption_pipeline{app_device.get(), app_window.get()},
-        glyph_pipeline{app_device.get()} {
-    app_font.emplace(library, "assets/DejaVuSans.ttf", 10 * 64,
-                     app_window.get_display_scale());
-  }
+  AppState(FT_Library library);
 
   SDL_AppResult iterate() noexcept;
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
@@ -703,11 +654,20 @@ public:
   void caption_text_compose();
 };
 
+AppState::AppState(FT_Library library) {
+  gpu_device = createGPUDevice();
+  main_window = createWindow();
+  main_window_for_gpu_device =
+      claimWindowForGPUDevice(gpu_device.get(), main_window.get());
+  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
+                                     getWindowDisplayScale(main_window.get()));
+}
+
 SDL_AppResult AppState::iterate() noexcept {
   AppGPURenderCommand::CreateInfo commandInfo{
-      .swapchain_window = app_window.get(),
+      .swapchain_window = main_window.get(),
       .clear_color = SDL_FColor{0.08f, 0.08f, 0.10f, 1.0f}};
-  AppGPURenderCommand swapchainCommand{app_device.get(), commandInfo};
+  AppGPURenderCommand swapchainCommand{gpu_device.get(), commandInfo};
 
   SDL_BindGPUGraphicsPipeline(swapchainCommand.get_render_pass(),
                               caption_pipeline.get());
@@ -764,123 +724,121 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     return SDL_APP_CONTINUE;
 }
 
-void AppState::GlyphCompositor::glyphs_alloc() {
+void AppState::GlyphCompositor::glyphs_alloc(std::string_view textView) {
   hb_buffer_t *glyphBuffer = hb_buffer_create();
 
-  hb_buffer_add_utf8(glyphBuffer, caption_string.data(), -1, 0, -1);
+  hb_buffer_add_utf8(glyphBuffer, textView.data(),
+                     static_cast<int>(textView.size()), 0,
+                     static_cast<int>(textView.size()));
   hb_buffer_guess_segment_properties(glyphBuffer);
-  hb_shape(app_font->get_font(), glyphBuffer, nullptr, 0);
+  hb_shape(app->harfbuzz_font.get(), glyphBuffer, nullptr, 0);
 
-  unsigned int glyphCount = 0;
   hb_glyph_info_t *glyphInfos =
-      hb_buffer_get_glyph_infos(glyphBuffer, &glyphCount);
+      hb_buffer_get_glyph_infos(glyphBuffer, &glyph_count);
   hb_glyph_position_t *glyphPositions =
-      hb_buffer_get_glyph_positions(glyphBuffer, &glyphCount);
+      hb_buffer_get_glyph_positions(glyphBuffer, &glyph_count);
 
-  caption_glyphs = std::vector<GlyphData>(glyphCount);
-  for (unsigned int i = 0; i < glyphCount; ++i) {
-    caption_glyphs[i].codepoint = glyphInfos[i].codepoint;
-    caption_glyphs[i].cluster = glyphInfos[i].cluster;
-    caption_glyphs[i].x_advance = glyphPositions[i].x_advance;
-    caption_glyphs[i].x_offset = glyphPositions[i].x_offset;
-    caption_glyphs[i].y_offset = glyphPositions[i].y_offset;
+  glyph_infos = std::vector<GlyphInfo>(glyph_count);
+  glyph_images = std::vector<GlyphImage>(glyph_count);
+  for (unsigned int i = 0; i < glyph_count; ++i) {
+    glyph_infos[i].codepoint = glyphInfos[i].codepoint;
+    glyph_infos[i].cluster = glyphInfos[i].cluster;
+    glyph_infos[i].x_advance = glyphPositions[i].x_advance;
+    glyph_infos[i].x_offset = glyphPositions[i].x_offset;
+    glyph_infos[i].y_offset = glyphPositions[i].y_offset;
   }
 
   hb_buffer_destroy(glyphBuffer);
 }
 
 void AppState::GlyphCompositor::glyphs_render() {
-  for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
+  for (unsigned int i = 0; i < glyph_count; ++i) {
     FT_Int32 flags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
-    if (FT_Load_Glyph(app_font->get_face(), caption_glyphs[i].codepoint,
-                      flags) != 0) {
-      SDL_Log("FT_Load_Glyph failed for glyph: %d",
-              caption_glyphs[i].codepoint);
+    FT_Face face = hb_ft_font_get_ft_face(app->harfbuzz_font.get());
+    if (FT_Load_Glyph(face, glyph_infos[i].codepoint, flags) != 0) {
+      SDL_Log("FT_Load_Glyph failed for glyph: %d", glyph_infos[i].codepoint);
       continue;
     }
-    FT_Face face = app_font->get_face();
     FT_GlyphSlot slot = face->glyph;
-    caption_glyphs[i].bitmap_left = slot->bitmap_left;
-    caption_glyphs[i].bitmap_top = slot->bitmap_top;
-    caption_glyphs[i].rsb_delta = slot->rsb_delta;
+    glyph_infos[i].bitmap_left = slot->bitmap_left;
+    glyph_infos[i].bitmap_top = slot->bitmap_top;
+    glyph_infos[i].rsb_delta = slot->rsb_delta;
     if (i != 0) {
-      FT_Pos delta_diff = caption_glyphs[i - 1].rsb_delta - slot->lsb_delta;
+      FT_Pos delta_diff = glyph_infos[i - 1].rsb_delta - slot->lsb_delta;
       if (delta_diff > 32)
-        caption_glyphs[i].x_offset -= 64;
+        glyph_infos[i].x_offset -= 64;
       else if (delta_diff < -31)
-        caption_glyphs[i].x_offset += 64;
+        glyph_infos[i].x_offset += 64;
     }
     const FT_Bitmap &bitmap = slot->bitmap;
-    caption_glyphs[i].width = bitmap.width;
-    caption_glyphs[i].height = bitmap.rows;
-    if (caption_glyphs[i].width == 0 || caption_glyphs[i].height == 0)
+    glyph_infos[i].width = bitmap.width;
+    glyph_infos[i].height = bitmap.rows;
+    if (glyph_infos[i].width == 0 || glyph_infos[i].height == 0)
       continue;
-    caption_glyphs[i].bitmap.resize(bitmap.width * bitmap.rows);
+    glyph_images[i].bitmap.resize(bitmap.width * bitmap.rows);
     for (unsigned int y = 0; y < bitmap.rows; ++y) {
       const uint8_t *rowSource = bitmap.buffer + y * std::abs(bitmap.pitch);
-      uint8_t *rowTarget = caption_glyphs[i].bitmap.data() + y * bitmap.width;
+      uint8_t *rowTarget = glyph_images[i].bitmap.data() + y * bitmap.width;
       std::memcpy(rowTarget, rowSource, bitmap.width);
     }
   }
 }
 
 void AppState::GlyphCompositor::glyphs_upload() {
-  std::vector<std::optional<AppGPUUploadBuffer>> uploadBuffers(
-      caption_glyphs.size());
-  for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
-    if (caption_glyphs[i].width == 0 || caption_glyphs[i].height == 0)
+  std::vector<std::optional<AppGPUUploadBuffer>> uploadBuffers(glyph_count);
+  for (unsigned int i = 0; i < glyph_count; ++i) {
+    if (glyph_infos[i].width == 0 || glyph_infos[i].height == 0)
       continue;
-    AppGPUTexture::CreateInfo textureInfo{
-        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-        .texture_width = caption_glyphs[i].width,
-        .texture_height = caption_glyphs[i].height};
-    caption_glyphs[i].texture.emplace(app_device.get(), textureInfo);
+    GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                     .texture_width = glyph_infos[i].width,
+                                     .texture_height = glyph_infos[i].height};
+    glyph_images[i].texture =
+        createGPUTexture(app->gpu_device.get(), textureInfo);
     uploadBuffers[i].emplace(
-        app_device.get(),
-        static_cast<std::uint32_t>(caption_glyphs[i].bitmap.size()));
-    std::memcpy(uploadBuffers[i]->get_mapped(), caption_glyphs[i].bitmap.data(),
-                caption_glyphs[i].bitmap.size());
+        app->gpu_device.get(),
+        static_cast<std::uint32_t>(glyph_images[i].bitmap.size()));
+    std::memcpy(uploadBuffers[i]->get_mapped(), glyph_images[i].bitmap.data(),
+                glyph_images[i].bitmap.size());
     uploadBuffers[i]->unmap();
   }
 
-  AppGPUCopyCommand copyCommand{app_device.get()};
-  for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
-    if (not caption_glyphs[i].texture)
+  AppGPUCopyCommand copyCommand{app->gpu_device.get()};
+  for (unsigned int i = 0; i < glyph_count; ++i) {
+    if (not glyph_images[i].texture)
       continue;
     SDL_GPUTextureTransferInfo src{};
     src.transfer_buffer = uploadBuffers[i]->get_buffer();
     src.offset = 0;
-    src.pixels_per_row = caption_glyphs[i].width;
-    src.rows_per_layer = caption_glyphs[i].height;
+    src.pixels_per_row = glyph_infos[i].width;
+    src.rows_per_layer = glyph_infos[i].height;
     SDL_GPUTextureRegion dst{};
-    dst.texture = caption_glyphs[i].texture->get();
-    dst.w = caption_glyphs[i].width;
-    dst.h = caption_glyphs[i].height;
+    dst.texture = glyph_images[i].texture.get();
+    dst.w = glyph_infos[i].width;
+    dst.h = glyph_infos[i].height;
     dst.d = 1;
     SDL_UploadToGPUTexture(copyCommand.get_copy_pass(), &src, &dst, false);
   }
 }
 
 void AppState::GlyphCompositor::glyphs_combine() {
-  hb_position_t accumulatedX{};
   hb_position_t minX = std::numeric_limits<hb_position_t>::max(),
                 maxX = std::numeric_limits<hb_position_t>::min();
   hb_position_t minY = std::numeric_limits<hb_position_t>::max(),
                 maxY = std::numeric_limits<hb_position_t>::min();
 
-  for (const GlyphData &glyphData : caption_glyphs) {
+  for (hb_position_t accumulatedX{}; const GlyphInfo &glyphInfo : glyph_infos) {
     hb_position_t penX = accumulatedX;
-    accumulatedX += glyphData.x_advance;
+    accumulatedX += glyphInfo.x_advance;
 
-    if (glyphData.width == 0 || glyphData.height == 0)
+    if (glyphInfo.width == 0 || glyphInfo.height == 0)
       continue;
 
-    hb_position_t left = penX + glyphData.x_offset + glyphData.bitmap_left * 64;
+    hb_position_t left = penX + glyphInfo.x_offset + glyphInfo.bitmap_left * 64;
     hb_position_t right =
-        left + static_cast<hb_position_t>(glyphData.width) * 64;
-    hb_position_t top = -glyphData.y_offset - glyphData.bitmap_top * 64;
+        left + static_cast<hb_position_t>(glyphInfo.width) * 64;
+    hb_position_t top = -glyphInfo.y_offset - glyphInfo.bitmap_top * 64;
     hb_position_t bottom =
-        top + static_cast<hb_position_t>(glyphData.height) * 64;
+        top + static_cast<hb_position_t>(glyphInfo.height) * 64;
 
     minX = std::min(minX, left);
     maxX = std::max(maxX, right);
@@ -888,19 +846,20 @@ void AppState::GlyphCompositor::glyphs_combine() {
     maxY = std::max(maxY, bottom);
   }
 
-  caption_rect.w = static_cast<std::int32_t>(
+  combined_rect.w = static_cast<std::int32_t>(
       std::ceil(static_cast<float>(maxX - minX) / 64.0f));
-  caption_rect.h = static_cast<std::int32_t>(
+  combined_rect.h = static_cast<std::int32_t>(
       std::ceil(static_cast<float>(maxY - minY) / 64.0f));
-  caption_rect.x = (INITIAL_WINDOW_WIDTH - caption_rect.w) / 2;
-  caption_rect.y = (INITIAL_WINDOW_HEIGHT - caption_rect.h) / 2;
+  combined_rect.x = (INITIAL_WINDOW_WIDTH - combined_rect.w) / 2;
+  combined_rect.y = (INITIAL_WINDOW_HEIGHT - combined_rect.h) / 2;
 
   AppGPURenderCommand::CreateInfo renderInfo{
-      .texture_width = static_cast<std::uint32_t>(caption_rect.w),
-      .texture_height = static_cast<std::uint32_t>(caption_rect.h),
+      .texture_width = static_cast<std::uint32_t>(combined_rect.w),
+      .texture_height = static_cast<std::uint32_t>(combined_rect.h),
       .clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}};
-  AppGPURenderCommand renderCommand{app_device.get(), renderInfo};
-  caption_texture.emplace(app_device.get(), renderCommand.get_texture());
+  AppGPURenderCommand renderCommand{app->gpu_device.get(), renderInfo};
+  combined_texture = UniqueGPUTexture{renderCommand.get_texture(),
+                                      GPUTextureDeleter{app->gpu_device.get()}};
 
   SDL_BindGPUGraphicsPipeline(renderCommand.get_render_pass(),
                               glyph_pipeline.get());
@@ -910,31 +869,33 @@ void AppState::GlyphCompositor::glyphs_combine() {
     float rect_size[2];
   };
 
-  for (accumulatedX = 0; GlyphData &glyphData : caption_glyphs) {
+  for (hb_position_t accumulatedX{};
+       auto &&[glyphInfo, glyphImage] :
+       std::views::zip(glyph_infos, glyph_images)) {
     hb_position_t penX = accumulatedX;
-    accumulatedX += glyphData.x_advance;
+    accumulatedX += glyphInfo.x_advance;
 
-    if (glyphData.width == 0 || glyphData.height == 0)
+    if (glyphInfo.width == 0 || glyphInfo.height == 0)
       continue;
 
     GlyphUniforms uniforms{};
-    uniforms.viewport[0] = static_cast<float>(caption_rect.w);
-    uniforms.viewport[1] = static_cast<float>(caption_rect.h);
+    uniforms.viewport[0] = static_cast<float>(combined_rect.w);
+    uniforms.viewport[1] = static_cast<float>(combined_rect.h);
     uniforms.rect_pos[0] =
-        static_cast<float>(penX + glyphData.x_offset +
-                           glyphData.bitmap_left * 64 - minX) /
+        static_cast<float>(penX + glyphInfo.x_offset +
+                           glyphInfo.bitmap_left * 64 - minX) /
         64.0f;
     uniforms.rect_pos[1] =
-        static_cast<float>(-glyphData.y_offset - glyphData.bitmap_top * 64 -
+        static_cast<float>(-glyphInfo.y_offset - glyphInfo.bitmap_top * 64 -
                            minY) /
         64.0f;
-    uniforms.rect_size[0] = static_cast<float>(glyphData.width);
-    uniforms.rect_size[1] = static_cast<float>(glyphData.height);
+    uniforms.rect_size[0] = static_cast<float>(glyphInfo.width);
+    uniforms.rect_size[1] = static_cast<float>(glyphInfo.height);
     SDL_PushGPUVertexUniformData(renderCommand.get_command(), 0, &uniforms,
                                  sizeof(GlyphUniforms));
 
     SDL_GPUTextureSamplerBinding sb{};
-    sb.texture = glyphData.texture->get();
+    sb.texture = glyphImage.texture.get();
     sb.sampler = caption_sampler.get();
     SDL_BindGPUFragmentSamplers(renderCommand.get_render_pass(), 0, &sb, 1);
 
@@ -944,7 +905,7 @@ void AppState::GlyphCompositor::glyphs_combine() {
 
 void AppState::caption_text_compose() {
   GlyphCompositor compose_glyphs{this};
-  compose_glyphs();
+  compose_glyphs(caption_string);
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
@@ -952,12 +913,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_Log("SDL_Init_Subsystem failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  if (FT_Init_FreeType(&global_ft_library)) {
+  if (FT_Init_FreeType(&globalFTLibrary)) {
     SDL_Log("FT_Init_FreeType failed!");
     return SDL_APP_FAILURE;
   }
   try {
-    AppState *app = new AppState{global_ft_library};
+    AppState *app = new AppState{globalFTLibrary};
     *appstate = app;
     app->caption_text_compose();
     return SDL_APP_CONTINUE;
@@ -970,9 +931,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
   AppState *app = (AppState *)appstate;
   delete app;
-  if (global_ft_library) {
-    FT_Done_FreeType(global_ft_library);
-    global_ft_library = nullptr;
+  if (globalFTLibrary) {
+    FT_Done_FreeType(globalFTLibrary);
+    globalFTLibrary = nullptr;
   }
   SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
