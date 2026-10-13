@@ -239,65 +239,60 @@ UniqueGPUTexture createGPUTexture(SDL_GPUDevice *device,
   textureInfo.layer_count_or_depth = 1;
   textureInfo.num_levels = 1;
   textureInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
-  SDL_GPUTexture *gpuTexture = SDL_CreateGPUTexture(device, &textureInfo);
-  if (not gpuTexture) {
+  SDL_GPUTexture *texture = SDL_CreateGPUTexture(device, &textureInfo);
+  if (not texture) {
     std::string errorMsg{"SDL_CreateGPUTexture failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
-  return {gpuTexture, GPUTextureDeleter{device}};
+  return {texture, GPUTextureDeleter{device}};
 }
 
-class AppGPUUploadBuffer {
-public:
-  AppGPUUploadBuffer(SDL_GPUDevice *device, std::uint32_t bufferSize);
-  ~AppGPUUploadBuffer();
-
-  AppGPUUploadBuffer(const AppGPUUploadBuffer &) = delete;
-  AppGPUUploadBuffer &operator=(const AppGPUUploadBuffer &) = delete;
-  AppGPUUploadBuffer(AppGPUUploadBuffer &&) = delete;
-  AppGPUUploadBuffer &operator=(AppGPUUploadBuffer &&) = delete;
-
-  SDL_GPUTransferBuffer *get_buffer() { return gpu_buffer; }
-  void *get_mapped() { return mapped_buffer; }
-
-  void unmap();
-
-private:
-  SDL_GPUDevice *gpu_device = nullptr;
-  SDL_GPUTransferBuffer *gpu_buffer = nullptr;
-  void *mapped_buffer = nullptr;
+struct GPUTransferBufferDeleter {
+  SDL_GPUDevice *device_ctx;
+  void operator()(SDL_GPUTransferBuffer *transferBuffer) const;
 };
+using UniqueGPUTransferBuffer =
+    std::unique_ptr<SDL_GPUTransferBuffer, GPUTransferBufferDeleter>;
+void GPUTransferBufferDeleter::operator()(
+    SDL_GPUTransferBuffer *transferBuffer) const {
+  SDL_ReleaseGPUTransferBuffer(device_ctx, transferBuffer);
+}
 
-AppGPUUploadBuffer::AppGPUUploadBuffer(SDL_GPUDevice *device,
-                                       std::uint32_t bufferSize)
-    : gpu_device{device} {
+struct GPUTransferBufferUnmapper {
+  SDL_GPUDevice *device_ctx;
+  SDL_GPUTransferBuffer *transfer_buffer;
+  void operator()(void *mappedBuffer) const;
+};
+using UniqueGPUMappedBuffer = std::unique_ptr<void, GPUTransferBufferUnmapper>;
+void GPUTransferBufferUnmapper::operator()(void *mappedBuffer) const {
+  SDL_UnmapGPUTransferBuffer(device_ctx, transfer_buffer);
+}
+
+UniqueGPUTransferBuffer createGPUTransferBuffer(SDL_GPUDevice *device,
+                                                std::uint32_t bufferSize) {
   SDL_GPUTransferBufferCreateInfo bufferInfo{};
   bufferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
   bufferInfo.size = bufferSize;
-  gpu_buffer = SDL_CreateGPUTransferBuffer(gpu_device, &bufferInfo);
-  if (not gpu_buffer) {
+  SDL_GPUTransferBuffer *transferBuffer =
+      SDL_CreateGPUTransferBuffer(device, &bufferInfo);
+  if (not transferBuffer) {
     std::string errorMsg{"SDL_CreateGPUTransferBuffer failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
-  mapped_buffer = SDL_MapGPUTransferBuffer(gpu_device, gpu_buffer, false);
-  if (not mapped_buffer) {
-    SDL_ReleaseGPUTransferBuffer(gpu_device, gpu_buffer);
+  return UniqueGPUTransferBuffer{transferBuffer,
+                                 GPUTransferBufferDeleter{device}};
+}
+
+UniqueGPUMappedBuffer
+mapGPUTransferBuffer(SDL_GPUDevice *device,
+                     SDL_GPUTransferBuffer *transferBuffer) {
+  void *mappedBuffer = SDL_MapGPUTransferBuffer(device, transferBuffer, false);
+  if (not mappedBuffer) {
     std::string errorMsg{"SDL_MapGPUTransferBuffer failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
-}
-
-AppGPUUploadBuffer::~AppGPUUploadBuffer() {
-  if (mapped_buffer)
-    SDL_UnmapGPUTransferBuffer(gpu_device, gpu_buffer);
-  if (gpu_buffer)
-    SDL_ReleaseGPUTransferBuffer(gpu_device, gpu_buffer);
-}
-
-void AppGPUUploadBuffer::unmap() {
-  if (mapped_buffer)
-    SDL_UnmapGPUTransferBuffer(gpu_device, gpu_buffer);
-  mapped_buffer = nullptr;
+  return UniqueGPUMappedBuffer{
+      mappedBuffer, GPUTransferBufferUnmapper{device, transferBuffer}};
 }
 
 class CaptionGPUGraphicsPipeline {
@@ -756,7 +751,7 @@ void AppState::GlyphCompositor::glyphs_render() {
 }
 
 void AppState::GlyphCompositor::glyphs_upload() {
-  std::vector<std::optional<AppGPUUploadBuffer>> uploadBuffers(glyph_count);
+  std::vector<UniqueGPUTransferBuffer> transferBuffers(glyph_count);
   for (unsigned int i = 0; i < glyph_count; ++i) {
     if (glyph_infos[i].width == 0 || glyph_infos[i].height == 0)
       continue;
@@ -765,12 +760,13 @@ void AppState::GlyphCompositor::glyphs_upload() {
                                      .texture_height = glyph_infos[i].height};
     glyph_images[i].texture =
         createGPUTexture(app->device_ctx.get(), textureInfo);
-    uploadBuffers[i].emplace(
+    transferBuffers[i] = createGPUTransferBuffer(
         app->device_ctx.get(),
         static_cast<std::uint32_t>(glyph_images[i].bitmap.size()));
-    std::memcpy(uploadBuffers[i]->get_mapped(), glyph_images[i].bitmap.data(),
+    UniqueGPUMappedBuffer mappedBuffer =
+        mapGPUTransferBuffer(app->device_ctx.get(), transferBuffers[i].get());
+    std::memcpy(mappedBuffer.get(), glyph_images[i].bitmap.data(),
                 glyph_images[i].bitmap.size());
-    uploadBuffers[i]->unmap();
   }
 
   AppGPUCopyCommand copyCommand{app->device_ctx.get()};
@@ -778,7 +774,7 @@ void AppState::GlyphCompositor::glyphs_upload() {
     if (not glyph_images[i].texture)
       continue;
     SDL_GPUTextureTransferInfo src{};
-    src.transfer_buffer = uploadBuffers[i]->get_buffer();
+    src.transfer_buffer = transferBuffers[i].get();
     src.offset = 0;
     src.pixels_per_row = glyph_infos[i].width;
     src.rows_per_layer = glyph_infos[i].height;
