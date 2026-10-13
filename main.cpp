@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -26,7 +27,6 @@ static FT_Library global_ft_library = nullptr;
 
 class AppFont {
 private:
-  FT_Library ft_library = nullptr;
   FT_Face ft_face = nullptr;
   hb_font_t *hb_font = nullptr;
 
@@ -34,7 +34,7 @@ public:
   FT_Face get_face() const noexcept { return ft_face; }
   hb_font_t *get_font() const noexcept { return hb_font; }
 
-  AppFont(FT_Library ftLib, const char *filepath, FT_F26Dot6 fontSize,
+  AppFont(FT_Library library, const char *filepath, FT_F26Dot6 fontSize,
           float displayScale);
   ~AppFont();
 
@@ -44,10 +44,9 @@ public:
   AppFont &operator=(AppFont &&) = delete;
 };
 
-AppFont::AppFont(FT_Library ftLib, const char *filepath, FT_F26Dot6 fontSize,
-                 float displayScale)
-    : ft_library{ftLib} {
-  if (FT_New_Face(ft_library, filepath, 0, &ft_face))
+AppFont::AppFont(FT_Library library, const char *filepath, FT_F26Dot6 fontSize,
+                 float displayScale) {
+  if (FT_New_Face(library, filepath, 0, &ft_face))
     throw std::runtime_error{"FT_New_Face failed!"};
   FT_UInt fontDPI = static_cast<FT_UInt>(96.0f * displayScale);
   if (FT_Set_Char_Size(ft_face, 0, fontSize, fontDPI, fontDPI)) {
@@ -290,33 +289,22 @@ CaptionGPUSampler::~CaptionGPUSampler() {
   SDL_ReleaseGPUSampler(gpu_device, gpu_sampler);
 }
 
-class AppGPUTexture {
-public:
-  struct CreateInfo {
-    SDL_GPUTextureUsageFlags usage;
-    std::uint32_t texture_width;
-    std::uint32_t texture_height;
-  };
-
-  AppGPUTexture(SDL_GPUDevice *device, SDL_GPUTexture *texture)
-      : gpu_device{device}, gpu_texture{texture} {}
-  AppGPUTexture(SDL_GPUDevice *device, CreateInfo createInfo);
-  ~AppGPUTexture();
-
-  AppGPUTexture(const AppGPUTexture &) = delete;
-  AppGPUTexture &operator=(const AppGPUTexture &) = delete;
-  AppGPUTexture(AppGPUTexture &&) = delete;
-  AppGPUTexture &operator=(AppGPUTexture &&) = delete;
-
-  SDL_GPUTexture *get() { return gpu_texture; }
-
-private:
+struct GPUTextureDeleter {
   SDL_GPUDevice *gpu_device = nullptr;
-  SDL_GPUTexture *gpu_texture = nullptr;
+  void operator()(SDL_GPUTexture *gpu_texture) const {
+    if (gpu_texture)
+      SDL_ReleaseGPUTexture(gpu_device, gpu_texture);
+  }
 };
+using UniqueGPUTexture = std::unique_ptr<SDL_GPUTexture, GPUTextureDeleter>;
 
-AppGPUTexture::AppGPUTexture(SDL_GPUDevice *device, CreateInfo createInfo)
-    : gpu_device{device} {
+struct GPUTextureCreateInfo {
+  SDL_GPUTextureUsageFlags usage;
+  std::uint32_t texture_width;
+  std::uint32_t texture_height;
+};
+UniqueGPUTexture createGPUTexture(SDL_GPUDevice *device,
+                                  GPUTextureCreateInfo createInfo) {
   SDL_GPUTextureCreateInfo textureInfo{};
   textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
   textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
@@ -326,18 +314,12 @@ AppGPUTexture::AppGPUTexture(SDL_GPUDevice *device, CreateInfo createInfo)
   textureInfo.layer_count_or_depth = 1;
   textureInfo.num_levels = 1;
   textureInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
-  gpu_texture = SDL_CreateGPUTexture(device, &textureInfo);
-  if (not gpu_texture) {
+  SDL_GPUTexture *gpuTexture = SDL_CreateGPUTexture(device, &textureInfo);
+  if (not gpuTexture) {
     std::string errorMsg{"SDL_CreateGPUTexture failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
-}
-
-AppGPUTexture::~AppGPUTexture() {
-  if (not gpu_texture)
-    return;
-  SDL_ReleaseGPUTexture(gpu_device, gpu_texture);
+  return {gpuTexture, GPUTextureDeleter{device}};
 }
 
 class AppGPUUploadBuffer {
@@ -648,8 +630,7 @@ AppGPUCopyCommand::AppGPUCopyCommand(SDL_GPUDevice *device)
   gpu_command = SDL_AcquireGPUCommandBuffer(gpu_device);
   if (not gpu_command) {
     std::string errorMsg{"SDL_AcquireGPUCommandBuffer failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   copy_pass = SDL_BeginGPUCopyPass(gpu_command);
 }
@@ -662,20 +643,36 @@ AppGPUCopyCommand::~AppGPUCopyCommand() {
   std::terminate();
 }
 
-struct GlyphData {
+struct GlyphInfo {
   hb_codepoint_t codepoint;
   std::uint32_t cluster;
   hb_position_t x_advance, x_offset, y_offset;
   FT_Pos rsb_delta;
-  std::vector<unsigned char> bitmap;
   unsigned int width, height;
   int bitmap_left, bitmap_top;
-  std::optional<AppGPUTexture> texture;
+};
+
+struct GlyphGraphics {
+  std::vector<unsigned char> bitmap;
+  UniqueGPUTexture texture;
 };
 
 class AppState {
 private:
-  FT_Library ft_library;
+  class GlyphCompositor {
+  private:
+    AppState *app;
+
+    void glyphs_alloc();
+    void glyphs_render();
+    void glyphs_upload();
+    void glyphs_combine();
+
+  public:
+    GlyphCompositor(AppState *appstate);
+    void operator()();
+  };
+
   std::optional<AppFont> app_font;
 
   AppGPUDevice app_device;
@@ -685,26 +682,25 @@ private:
   CaptionGPUGraphicsPipeline caption_pipeline;
   GlyphGPUGraphicsPipeline glyph_pipeline;
 
-  std::optional<AppGPUTexture> caption_texture;
+  std::string caption_string = "Hello world kerning Text";
+  std::vector<GlyphInfo> caption_glyph_infos;
+  UniqueGPUTexture caption_texture;
   SDL_Rect caption_rect;
 
-  std::string caption_string = "Hello world kerning Text";
-  std::vector<GlyphData> caption_glyphs;
-
 public:
-  AppState(FT_Library ftLibrary)
-      : ft_library{ftLibrary}, app_device{}, app_window{app_device.get()},
+  AppState(FT_Library library)
+      : app_device{}, app_window{app_device.get()},
         caption_sampler{app_device.get()},
         caption_pipeline{app_device.get(), app_window.get()},
-        glyph_pipeline{app_device.get()} {}
-
-  void caption_glyphs_alloc();
-  void caption_glyphs_render();
-  void caption_glyphs_upload();
-  void caption_glyphs_combine();
+        glyph_pipeline{app_device.get()} {
+    app_font.emplace(library, "assets/DejaVuSans.ttf", 10 * 64,
+                     app_window.get_display_scale());
+  }
 
   SDL_AppResult iterate() noexcept;
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
+
+  void caption_text_compose();
 };
 
 SDL_AppResult AppState::iterate() noexcept {
@@ -745,7 +741,7 @@ SDL_AppResult AppState::iterate() noexcept {
                                  sizeof(BlitUniforms));
 
   SDL_GPUTextureSamplerBinding sb{};
-  sb.texture = caption_texture->get();
+  sb.texture = caption_texture.get();
   sb.sampler = caption_sampler.get();
   SDL_BindGPUFragmentSamplers(swapchainCommand.get_render_pass(), 0, &sb, 1);
 
@@ -768,9 +764,7 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     return SDL_APP_CONTINUE;
 }
 
-void AppState::caption_glyphs_alloc() {
-  app_font.emplace(ft_library, "assets/DejaVuSans.ttf", 10 * 64,
-                   app_window.get_display_scale());
+void AppState::GlyphCompositor::glyphs_alloc() {
   hb_buffer_t *glyphBuffer = hb_buffer_create();
 
   hb_buffer_add_utf8(glyphBuffer, caption_string.data(), -1, 0, -1);
@@ -795,7 +789,7 @@ void AppState::caption_glyphs_alloc() {
   hb_buffer_destroy(glyphBuffer);
 }
 
-void AppState::caption_glyphs_render() {
+void AppState::GlyphCompositor::glyphs_render() {
   for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
     FT_Int32 flags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
     if (FT_Load_Glyph(app_font->get_face(), caption_glyphs[i].codepoint,
@@ -830,7 +824,7 @@ void AppState::caption_glyphs_render() {
   }
 }
 
-void AppState::caption_glyphs_upload() {
+void AppState::GlyphCompositor::glyphs_upload() {
   std::vector<std::optional<AppGPUUploadBuffer>> uploadBuffers(
       caption_glyphs.size());
   for (unsigned int i = 0; i < caption_glyphs.size(); ++i) {
@@ -867,7 +861,7 @@ void AppState::caption_glyphs_upload() {
   }
 }
 
-void AppState::caption_glyphs_combine() {
+void AppState::GlyphCompositor::glyphs_combine() {
   hb_position_t accumulatedX{};
   hb_position_t minX = std::numeric_limits<hb_position_t>::max(),
                 maxX = std::numeric_limits<hb_position_t>::min();
@@ -948,6 +942,11 @@ void AppState::caption_glyphs_combine() {
   }
 }
 
+void AppState::caption_text_compose() {
+  GlyphCompositor compose_glyphs{this};
+  compose_glyphs();
+}
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   if (not SDL_InitSubSystem(SDL_INIT_VIDEO)) {
     SDL_Log("SDL_Init_Subsystem failed: %s", SDL_GetError());
@@ -960,10 +959,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   try {
     AppState *app = new AppState{global_ft_library};
     *appstate = app;
-    app->caption_glyphs_alloc();
-    app->caption_glyphs_render();
-    app->caption_glyphs_upload();
-    app->caption_glyphs_combine();
+    app->caption_text_compose();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[App] %s", e.what());
