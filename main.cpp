@@ -154,32 +154,24 @@ UniqueFileContent loadFile(const char *filepath, size_t *datasize) {
   throw std::runtime_error{std::move(errorMsg)};
 }
 
-class AppGPUShader {
-public:
-  struct CreateInfo {
-    const char *filepath;
-    SDL_GPUShaderStage stage;
-    Uint32 num_samplers;
-    Uint32 num_uniform_buffers;
-  };
-
-  AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo);
-  ~AppGPUShader();
-
-  AppGPUShader(const AppGPUShader &) = delete;
-  AppGPUShader &operator=(const AppGPUShader &) = delete;
-  AppGPUShader(AppGPUShader &&) = delete;
-  AppGPUShader &operator=(AppGPUShader &&) = delete;
-
-  SDL_GPUShader *get() { return gpu_shader; }
-
-private:
-  SDL_GPUDevice *gpu_device = nullptr;
-  SDL_GPUShader *gpu_shader = nullptr;
+struct GPUShaderCreateInfo {
+  const char *filepath;
+  SDL_GPUShaderStage stage;
+  Uint32 num_samplers;
+  Uint32 num_uniform_buffers;
 };
 
-AppGPUShader::AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo)
-    : gpu_device{device} {
+struct GPUShaderDeleter {
+  SDL_GPUDevice *device;
+  void operator()(SDL_GPUShader *shader) const;
+};
+using UniqueGPUShader = std::unique_ptr<SDL_GPUShader, GPUShaderDeleter>;
+void GPUShaderDeleter::operator()(SDL_GPUShader *shader) const {
+  SDL_ReleaseGPUShader(device, shader);
+}
+
+UniqueGPUShader createGPUShader(SDL_GPUDevice *device,
+                                GPUShaderCreateInfo createInfo) {
   SDL_GPUShaderCreateInfo shaderInfo{};
   UniqueFileContent shaderCode =
       loadFile(createInfo.filepath, &shaderInfo.code_size);
@@ -188,38 +180,24 @@ AppGPUShader::AppGPUShader(SDL_GPUDevice *device, CreateInfo createInfo)
   shaderInfo.stage = createInfo.stage;
   shaderInfo.num_samplers = createInfo.num_samplers;
   shaderInfo.num_uniform_buffers = createInfo.num_uniform_buffers;
-  gpu_shader = SDL_CreateGPUShader(gpu_device, &shaderInfo);
-  if (not gpu_shader) {
+  SDL_GPUShader *shader = SDL_CreateGPUShader(device, &shaderInfo);
+  if (not shader) {
     std::string errorMsg{"SDL_CreateGPUShader failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
+  return UniqueGPUShader{shader, GPUShaderDeleter{device}};
 }
 
-AppGPUShader::~AppGPUShader() {
-  if (not gpu_shader)
-    return;
-  SDL_ReleaseGPUShader(gpu_device, gpu_shader);
-}
-
-class CaptionGPUSampler {
-public:
-  CaptionGPUSampler(SDL_GPUDevice *device);
-  ~CaptionGPUSampler();
-
-  CaptionGPUSampler(const CaptionGPUSampler &) = delete;
-  CaptionGPUSampler &operator=(const CaptionGPUSampler &) = delete;
-  CaptionGPUSampler(CaptionGPUSampler &&) = delete;
-  CaptionGPUSampler &operator=(CaptionGPUSampler &&) = delete;
-
-  SDL_GPUSampler *get() { return gpu_sampler; }
-
-private:
-  SDL_GPUDevice *gpu_device = nullptr;
-  SDL_GPUSampler *gpu_sampler = nullptr;
+struct GPUSamplerDeleter {
+  SDL_GPUDevice *device;
+  void operator()(SDL_GPUSampler *sampler) const;
 };
+using UniqueGPUSampler = std::unique_ptr<SDL_GPUSampler, GPUSamplerDeleter>;
+void GPUSamplerDeleter::operator()(SDL_GPUSampler *sampler) const {
+  SDL_ReleaseGPUSampler(device, sampler);
+}
 
-CaptionGPUSampler::CaptionGPUSampler(SDL_GPUDevice *device)
-    : gpu_device{device} {
+UniqueGPUSampler createCaptionGPUSampler(SDL_GPUDevice *device) {
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
   samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -228,18 +206,12 @@ CaptionGPUSampler::CaptionGPUSampler(SDL_GPUDevice *device)
   samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
   samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
 
-  gpu_sampler = SDL_CreateGPUSampler(gpu_device, &samplerInfo);
-  if (not gpu_sampler) {
+  SDL_GPUSampler *sampler = SDL_CreateGPUSampler(device, &samplerInfo);
+  if (not sampler) {
     std::string errorMsg{"SDL_CreateGPUSampler failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
-}
-
-CaptionGPUSampler::~CaptionGPUSampler() {
-  if (not gpu_sampler)
-    return;
-  SDL_ReleaseGPUSampler(gpu_device, gpu_sampler);
+  return UniqueGPUSampler{sampler, GPUSamplerDeleter{device}};
 }
 
 struct GPUTextureDeleter {
@@ -349,17 +321,17 @@ private:
 CaptionGPUGraphicsPipeline::CaptionGPUGraphicsPipeline(SDL_GPUDevice *device,
                                                        SDL_Window *window)
     : gpu_device{device} {
-  AppGPUShader::CreateInfo vertexInfo{.filepath = "caption.vert.spv",
-                                      .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-                                      .num_samplers = 0,
-                                      .num_uniform_buffers = 1};
-  AppGPUShader vertexShader{gpu_device, vertexInfo};
+  GPUShaderCreateInfo vertexInfo{.filepath = "caption.vert.spv",
+                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+                                 .num_samplers = 0,
+                                 .num_uniform_buffers = 1};
+  UniqueGPUShader vertexShader = createGPUShader(gpu_device, vertexInfo);
 
-  AppGPUShader::CreateInfo fragmentInfo{.filepath = "caption.frag.spv",
-                                        .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                        .num_samplers = 1,
-                                        .num_uniform_buffers = 1};
-  AppGPUShader fragmentShader{gpu_device, fragmentInfo};
+  GPUShaderCreateInfo fragmentInfo{.filepath = "caption.frag.spv",
+                                   .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                   .num_samplers = 1,
+                                   .num_uniform_buffers = 1};
+  UniqueGPUShader fragmentShader = createGPUShader(gpu_device, fragmentInfo);
 
   SDL_GPUColorTargetDescription colorTarget{};
   colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device, window);
@@ -389,8 +361,7 @@ CaptionGPUGraphicsPipeline::CaptionGPUGraphicsPipeline(SDL_GPUDevice *device,
   gpu_pipeline = SDL_CreateGPUGraphicsPipeline(gpu_device, &pipeInfo);
   if (not gpu_pipeline) {
     std::string errorMsg{"SDL_CreateGPUGraphicsPipeline failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
 }
 
@@ -420,17 +391,17 @@ private:
 
 GlyphGPUGraphicsPipeline::GlyphGPUGraphicsPipeline(SDL_GPUDevice *device)
     : gpu_device{device} {
-  AppGPUShader::CreateInfo vertexInfo{.filepath = "caption.vert.spv",
-                                      .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-                                      .num_samplers = 0,
-                                      .num_uniform_buffers = 1};
-  AppGPUShader vertexShader{gpu_device, vertexInfo};
+  GPUShaderCreateInfo vertexInfo{.filepath = "caption.vert.spv",
+                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+                                 .num_samplers = 0,
+                                 .num_uniform_buffers = 1};
+  UniqueGPUShader vertexShader = createGPUShader(gpu_device, vertexInfo);
 
-  AppGPUShader::CreateInfo fragmentInfo{.filepath = "glyph.frag.spv",
-                                        .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                        .num_samplers = 1,
-                                        .num_uniform_buffers = 0};
-  AppGPUShader fragmentShader{gpu_device, fragmentInfo};
+  GPUShaderCreateInfo fragmentInfo{.filepath = "glyph.frag.spv",
+                                   .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                   .num_samplers = 1,
+                                   .num_uniform_buffers = 0};
+  UniqueGPUShader fragmentShader = createGPUShader(gpu_device, fragmentInfo);
 
   SDL_GPUColorTargetBlendState blendState{};
   blendState.enable_blend = true;
@@ -456,8 +427,7 @@ GlyphGPUGraphicsPipeline::GlyphGPUGraphicsPipeline(SDL_GPUDevice *device)
   gpu_pipeline = SDL_CreateGPUGraphicsPipeline(gpu_device, &pipelineInfo);
   if (not gpu_pipeline) {
     std::string errorMsg{"SDL_CreateGPUGraphicsPipeline failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
 }
 
@@ -632,11 +602,11 @@ private:
 
   UniqueHarfbuzzFont harfbuzz_font;
 
-  UniqueGPUDevice gpu_device;
+  UniqueGPUDevice device_ctx;
   UniqueWindow main_window;
   UniqueWindowForGPUDevice main_window_for_gpu_device;
 
-  CaptionGPUSampler caption_sampler;
+  UniqueGPUSampler caption_sampler;
   CaptionGPUGraphicsPipeline caption_pipeline;
   GlyphGPUGraphicsPipeline glyph_pipeline;
 
@@ -655,19 +625,20 @@ public:
 };
 
 AppState::AppState(FT_Library library) {
-  gpu_device = createGPUDevice();
+  device_ctx = createGPUDevice();
   main_window = createWindow();
   main_window_for_gpu_device =
-      claimWindowForGPUDevice(gpu_device.get(), main_window.get());
+      claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
+  caption_sampler = createCaptionGPUSampler(device_ctx.get());
 }
 
 SDL_AppResult AppState::iterate() noexcept {
   AppGPURenderCommand::CreateInfo commandInfo{
       .swapchain_window = main_window.get(),
       .clear_color = SDL_FColor{0.08f, 0.08f, 0.10f, 1.0f}};
-  AppGPURenderCommand swapchainCommand{gpu_device.get(), commandInfo};
+  AppGPURenderCommand swapchainCommand{device_ctx.get(), commandInfo};
 
   SDL_BindGPUGraphicsPipeline(swapchainCommand.get_render_pass(),
                               caption_pipeline.get());
@@ -793,16 +764,16 @@ void AppState::GlyphCompositor::glyphs_upload() {
                                      .texture_width = glyph_infos[i].width,
                                      .texture_height = glyph_infos[i].height};
     glyph_images[i].texture =
-        createGPUTexture(app->gpu_device.get(), textureInfo);
+        createGPUTexture(app->device_ctx.get(), textureInfo);
     uploadBuffers[i].emplace(
-        app->gpu_device.get(),
+        app->device_ctx.get(),
         static_cast<std::uint32_t>(glyph_images[i].bitmap.size()));
     std::memcpy(uploadBuffers[i]->get_mapped(), glyph_images[i].bitmap.data(),
                 glyph_images[i].bitmap.size());
     uploadBuffers[i]->unmap();
   }
 
-  AppGPUCopyCommand copyCommand{app->gpu_device.get()};
+  AppGPUCopyCommand copyCommand{app->device_ctx.get()};
   for (unsigned int i = 0; i < glyph_count; ++i) {
     if (not glyph_images[i].texture)
       continue;
@@ -857,9 +828,9 @@ void AppState::GlyphCompositor::glyphs_combine() {
       .texture_width = static_cast<std::uint32_t>(combined_rect.w),
       .texture_height = static_cast<std::uint32_t>(combined_rect.h),
       .clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}};
-  AppGPURenderCommand renderCommand{app->gpu_device.get(), renderInfo};
+  AppGPURenderCommand renderCommand{app->device_ctx.get(), renderInfo};
   combined_texture = UniqueGPUTexture{renderCommand.get_texture(),
-                                      GPUTextureDeleter{app->gpu_device.get()}};
+                                      GPUTextureDeleter{app->device_ctx.get()}};
 
   SDL_BindGPUGraphicsPipeline(renderCommand.get_render_pass(),
                               glyph_pipeline.get());
@@ -896,7 +867,7 @@ void AppState::GlyphCompositor::glyphs_combine() {
 
     SDL_GPUTextureSamplerBinding sb{};
     sb.texture = glyphImage.texture.get();
-    sb.sampler = caption_sampler.get();
+    sb.sampler = app->caption_sampler.get();
     SDL_BindGPUFragmentSamplers(renderCommand.get_render_pass(), 0, &sb, 1);
 
     SDL_DrawGPUPrimitives(renderCommand.get_render_pass(), 4, 1, 0, 0);
