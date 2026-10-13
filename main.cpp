@@ -38,14 +38,14 @@ struct HarfbuzzFontDeleter {
 using UniqueHarfbuzzFont = std::unique_ptr<hb_font_t, HarfbuzzFontDeleter>;
 
 UniqueHarfbuzzFont createHarfbuzzFont(FT_Library library, const char *filepath,
-                                      FT_F26Dot6 fontSize, float displayScale) {
+                                      FT_F26Dot6 fontsize, float displayScale) {
   UniqueFreetypeFace face{};
-  FT_Face face_ptr;
-  if (FT_New_Face(library, filepath, 0, &face_ptr))
+  FT_Face facePtr{};
+  if (FT_New_Face(library, filepath, 0, &facePtr))
     throw std::runtime_error{"FT_New_Face failed!"};
-  face.reset(face_ptr);
+  face.reset(facePtr);
   FT_UInt fontDPI = static_cast<FT_UInt>(96.0f * displayScale);
-  if (FT_Set_Char_Size(face.get(), 0, fontSize, fontDPI, fontDPI))
+  if (FT_Set_Char_Size(face.get(), 0, fontsize, fontDPI, fontDPI))
     throw std::runtime_error{"FT_Set_Pixel_Sizes failed!"};
   return UniqueHarfbuzzFont{hb_ft_font_create_referenced(face.get())};
 }
