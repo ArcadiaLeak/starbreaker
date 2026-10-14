@@ -674,13 +674,13 @@ void AppState::GlyphCompositor::glyphs_upload() {
                                      .texture_height = glyph_infos[i].height};
     glyph_images[i].texture =
         createGPUTexture(app->device_ctx.get(), textureInfo);
-    transferBuffers[i] = createGPUTransferBuffer(
-        app->device_ctx.get(),
-        static_cast<std::uint32_t>(glyph_images[i].bitmap.size()));
+    const std::vector<unsigned char> &bitmap = glyph_images[i].bitmap;
+    std::uint32_t transferSize = static_cast<std::uint32_t>(bitmap.size());
+    transferBuffers[i] =
+        createGPUTransferBuffer(app->device_ctx.get(), transferSize);
     UniqueGPUMappedBuffer mappedBuffer =
         mapGPUTransferBuffer(app->device_ctx.get(), transferBuffers[i].get());
-    std::memcpy(mappedBuffer.get(), glyph_images[i].bitmap.data(),
-                glyph_images[i].bitmap.size());
+    std::memcpy(mappedBuffer.get(), bitmap.data(), bitmap.size());
   }
 
   EngagedGPUCommandBuffer commandBuffer =
