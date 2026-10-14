@@ -16,6 +16,7 @@
 #include <SDL3/SDL_main.h>
 
 #include <freetype/freetype.h>
+#include <freetype/ftbitmap.h>
 #include <freetype/ftglyph.h>
 #include <harfbuzz/hb-ft.h>
 #include <harfbuzz/hb.h>
@@ -33,13 +34,21 @@ struct FreetypeFaceDeleter {
 };
 using UniqueFreetypeFace = std::unique_ptr<FT_FaceRec, FreetypeFaceDeleter>;
 
-struct RenderedGlyphDeleter {
-  void operator()(FT_BitmapGlyph renderedGlyph) const;
+struct FreetypeGlyphDeleter {
+  void operator()(FT_Glyph freetypeGlyph) const;
 };
-using UniqueRenderedGlyph =
-    std::unique_ptr<FT_BitmapGlyphRec, RenderedGlyphDeleter>;
-void RenderedGlyphDeleter::operator()(FT_BitmapGlyph renderedGlyph) const {
-  FT_Done_Glyph(reinterpret_cast<FT_Glyph>(renderedGlyph));
+using UniqueFreetypeGlyph = std::unique_ptr<FT_GlyphRec, FreetypeGlyphDeleter>;
+void FreetypeGlyphDeleter::operator()(FT_Glyph freetypeGlyph) const {
+  FT_Done_Glyph(freetypeGlyph);
+}
+
+struct FreetypeBitmapDeleter {
+  FT_Library freetypeLibrary;
+  void operator()(FT_Bitmap *freetypeBitmap) const;
+};
+using UniqueFreetypeBitmap = std::unique_ptr<FT_Bitmap, FreetypeBitmapDeleter>;
+void FreetypeBitmapDeleter::operator()(FT_Bitmap *freetypeBitmap) const {
+  FT_Bitmap_Done(freetypeLibrary, freetypeBitmap);
 }
 
 struct HarfbuzzFontDeleter {
