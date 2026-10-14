@@ -1,14 +1,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <format>
+#include <map>
 #include <memory>
-#include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL.h>
@@ -16,7 +16,6 @@
 #include <SDL3/SDL_main.h>
 
 #include <freetype/freetype.h>
-#include <freetype/ftbitmap.h>
 #include <freetype/ftglyph.h>
 #include <harfbuzz/hb-ft.h>
 #include <harfbuzz/hb.h>
@@ -42,13 +41,11 @@ void FreetypeGlyphDeleter::operator()(FT_Glyph freetypeGlyph) const {
   FT_Done_Glyph(freetypeGlyph);
 }
 
-struct FreetypeBitmapDeleter {
-  FT_Library freetypeLibrary;
-  void operator()(FT_Bitmap *freetypeBitmap) const;
-};
-using UniqueFreetypeBitmap = std::unique_ptr<FT_Bitmap, FreetypeBitmapDeleter>;
-void FreetypeBitmapDeleter::operator()(FT_Bitmap *freetypeBitmap) const {
-  FT_Bitmap_Done(freetypeLibrary, freetypeBitmap);
+FT_Bitmap &getGlyphBitmap(FT_Glyph freetypeGlyph) {
+  if (freetypeGlyph->format == FT_GLYPH_FORMAT_BITMAP)
+    return reinterpret_cast<FT_BitmapGlyph>(freetypeGlyph)->bitmap;
+  else
+    throw std::runtime_error{"Unexpected FT_Glyph format!"};
 }
 
 struct HarfbuzzFontDeleter {
@@ -505,10 +502,12 @@ void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
 class AppState {
 private:
   struct GlyphCompositor {
+    using GlyphCacheValue = std::pair<UniqueFreetypeGlyph, UniqueGPUTexture>;
+    using GlyphCache = std::map<hb_codepoint_t, GlyphCacheValue>;
     AppState *app;
 
     UniqueHarfbuzzBuffer harfbuzz_buffer;
-    std::vector<UniqueGPUTexture> glyph_textures;
+    GlyphCache glyph_cache;
     UniqueGPUTexture combined_texture;
     SDL_Rect combined_rect;
 
@@ -530,7 +529,7 @@ private:
   std::string caption_string = "Hello world kerning Text";
   GlyphCompositor caption_compositor{this};
 
-  UniqueRenderedGlyph render_font_glyph(hb_codepoint_t codepoint);
+  UniqueFreetypeGlyph load_freetype_glyph(hb_codepoint_t codepoint);
 
 public:
   AppState(FT_Library library);
@@ -633,58 +632,58 @@ void AppState::GlyphCompositor::glyphs_shape(std::string_view textView) {
 }
 
 void AppState::GlyphCompositor::glyphs_texturize() {
-  hb_glyph_info_t *glyphInfos =
-      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
-  for (unsigned int i = 0; i < hb_buffer_get_length(harfbuzz_buffer.get());
-       ++i) {
-    UniqueRenderedGlyph renderedGlyph =
-        app->render_font_glyph(glyphInfos[i].codepoint);
-    if (glyph_infos[i].width == 0 || glyph_infos[i].height == 0)
+  std::span<hb_glyph_info_t> glyphInfos(
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
+      hb_buffer_get_length(harfbuzz_buffer.get()));
+  GlyphCache previousGlyphCache{};
+  previousGlyphCache.swap(glyph_cache);
+  std::map<hb_codepoint_t, UniqueGPUTransferBuffer> transferBuffers{};
+  for (const hb_glyph_info_t &glyphInfo : glyphInfos) {
+    GlyphCache::node_type cacheNode =
+        previousGlyphCache.extract(glyphInfo.codepoint);
+    GlyphCache::insert_return_type cacheInsert =
+        glyph_cache.insert(std::move(cacheNode));
+    if (cacheInsert.inserted)
       continue;
-    glyph_bitmaps[i].resize(bitmap.width * bitmap.rows);
-    for (unsigned int y = 0; y < bitmap.rows; ++y) {
-      const uint8_t *rowSource = bitmap.buffer + y * std::abs(bitmap.pitch);
-      uint8_t *rowTarget = glyph_bitmaps[i].data() + y * bitmap.width;
-      std::memcpy(rowTarget, rowSource, bitmap.width);
-    }
-  }
-}
-
-void AppState::GlyphCompositor::glyphs_upload() {
-  std::vector<UniqueGPUTransferBuffer> transferBuffers(glyph_count);
-  for (unsigned int i = 0; i < glyph_count; ++i) {
-    if (glyph_infos[i].width == 0 || glyph_infos[i].height == 0)
+    UniqueFreetypeGlyph freetypeGlyph =
+        app->load_freetype_glyph(glyphInfo.codepoint);
+    const FT_Bitmap &bitmap = getGlyphBitmap(freetypeGlyph.get());
+    if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
     GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-                                     .texture_width = glyph_infos[i].width,
-                                     .texture_height = glyph_infos[i].height};
-    glyph_textures[i] = createGPUTexture(app->device_ctx.get(), textureInfo);
-    const std::vector<unsigned char> &bitmap = glyph_bitmaps[i];
-    std::uint32_t transferSize = static_cast<std::uint32_t>(bitmap.size());
-    transferBuffers[i] =
+                                     .texture_width = bitmap.width,
+                                     .texture_height = bitmap.rows};
+    glyph_cache[glyphInfo.codepoint] = {
+        std::move(freetypeGlyph),
+        createGPUTexture(app->device_ctx.get(), textureInfo)};
+    std::uint32_t transferSize =
+        static_cast<std::uint32_t>(bitmap.width * bitmap.rows);
+    transferBuffers[glyphInfo.codepoint] =
         createGPUTransferBuffer(app->device_ctx.get(), transferSize);
-    UniqueGPUMappedBuffer mappedBuffer =
-        mapGPUTransferBuffer(app->device_ctx.get(), transferBuffers[i].get());
-    std::memcpy(mappedBuffer.get(), bitmap.data(), bitmap.size());
+    UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
+        app->device_ctx.get(), transferBuffers[glyphInfo.codepoint].get());
+    for (std::uint32_t row = 0; row < bitmap.rows; ++row) {
+      const uint8_t *source = bitmap.buffer + row * std::abs(bitmap.pitch);
+      uint8_t *destination =
+          static_cast<uint8_t *>(mappedBuffer.get()) + row * bitmap.width;
+      std::memcpy(destination, source, bitmap.width);
+    }
   }
-
   EngagedGPUCommandBuffer commandBuffer =
       acquireGPUCommandBuffer(app->device_ctx.get());
   UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(commandBuffer.get())};
-  for (unsigned int i = 0; i < glyph_count; ++i) {
-    if (not glyph_textures[i])
-      continue;
-    SDL_GPUTextureTransferInfo src{};
-    src.transfer_buffer = transferBuffers[i].get();
-    src.offset = 0;
-    src.pixels_per_row = glyph_infos[i].width;
-    src.rows_per_layer = glyph_infos[i].height;
-    SDL_GPUTextureRegion dst{};
-    dst.texture = glyph_textures[i].get();
-    dst.w = glyph_infos[i].width;
-    dst.h = glyph_infos[i].height;
-    dst.d = 1;
-    SDL_UploadToGPUTexture(copyPass.get(), &src, &dst, false);
+  for (const auto &[codepoint, transferBuffer] : transferBuffers) {
+    const auto &[freetypeGlyph, glyphTexture] = glyph_cache[codepoint];
+    const FT_Bitmap &bitmap = getGlyphBitmap(freetypeGlyph.get());
+    SDL_GPUTextureTransferInfo source{.transfer_buffer = transferBuffer.get(),
+                                      .offset = 0,
+                                      .pixels_per_row = bitmap.width,
+                                      .rows_per_layer = bitmap.rows};
+    SDL_GPUTextureRegion destination{.texture = glyphTexture.get(),
+                                     .w = bitmap.width,
+                                     .h = bitmap.rows,
+                                     .d = 1};
+    SDL_UploadToGPUTexture(copyPass.get(), &source, &destination, false);
   }
 }
 
@@ -773,7 +772,7 @@ void AppState::GlyphCompositor::glyphs_combine() {
   }
 }
 
-UniqueRenderedGlyph AppState::render_font_glyph(hb_codepoint_t codepoint) {
+UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
   FT_Error errcode{};
   FT_Face face = hb_ft_font_get_ft_face(harfbuzz_font.get());
   errcode = FT_Load_Glyph(
@@ -788,14 +787,13 @@ UniqueRenderedGlyph AppState::render_font_glyph(hb_codepoint_t codepoint) {
     std::string errorMsg{"FT_Get_Glyph failed for glyph: "};
     throw std::runtime_error{errorMsg + std::to_string(codepoint)};
   }
-  return UniqueRenderedGlyph{reinterpret_cast<FT_BitmapGlyph>(glyph)};
+  return UniqueFreetypeGlyph{glyph};
 }
 
 void AppState::caption_text_compose() {
   GlyphCompositor compositor{this};
   compositor.glyphs_shape(caption_string);
-  compositor.glyphs_render();
-  compositor.glyphs_upload();
+  compositor.glyphs_texturize();
   compositor.glyphs_combine();
   caption_glyph_infos = std::move(compositor.glyph_infos);
   caption_texture = std::move(compositor.combined_texture);
