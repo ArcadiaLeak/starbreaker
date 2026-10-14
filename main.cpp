@@ -451,14 +451,6 @@ UniqueGPURenderPass beginGPURenderPass(SDL_GPUCommandBuffer *commandBuffer,
   return UniqueGPURenderPass{renderPass};
 }
 
-struct GPUCopyPassDeleter {
-  void operator()(SDL_GPUCopyPass *copyPass) const;
-};
-using UniqueGPUCopyPass = std::unique_ptr<SDL_GPUCopyPass, GPUCopyPassDeleter>;
-void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
-  SDL_EndGPUCopyPass(copyPass);
-}
-
 SDL_GPUTexture *waitAndAcquireGPUSwapchainTexture(
     SDL_GPUCommandBuffer *commandBuffer, SDL_Window *window,
     std::uint32_t *texture_width, std::uint32_t *texture_height) {
@@ -471,41 +463,12 @@ SDL_GPUTexture *waitAndAcquireGPUSwapchainTexture(
   return texture;
 }
 
-class AppGPUCopyCommand {
-public:
-  AppGPUCopyCommand(SDL_GPUDevice *device);
-  ~AppGPUCopyCommand();
-
-  AppGPUCopyCommand(const AppGPUCopyCommand &) = delete;
-  AppGPUCopyCommand &operator=(const AppGPUCopyCommand &) = delete;
-  AppGPUCopyCommand(AppGPUCopyCommand &&) = delete;
-  AppGPUCopyCommand &operator=(AppGPUCopyCommand &&) = delete;
-
-  SDL_GPUCommandBuffer *get_command() { return gpu_command; }
-  SDL_GPUCopyPass *get_copy_pass() { return copy_pass; }
-
-private:
-  SDL_GPUDevice *gpu_device = nullptr;
-  SDL_GPUCommandBuffer *gpu_command = nullptr;
-  SDL_GPUCopyPass *copy_pass = nullptr;
+struct GPUCopyPassDeleter {
+  void operator()(SDL_GPUCopyPass *copyPass) const;
 };
-
-AppGPUCopyCommand::AppGPUCopyCommand(SDL_GPUDevice *device)
-    : gpu_device{device} {
-  gpu_command = SDL_AcquireGPUCommandBuffer(gpu_device);
-  if (not gpu_command) {
-    std::string errorMsg{"SDL_AcquireGPUCommandBuffer failed: "};
-    throw std::runtime_error{errorMsg + SDL_GetError()};
-  }
-  copy_pass = SDL_BeginGPUCopyPass(gpu_command);
-}
-
-AppGPUCopyCommand::~AppGPUCopyCommand() {
-  SDL_EndGPUCopyPass(copy_pass);
-  if (SDL_SubmitGPUCommandBuffer(gpu_command))
-    return;
-  SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
-  std::terminate();
+using UniqueGPUCopyPass = std::unique_ptr<SDL_GPUCopyPass, GPUCopyPassDeleter>;
+void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
+  SDL_EndGPUCopyPass(copyPass);
 }
 
 struct GlyphInfo {
@@ -720,7 +683,9 @@ void AppState::GlyphCompositor::glyphs_upload() {
                 glyph_images[i].bitmap.size());
   }
 
-  AppGPUCopyCommand copyCommand{app->device_ctx.get()};
+  EngagedGPUCommandBuffer commandBuffer =
+      acquireGPUCommandBuffer(app->device_ctx.get());
+  UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(commandBuffer.get())};
   for (unsigned int i = 0; i < glyph_count; ++i) {
     if (not glyph_images[i].texture)
       continue;
@@ -734,7 +699,7 @@ void AppState::GlyphCompositor::glyphs_upload() {
     dst.w = glyph_infos[i].width;
     dst.h = glyph_infos[i].height;
     dst.d = 1;
-    SDL_UploadToGPUTexture(copyCommand.get_copy_pass(), &src, &dst, false);
+    SDL_UploadToGPUTexture(copyPass.get(), &src, &dst, false);
   }
 }
 
