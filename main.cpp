@@ -41,7 +41,7 @@ void FreetypeGlyphDeleter::operator()(FT_Glyph freetypeGlyph) const {
   FT_Done_Glyph(freetypeGlyph);
 }
 
-FT_Bitmap &getGlyphBitmap(FT_Glyph freetypeGlyph) {
+FT_Bitmap &getFreetypeBitmap(FT_Glyph freetypeGlyph) {
   if (freetypeGlyph->format == FT_GLYPH_FORMAT_BITMAP)
     return reinterpret_cast<FT_BitmapGlyph>(freetypeGlyph)->bitmap;
   else
@@ -647,7 +647,7 @@ void AppState::GlyphCompositor::glyphs_texturize() {
       continue;
     UniqueFreetypeGlyph freetypeGlyph =
         app->load_freetype_glyph(glyphInfo.codepoint);
-    const FT_Bitmap &bitmap = getGlyphBitmap(freetypeGlyph.get());
+    const FT_Bitmap &bitmap = getFreetypeBitmap(freetypeGlyph.get());
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
     GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
@@ -674,7 +674,7 @@ void AppState::GlyphCompositor::glyphs_texturize() {
   UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(commandBuffer.get())};
   for (const auto &[codepoint, transferBuffer] : transferBuffers) {
     const auto &[freetypeGlyph, glyphTexture] = glyph_cache[codepoint];
-    const FT_Bitmap &bitmap = getGlyphBitmap(freetypeGlyph.get());
+    const FT_Bitmap &bitmap = getFreetypeBitmap(freetypeGlyph.get());
     SDL_GPUTextureTransferInfo source{.transfer_buffer = transferBuffer.get(),
                                       .offset = 0,
                                       .pixels_per_row = bitmap.width,
