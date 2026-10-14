@@ -28,14 +28,26 @@ struct Vertex {
 static FT_Library globalFTLibrary = nullptr;
 
 struct FreetypeFaceDeleter {
-  void operator()(FT_Face facePtr) const { FT_Done_Face(facePtr); }
+  void operator()(FT_Face freetypeFace) const { FT_Done_Face(freetypeFace); }
 };
 using UniqueFreetypeFace = std::unique_ptr<FT_FaceRec, FreetypeFaceDeleter>;
 
 struct HarfbuzzFontDeleter {
-  void operator()(hb_font_t *fontPtr) const { hb_font_destroy(fontPtr); }
+  void operator()(hb_font_t *harfbuzzFont) const;
 };
 using UniqueHarfbuzzFont = std::unique_ptr<hb_font_t, HarfbuzzFontDeleter>;
+void HarfbuzzFontDeleter::operator()(hb_font_t *harfbuzzFont) const {
+  hb_font_destroy(harfbuzzFont);
+}
+
+struct HarfbuzzBufferDeleter {
+  void operator()(hb_buffer_t *harfbuzzBuffer) const;
+};
+using UniqueHarfbuzzBuffer =
+    std::unique_ptr<hb_buffer_t, HarfbuzzBufferDeleter>;
+void HarfbuzzBufferDeleter::operator()(hb_buffer_t *harfbuzzBuffer) const {
+  hb_buffer_destroy(harfbuzzBuffer);
+}
 
 UniqueHarfbuzzFont createHarfbuzzFont(FT_Library library, const char *filepath,
                                       FT_F26Dot6 fontsize, float displayScale) {
@@ -471,28 +483,17 @@ void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
   SDL_EndGPUCopyPass(copyPass);
 }
 
-struct GlyphInfo {
-  hb_codepoint_t codepoint;
-  std::uint32_t cluster;
-  hb_position_t x_advance, x_offset, y_offset;
-  FT_Pos rsb_delta;
-  unsigned int width, height;
-  int bitmap_left, bitmap_top;
-};
-
 class AppState {
 private:
   struct GlyphCompositor {
     AppState *app;
 
-    unsigned int glyph_count;
-    std::vector<GlyphInfo> glyph_infos;
-    std::vector<std::vector<unsigned char>> glyph_bitmaps;
+    UniqueHarfbuzzBuffer harfbuzz_buffer;
     std::vector<UniqueGPUTexture> glyph_textures;
     UniqueGPUTexture combined_texture;
     SDL_Rect combined_rect;
 
-    void glyphs_alloc(std::string_view textView);
+    void glyphs_shape(std::string_view textView);
     void glyphs_render();
     void glyphs_upload();
     void glyphs_combine();
@@ -509,9 +510,7 @@ private:
   UniqueGPUGraphicsPipeline glyph_pipeline;
 
   std::string caption_string = "Hello world kerning Text";
-  std::vector<GlyphInfo> caption_glyph_infos;
-  UniqueGPUTexture caption_texture;
-  SDL_Rect caption_rect;
+  GlyphCompositor caption_compositor{this};
 
 public:
   AppState(FT_Library library);
@@ -561,10 +560,12 @@ SDL_AppResult AppState::iterate() noexcept {
   QuadUniforms uniforms{};
   uniforms.viewport[0] = static_cast<float>(swapchainWidth);
   uniforms.viewport[1] = static_cast<float>(swapchainHeight);
-  uniforms.rect_pos[0] = static_cast<float>(caption_rect.x);
-  uniforms.rect_pos[1] = static_cast<float>(caption_rect.y);
-  uniforms.rect_size[0] = static_cast<float>(caption_rect.w);
-  uniforms.rect_size[1] = static_cast<float>(caption_rect.h);
+  uniforms.rect_pos[0] = static_cast<float>(caption_compositor.combined_rect.x);
+  uniforms.rect_pos[1] = static_cast<float>(caption_compositor.combined_rect.y);
+  uniforms.rect_size[0] =
+      static_cast<float>(caption_compositor.combined_rect.w);
+  uniforms.rect_size[1] =
+      static_cast<float>(caption_compositor.combined_rect.h);
   SDL_PushGPUVertexUniformData(commandBuffer.get(), 0, &uniforms,
                                sizeof(QuadUniforms));
 
@@ -577,7 +578,7 @@ SDL_AppResult AppState::iterate() noexcept {
                                  sizeof(BlitUniforms));
 
   SDL_GPUTextureSamplerBinding samplerBinding{};
-  samplerBinding.texture = caption_texture.get();
+  samplerBinding.texture = caption_compositor.combined_texture.get();
   samplerBinding.sampler = caption_sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
@@ -593,48 +594,37 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
     return SDL_APP_CONTINUE;
   } else if (event->type == SDL_EVENT_WINDOW_RESIZED) {
-    caption_rect.x = (event->window.data1 - caption_rect.w) / 2;
-    caption_rect.y = (event->window.data2 - caption_rect.h) / 2;
+    caption_compositor.combined_rect.x =
+        (event->window.data1 - caption_compositor.combined_rect.w) / 2;
+    caption_compositor.combined_rect.y =
+        (event->window.data2 - caption_compositor.combined_rect.h) / 2;
     return SDL_APP_CONTINUE;
   } else
     return SDL_APP_CONTINUE;
 }
 
-void AppState::GlyphCompositor::glyphs_alloc(std::string_view textView) {
-  hb_buffer_t *glyphBuffer = hb_buffer_create();
-
-  hb_buffer_add_utf8(glyphBuffer, textView.data(),
+void AppState::GlyphCompositor::glyphs_shape(std::string_view textView) {
+  harfbuzz_buffer.reset(hb_buffer_create());
+  hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
                      static_cast<int>(textView.size()), 0,
                      static_cast<int>(textView.size()));
-  hb_buffer_guess_segment_properties(glyphBuffer);
-  hb_shape(app->harfbuzz_font.get(), glyphBuffer, nullptr, 0);
-
-  hb_glyph_info_t *glyphInfos =
-      hb_buffer_get_glyph_infos(glyphBuffer, &glyph_count);
-  hb_glyph_position_t *glyphPositions =
-      hb_buffer_get_glyph_positions(glyphBuffer, &glyph_count);
-
-  glyph_infos = std::vector<GlyphInfo>(glyph_count);
-  glyph_bitmaps = std::vector<std::vector<unsigned char>>(glyph_count);
-  glyph_textures = std::vector<UniqueGPUTexture>(glyph_count);
-  for (unsigned int i = 0; i < glyph_count; ++i) {
-    glyph_infos[i].codepoint = glyphInfos[i].codepoint;
-    glyph_infos[i].cluster = glyphInfos[i].cluster;
-    glyph_infos[i].x_advance = glyphPositions[i].x_advance;
-    glyph_infos[i].x_offset = glyphPositions[i].x_offset;
-    glyph_infos[i].y_offset = glyphPositions[i].y_offset;
-  }
-
-  hb_buffer_destroy(glyphBuffer);
+  hb_buffer_guess_segment_properties(harfbuzz_buffer.get());
+  hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
 }
 
 void AppState::GlyphCompositor::glyphs_render() {
-  for (unsigned int i = 0; i < glyph_count; ++i) {
-    FT_Int32 flags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER;
-    FT_Face face = hb_ft_font_get_ft_face(app->harfbuzz_font.get());
-    if (FT_Load_Glyph(face, glyph_infos[i].codepoint, flags) != 0) {
-      SDL_Log("FT_Load_Glyph failed for glyph: %d", glyph_infos[i].codepoint);
-      continue;
+  hb_glyph_info_t *glyphInfos =
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
+  for (unsigned int i = 0; i < hb_buffer_get_length(harfbuzz_buffer.get());
+       ++i) {
+    FT_Error loadError =
+        FT_Load_Glyph(hb_ft_font_get_ft_face(app->harfbuzz_font.get()),
+                      glyphInfos[i].codepoint,
+                      FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER);
+    if (loadError) {
+      std::string errorMsg{"FT_Load_Glyph failed for glyph: "};
+      throw std::runtime_error{errorMsg +
+                               std::to_string(glyphInfos[i].codepoint)};
     }
     FT_GlyphSlot slot = face->glyph;
     glyph_infos[i].bitmap_left = slot->bitmap_left;
@@ -786,7 +776,7 @@ void AppState::GlyphCompositor::glyphs_combine() {
 
 void AppState::caption_text_compose() {
   GlyphCompositor compositor{this};
-  compositor.glyphs_alloc(caption_string);
+  compositor.glyphs_shape(caption_string);
   compositor.glyphs_render();
   compositor.glyphs_upload();
   compositor.glyphs_combine();
