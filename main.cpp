@@ -16,6 +16,7 @@
 #include <SDL3/SDL_main.h>
 
 #include <freetype/freetype.h>
+#include <freetype/ftglyph.h>
 #include <harfbuzz/hb-ft.h>
 #include <harfbuzz/hb.h>
 #include <vulkan/vulkan.h>
@@ -31,6 +32,15 @@ struct FreetypeFaceDeleter {
   void operator()(FT_Face freetypeFace) const { FT_Done_Face(freetypeFace); }
 };
 using UniqueFreetypeFace = std::unique_ptr<FT_FaceRec, FreetypeFaceDeleter>;
+
+struct RenderedGlyphDeleter {
+  void operator()(FT_BitmapGlyph renderedGlyph) const;
+};
+using UniqueRenderedGlyph =
+    std::unique_ptr<FT_BitmapGlyphRec, RenderedGlyphDeleter>;
+void RenderedGlyphDeleter::operator()(FT_BitmapGlyph renderedGlyph) const {
+  FT_Done_Glyph(reinterpret_cast<FT_Glyph>(renderedGlyph));
+}
 
 struct HarfbuzzFontDeleter {
   void operator()(hb_font_t *harfbuzzFont) const;
@@ -494,8 +504,7 @@ private:
     SDL_Rect combined_rect;
 
     void glyphs_shape(std::string_view textView);
-    void glyphs_render();
-    void glyphs_upload();
+    void glyphs_texturize();
     void glyphs_combine();
   };
 
@@ -511,6 +520,8 @@ private:
 
   std::string caption_string = "Hello world kerning Text";
   GlyphCompositor caption_compositor{this};
+
+  UniqueRenderedGlyph render_font_glyph(hb_codepoint_t codepoint);
 
 public:
   AppState(FT_Library library);
@@ -612,34 +623,13 @@ void AppState::GlyphCompositor::glyphs_shape(std::string_view textView) {
   hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
 }
 
-void AppState::GlyphCompositor::glyphs_render() {
+void AppState::GlyphCompositor::glyphs_texturize() {
   hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   for (unsigned int i = 0; i < hb_buffer_get_length(harfbuzz_buffer.get());
        ++i) {
-    FT_Error loadError =
-        FT_Load_Glyph(hb_ft_font_get_ft_face(app->harfbuzz_font.get()),
-                      glyphInfos[i].codepoint,
-                      FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER);
-    if (loadError) {
-      std::string errorMsg{"FT_Load_Glyph failed for glyph: "};
-      throw std::runtime_error{errorMsg +
-                               std::to_string(glyphInfos[i].codepoint)};
-    }
-    FT_GlyphSlot slot = face->glyph;
-    glyph_infos[i].bitmap_left = slot->bitmap_left;
-    glyph_infos[i].bitmap_top = slot->bitmap_top;
-    glyph_infos[i].rsb_delta = slot->rsb_delta;
-    if (i != 0) {
-      FT_Pos delta_diff = glyph_infos[i - 1].rsb_delta - slot->lsb_delta;
-      if (delta_diff > 32)
-        glyph_infos[i].x_offset -= 64;
-      else if (delta_diff < -31)
-        glyph_infos[i].x_offset += 64;
-    }
-    const FT_Bitmap &bitmap = slot->bitmap;
-    glyph_infos[i].width = bitmap.width;
-    glyph_infos[i].height = bitmap.rows;
+    UniqueRenderedGlyph renderedGlyph =
+        app->render_font_glyph(glyphInfos[i].codepoint);
     if (glyph_infos[i].width == 0 || glyph_infos[i].height == 0)
       continue;
     glyph_bitmaps[i].resize(bitmap.width * bitmap.rows);
@@ -772,6 +762,24 @@ void AppState::GlyphCompositor::glyphs_combine() {
 
     SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
   }
+}
+
+UniqueRenderedGlyph AppState::render_font_glyph(hb_codepoint_t codepoint) {
+  FT_Error errcode{};
+  FT_Face face = hb_ft_font_get_ft_face(harfbuzz_font.get());
+  errcode = FT_Load_Glyph(
+      face, codepoint, FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER);
+  if (errcode) {
+    std::string errorMsg{"FT_Load_Glyph failed for glyph: "};
+    throw std::runtime_error{errorMsg + std::to_string(codepoint)};
+  }
+  FT_Glyph glyph{};
+  errcode = FT_Get_Glyph(face->glyph, &glyph);
+  if (errcode) {
+    std::string errorMsg{"FT_Get_Glyph failed for glyph: "};
+    throw std::runtime_error{errorMsg + std::to_string(codepoint)};
+  }
+  return UniqueRenderedGlyph{reinterpret_cast<FT_BitmapGlyph>(glyph)};
 }
 
 void AppState::caption_text_compose() {
