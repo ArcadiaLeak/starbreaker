@@ -421,6 +421,15 @@ void GPUCommandBufferCanceller::operator()(
     SDL_Log("SDL_CancelGPUCommandBuffer failed: %s", SDL_GetError());
 }
 
+EngagedGPUCommandBuffer acquireGPUCommandBuffer(SDL_GPUDevice *device) {
+  SDL_GPUCommandBuffer *commandBuffer = SDL_AcquireGPUCommandBuffer(device);
+  if (not commandBuffer) {
+    std::string errorMsg{"SDL_AcquireGPUCommandBuffer failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
+  }
+  return EngagedGPUCommandBuffer{commandBuffer};
+}
+
 struct GPURenderPassDeleter {
   void operator()(SDL_GPURenderPass *renderPass) const;
 };
@@ -428,6 +437,18 @@ using UniqueGPURenderPass =
     std::unique_ptr<SDL_GPURenderPass, GPURenderPassDeleter>;
 void GPURenderPassDeleter::operator()(SDL_GPURenderPass *renderPass) const {
   SDL_EndGPURenderPass(renderPass);
+}
+
+UniqueGPURenderPass beginGPURenderPass(SDL_GPUCommandBuffer *commandBuffer,
+                                       SDL_GPUTexture *texture,
+                                       SDL_FColor clearColor) {
+  SDL_GPUColorTargetInfo colorTarget{.texture = texture,
+                                     .clear_color = clearColor,
+                                     .load_op = SDL_GPU_LOADOP_CLEAR,
+                                     .store_op = SDL_GPU_STOREOP_STORE};
+  SDL_GPURenderPass *renderPass =
+      SDL_BeginGPURenderPass(commandBuffer, &colorTarget, 1, nullptr);
+  return UniqueGPURenderPass{renderPass};
 }
 
 struct GPUCopyPassDeleter {
@@ -438,94 +459,16 @@ void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
   SDL_EndGPUCopyPass(copyPass);
 }
 
-class AppGPURenderCommand {
-public:
-  struct CreateInfo {
-    SDL_Window *swapchain_window;
-    std::uint32_t texture_width;
-    std::uint32_t texture_height;
-    SDL_FColor clear_color;
-  };
-
-  AppGPURenderCommand(SDL_GPUDevice *device, CreateInfo createInfo);
-  ~AppGPURenderCommand();
-
-  AppGPURenderCommand(const AppGPURenderCommand &) = delete;
-  AppGPURenderCommand &operator=(const AppGPURenderCommand &) = delete;
-  AppGPURenderCommand(AppGPURenderCommand &&) = delete;
-  AppGPURenderCommand &operator=(AppGPURenderCommand &&) = delete;
-
-  SDL_GPUCommandBuffer *get_command() { return gpu_command; }
-  SDL_GPUTexture *get_texture() { return gpu_texture; }
-  std::uint32_t get_texture_width() { return texture_width; }
-  std::uint32_t get_texture_height() { return texture_height; }
-  SDL_GPURenderPass *get_render_pass() { return render_pass; }
-
-private:
-  SDL_GPUDevice *gpu_device = nullptr;
-  SDL_GPUCommandBuffer *gpu_command = nullptr;
-  SDL_GPUTexture *gpu_texture = nullptr;
-  std::uint32_t texture_width = 0, texture_height = 0;
-  SDL_GPURenderPass *render_pass = nullptr;
-};
-
-AppGPURenderCommand::AppGPURenderCommand(SDL_GPUDevice *device,
-                                         CreateInfo createInfo)
-    : gpu_device{device} {
-  gpu_command = SDL_AcquireGPUCommandBuffer(gpu_device);
-  if (not gpu_command) {
-    std::string errorMsg{"SDL_AcquireGPUCommandBuffer failed: "};
-    errorMsg.append(SDL_GetError());
-    throw std::runtime_error{errorMsg};
+SDL_GPUTexture *waitAndAcquireGPUSwapchainTexture(
+    SDL_GPUCommandBuffer *commandBuffer, SDL_Window *window,
+    std::uint32_t *texture_width, std::uint32_t *texture_height) {
+  SDL_GPUTexture *texture{};
+  if (not SDL_WaitAndAcquireGPUSwapchainTexture(
+          commandBuffer, window, &texture, texture_width, texture_height)) {
+    std::string errorMsg{"SDL_WaitAndAcquireGPUSwapchainTexture failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
   }
-
-  if (createInfo.swapchain_window) {
-    if (not SDL_WaitAndAcquireGPUSwapchainTexture(
-            gpu_command, createInfo.swapchain_window, &gpu_texture,
-            &texture_width, &texture_height)) {
-      std::string errorMsg{"SDL_WaitAndAcquireGPUSwapchainTexture failed: "};
-      errorMsg.append(SDL_GetError());
-      throw std::runtime_error{errorMsg};
-    }
-  } else {
-    texture_height = createInfo.texture_height;
-    texture_width = createInfo.texture_width;
-
-    SDL_GPUTextureCreateInfo textureInfo{};
-    textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
-    textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
-    textureInfo.usage =
-        SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    textureInfo.width = texture_width;
-    textureInfo.height = texture_height;
-    textureInfo.layer_count_or_depth = 1;
-    textureInfo.num_levels = 1;
-    textureInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    gpu_texture = SDL_CreateGPUTexture(device, &textureInfo);
-    if (not gpu_texture) {
-      std::string errorMsg{"SDL_CreateGPUTexture failed: "};
-      errorMsg.append(SDL_GetError());
-      throw std::runtime_error{errorMsg};
-    }
-  }
-
-  if (gpu_texture) {
-    SDL_GPUColorTargetInfo colorTarget{};
-    colorTarget.texture = gpu_texture;
-    colorTarget.clear_color = createInfo.clear_color;
-    colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
-    colorTarget.store_op = SDL_GPU_STOREOP_STORE;
-    render_pass = SDL_BeginGPURenderPass(gpu_command, &colorTarget, 1, nullptr);
-  }
-}
-
-AppGPURenderCommand::~AppGPURenderCommand() {
-  if (gpu_texture)
-    SDL_EndGPURenderPass(render_pass);
-  if (SDL_SubmitGPUCommandBuffer(gpu_command))
-    return;
-  SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
-  std::terminate();
+  return texture;
 }
 
 class AppGPUCopyCommand {
@@ -634,13 +577,19 @@ AppState::AppState(FT_Library library) {
 }
 
 SDL_AppResult AppState::iterate() noexcept {
-  AppGPURenderCommand::CreateInfo commandInfo{
-      .swapchain_window = main_window.get(),
-      .clear_color = SDL_FColor{0.08f, 0.08f, 0.10f, 1.0f}};
-  AppGPURenderCommand swapchainCommand{device_ctx.get(), commandInfo};
+  EngagedGPUCommandBuffer commandBuffer =
+      acquireGPUCommandBuffer(device_ctx.get());
+  std::uint32_t swapchainWidth{}, swapchainHeight{};
+  SDL_GPUTexture *swapchainTexture =
+      waitAndAcquireGPUSwapchainTexture(commandBuffer.get(), main_window.get(),
+                                        &swapchainWidth, &swapchainHeight);
+  if (not swapchainTexture)
+    return SDL_APP_CONTINUE;
 
-  SDL_BindGPUGraphicsPipeline(swapchainCommand.get_render_pass(),
-                              caption_pipeline.get());
+  UniqueGPURenderPass renderPass =
+      beginGPURenderPass(commandBuffer.get(), swapchainTexture,
+                         SDL_FColor{0.08f, 0.08f, 0.10f, 1.0f});
+  SDL_BindGPUGraphicsPipeline(renderPass.get(), caption_pipeline.get());
   struct QuadUniforms {
     float viewport[2];
     float rect_pos[2];
@@ -651,15 +600,13 @@ SDL_AppResult AppState::iterate() noexcept {
   };
 
   QuadUniforms uniforms{};
-  uniforms.viewport[0] =
-      static_cast<float>(swapchainCommand.get_texture_width());
-  uniforms.viewport[1] =
-      static_cast<float>(swapchainCommand.get_texture_height());
+  uniforms.viewport[0] = static_cast<float>(swapchainWidth);
+  uniforms.viewport[1] = static_cast<float>(swapchainHeight);
   uniforms.rect_pos[0] = static_cast<float>(caption_rect.x);
   uniforms.rect_pos[1] = static_cast<float>(caption_rect.y);
   uniforms.rect_size[0] = static_cast<float>(caption_rect.w);
   uniforms.rect_size[1] = static_cast<float>(caption_rect.h);
-  SDL_PushGPUVertexUniformData(swapchainCommand.get_command(), 0, &uniforms,
+  SDL_PushGPUVertexUniformData(commandBuffer.get(), 0, &uniforms,
                                sizeof(QuadUniforms));
 
   BlitUniforms blit{};
@@ -667,15 +614,15 @@ SDL_AppResult AppState::iterate() noexcept {
   blit.tint[1] = 1.0f;
   blit.tint[2] = 1.0f;
   blit.tint[3] = 1.0f;
-  SDL_PushGPUFragmentUniformData(swapchainCommand.get_command(), 0, &blit,
+  SDL_PushGPUFragmentUniformData(commandBuffer.get(), 0, &blit,
                                  sizeof(BlitUniforms));
 
-  SDL_GPUTextureSamplerBinding sb{};
-  sb.texture = caption_texture.get();
-  sb.sampler = caption_sampler.get();
-  SDL_BindGPUFragmentSamplers(swapchainCommand.get_render_pass(), 0, &sb, 1);
+  SDL_GPUTextureSamplerBinding samplerBinding{};
+  samplerBinding.texture = caption_texture.get();
+  samplerBinding.sampler = caption_sampler.get();
+  SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
-  SDL_DrawGPUPrimitives(swapchainCommand.get_render_pass(), 4, 1, 0, 0);
+  SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
   return SDL_APP_CONTINUE;
 }
 
@@ -824,22 +771,24 @@ void AppState::GlyphCompositor::glyphs_combine() {
   combined_rect.x = (INITIAL_WINDOW_WIDTH - combined_rect.w) / 2;
   combined_rect.y = (INITIAL_WINDOW_HEIGHT - combined_rect.h) / 2;
 
-  AppGPURenderCommand::CreateInfo renderInfo{
+  EngagedGPUCommandBuffer commandBuffer =
+      acquireGPUCommandBuffer(app->device_ctx.get());
+  GPUTextureCreateInfo textureInfo{
+      .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
       .texture_width = static_cast<std::uint32_t>(combined_rect.w),
       .texture_height = static_cast<std::uint32_t>(combined_rect.h),
-      .clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}};
-  AppGPURenderCommand renderCommand{app->device_ctx.get(), renderInfo};
-  combined_texture = UniqueGPUTexture{renderCommand.get_texture(),
-                                      GPUTextureDeleter{app->device_ctx.get()}};
+  };
+  combined_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
+  UniqueGPURenderPass renderPass =
+      beginGPURenderPass(commandBuffer.get(), combined_texture.get(),
+                         SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f});
+  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->glyph_pipeline.get());
 
-  SDL_BindGPUGraphicsPipeline(renderCommand.get_render_pass(),
-                              app->glyph_pipeline.get());
   struct GlyphUniforms {
     float viewport[2];
     float rect_pos[2];
     float rect_size[2];
   };
-
   for (hb_position_t accumulatedX{};
        auto &&[glyphInfo, glyphImage] :
        std::views::zip(glyph_infos, glyph_images)) {
@@ -862,15 +811,15 @@ void AppState::GlyphCompositor::glyphs_combine() {
         64.0f;
     uniforms.rect_size[0] = static_cast<float>(glyphInfo.width);
     uniforms.rect_size[1] = static_cast<float>(glyphInfo.height);
-    SDL_PushGPUVertexUniformData(renderCommand.get_command(), 0, &uniforms,
+    SDL_PushGPUVertexUniformData(commandBuffer.get(), 0, &uniforms,
                                  sizeof(GlyphUniforms));
 
     SDL_GPUTextureSamplerBinding sb{};
     sb.texture = glyphImage.texture.get();
     sb.sampler = app->caption_sampler.get();
-    SDL_BindGPUFragmentSamplers(renderCommand.get_render_pass(), 0, &sb, 1);
+    SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &sb, 1);
 
-    SDL_DrawGPUPrimitives(renderCommand.get_render_pass(), 4, 1, 0, 0);
+    SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
   }
 }
 
