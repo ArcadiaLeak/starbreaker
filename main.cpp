@@ -480,11 +480,6 @@ struct GlyphInfo {
   int bitmap_left, bitmap_top;
 };
 
-struct GlyphImage {
-  std::vector<unsigned char> bitmap;
-  UniqueGPUTexture texture;
-};
-
 class AppState {
 private:
   struct GlyphCompositor {
@@ -492,7 +487,8 @@ private:
 
     unsigned int glyph_count;
     std::vector<GlyphInfo> glyph_infos;
-    std::vector<GlyphImage> glyph_images;
+    std::vector<std::vector<unsigned char>> glyph_bitmaps;
+    std::vector<UniqueGPUTexture> glyph_textures;
     UniqueGPUTexture combined_texture;
     SDL_Rect combined_rect;
 
@@ -619,7 +615,8 @@ void AppState::GlyphCompositor::glyphs_alloc(std::string_view textView) {
       hb_buffer_get_glyph_positions(glyphBuffer, &glyph_count);
 
   glyph_infos = std::vector<GlyphInfo>(glyph_count);
-  glyph_images = std::vector<GlyphImage>(glyph_count);
+  glyph_bitmaps = std::vector<std::vector<unsigned char>>(glyph_count);
+  glyph_textures = std::vector<UniqueGPUTexture>(glyph_count);
   for (unsigned int i = 0; i < glyph_count; ++i) {
     glyph_infos[i].codepoint = glyphInfos[i].codepoint;
     glyph_infos[i].cluster = glyphInfos[i].cluster;
@@ -655,10 +652,10 @@ void AppState::GlyphCompositor::glyphs_render() {
     glyph_infos[i].height = bitmap.rows;
     if (glyph_infos[i].width == 0 || glyph_infos[i].height == 0)
       continue;
-    glyph_images[i].bitmap.resize(bitmap.width * bitmap.rows);
+    glyph_bitmaps[i].resize(bitmap.width * bitmap.rows);
     for (unsigned int y = 0; y < bitmap.rows; ++y) {
       const uint8_t *rowSource = bitmap.buffer + y * std::abs(bitmap.pitch);
-      uint8_t *rowTarget = glyph_images[i].bitmap.data() + y * bitmap.width;
+      uint8_t *rowTarget = glyph_bitmaps[i].data() + y * bitmap.width;
       std::memcpy(rowTarget, rowSource, bitmap.width);
     }
   }
@@ -672,9 +669,8 @@ void AppState::GlyphCompositor::glyphs_upload() {
     GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                      .texture_width = glyph_infos[i].width,
                                      .texture_height = glyph_infos[i].height};
-    glyph_images[i].texture =
-        createGPUTexture(app->device_ctx.get(), textureInfo);
-    const std::vector<unsigned char> &bitmap = glyph_images[i].bitmap;
+    glyph_textures[i] = createGPUTexture(app->device_ctx.get(), textureInfo);
+    const std::vector<unsigned char> &bitmap = glyph_bitmaps[i];
     std::uint32_t transferSize = static_cast<std::uint32_t>(bitmap.size());
     transferBuffers[i] =
         createGPUTransferBuffer(app->device_ctx.get(), transferSize);
@@ -687,7 +683,7 @@ void AppState::GlyphCompositor::glyphs_upload() {
       acquireGPUCommandBuffer(app->device_ctx.get());
   UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(commandBuffer.get())};
   for (unsigned int i = 0; i < glyph_count; ++i) {
-    if (not glyph_images[i].texture)
+    if (not glyph_textures[i])
       continue;
     SDL_GPUTextureTransferInfo src{};
     src.transfer_buffer = transferBuffers[i].get();
@@ -695,7 +691,7 @@ void AppState::GlyphCompositor::glyphs_upload() {
     src.pixels_per_row = glyph_infos[i].width;
     src.rows_per_layer = glyph_infos[i].height;
     SDL_GPUTextureRegion dst{};
-    dst.texture = glyph_images[i].texture.get();
+    dst.texture = glyph_textures[i].get();
     dst.w = glyph_infos[i].width;
     dst.h = glyph_infos[i].height;
     dst.d = 1;
@@ -755,8 +751,8 @@ void AppState::GlyphCompositor::glyphs_combine() {
     float rect_size[2];
   };
   for (hb_position_t accumulatedX{};
-       auto &&[glyphInfo, glyphImage] :
-       std::views::zip(glyph_infos, glyph_images)) {
+       auto &&[glyphInfo, glyphTexture] :
+       std::views::zip(glyph_infos, glyph_textures)) {
     hb_position_t penX = accumulatedX;
     accumulatedX += glyphInfo.x_advance;
 
@@ -780,7 +776,7 @@ void AppState::GlyphCompositor::glyphs_combine() {
                                  sizeof(GlyphUniforms));
 
     SDL_GPUTextureSamplerBinding sb{};
-    sb.texture = glyphImage.texture.get();
+    sb.texture = glyphTexture.get();
     sb.sampler = app->caption_sampler.get();
     SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &sb, 1);
 
