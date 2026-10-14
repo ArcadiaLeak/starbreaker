@@ -399,6 +399,45 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device) {
   return createGPUGraphicsPipeline(device, &pipelineInfo);
 }
 
+struct GPUCommandBufferSubmitter {
+  void operator()(SDL_GPUCommandBuffer *commandBuffer) const;
+};
+using EngagedGPUCommandBuffer =
+    std::unique_ptr<SDL_GPUCommandBuffer, GPUCommandBufferSubmitter>;
+void GPUCommandBufferSubmitter::operator()(
+    SDL_GPUCommandBuffer *commandBuffer) const {
+  if (not SDL_SubmitGPUCommandBuffer(commandBuffer))
+    SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
+}
+
+struct GPUCommandBufferCanceller {
+  void operator()(SDL_GPUCommandBuffer *commandBuffer) const;
+};
+using DismissedGPUCommandBuffer =
+    std::unique_ptr<SDL_GPUCommandBuffer, GPUCommandBufferCanceller>;
+void GPUCommandBufferCanceller::operator()(
+    SDL_GPUCommandBuffer *commandBuffer) const {
+  if (not SDL_CancelGPUCommandBuffer(commandBuffer))
+    SDL_Log("SDL_CancelGPUCommandBuffer failed: %s", SDL_GetError());
+}
+
+struct GPURenderPassDeleter {
+  void operator()(SDL_GPURenderPass *renderPass) const;
+};
+using UniqueGPURenderPass =
+    std::unique_ptr<SDL_GPURenderPass, GPURenderPassDeleter>;
+void GPURenderPassDeleter::operator()(SDL_GPURenderPass *renderPass) const {
+  SDL_EndGPURenderPass(renderPass);
+}
+
+struct GPUCopyPassDeleter {
+  void operator()(SDL_GPUCopyPass *copyPass) const;
+};
+using UniqueGPUCopyPass = std::unique_ptr<SDL_GPUCopyPass, GPUCopyPassDeleter>;
+void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
+  SDL_EndGPUCopyPass(copyPass);
+}
+
 class AppGPURenderCommand {
 public:
   struct CreateInfo {
