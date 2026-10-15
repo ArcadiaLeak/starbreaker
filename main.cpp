@@ -1,3 +1,4 @@
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -19,11 +20,6 @@
 #include <harfbuzz/hb-ft.h>
 #include <harfbuzz/hb.h>
 #include <vulkan/vulkan.h>
-
-struct Vertex {
-  float position[2];
-  float uv[2];
-};
 
 static FT_Library globalFTLibrary = nullptr;
 
@@ -378,9 +374,42 @@ createCaptionGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window) {
   targetInfo.color_target_descriptions = &colorTarget;
   targetInfo.num_color_targets = 1;
 
+  struct GlyphInstance {
+    float rect_pos[2];
+    float rect_size[2];
+    float uv_rect[4];
+  };
+
+  std::array<SDL_GPUVertexAttribute, 3> vertexAttributes{};
+  std::get<0>(vertexAttributes).location = 1;
+  std::get<0>(vertexAttributes).buffer_slot = 0;
+  std::get<0>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  std::get<0>(vertexAttributes).offset = offsetof(GlyphInstance, rect_pos);
+  std::get<1>(vertexAttributes).location = 2;
+  std::get<1>(vertexAttributes).buffer_slot = 0;
+  std::get<1>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  std::get<1>(vertexAttributes).offset = offsetof(GlyphInstance, rect_size);
+  std::get<2>(vertexAttributes).location = 3;
+  std::get<2>(vertexAttributes).buffer_slot = 0;
+  std::get<2>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+  std::get<2>(vertexAttributes).offset = offsetof(GlyphInstance, uv_rect);
+
+  SDL_GPUVertexBufferDescription vertexBufferDescriptions{};
+  vertexBufferDescriptions.slot = 0;
+  vertexBufferDescriptions.pitch = sizeof(GlyphInstance);
+  vertexBufferDescriptions.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
+  vertexBufferDescriptions.instance_step_rate = 0;
+
+  SDL_GPUVertexInputState vertexInputState{};
+  vertexInputState.vertex_buffer_descriptions = &vertexBufferDescriptions;
+  vertexInputState.num_vertex_buffers = 1;
+  vertexInputState.vertex_attributes = vertexAttributes.data();
+  vertexInputState.num_vertex_attributes = vertexAttributes.size();
+
   SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
   pipelineInfo.vertex_shader = vertexShader.get();
   pipelineInfo.fragment_shader = fragmentShader.get();
+  pipelineInfo.vertex_input_state = vertexInputState;
   pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
   pipelineInfo.target_info = targetInfo;
 
@@ -389,7 +418,7 @@ createCaptionGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window) {
 
 UniqueGPUGraphicsPipeline
 createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device) {
-  GPUShaderCreateInfo vertexInfo{.filepath = "caption.vert.spv",
+  GPUShaderCreateInfo vertexInfo{.filepath = "glyph.vert.spv",
                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                  .num_samplers = 0,
                                  .num_uniform_buffers = 1};
@@ -571,8 +600,6 @@ SDL_AppResult AppState::iterate() noexcept {
   SDL_BindGPUGraphicsPipeline(renderPass.get(), caption_pipeline.get());
   struct QuadUniforms {
     float viewport[2];
-    float rect_pos[2];
-    float rect_size[2];
   };
   struct BlitUniforms {
     float tint[4];
@@ -581,11 +608,6 @@ SDL_AppResult AppState::iterate() noexcept {
   QuadUniforms uniforms{};
   uniforms.viewport[0] = static_cast<float>(swapchainWidth);
   uniforms.viewport[1] = static_cast<float>(swapchainHeight);
-  uniforms.rect_pos[0] = static_cast<float>(caption_x);
-  uniforms.rect_pos[1] = static_cast<float>(caption_y);
-  uniforms.rect_size[0] = static_cast<float>(caption_compositor.combined_width);
-  uniforms.rect_size[1] =
-      static_cast<float>(caption_compositor.combined_height);
   SDL_PushGPUVertexUniformData(commandBuffer.get(), 0, &uniforms,
                                sizeof(QuadUniforms));
 
