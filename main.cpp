@@ -634,15 +634,9 @@ void AppState::GlyphCompositor::glyphs_texturize() {
   std::span<hb_glyph_info_t> glyphInfos(
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get()));
-  GlyphCache previousGlyphCache{};
-  previousGlyphCache.swap(glyph_cache);
   std::map<hb_codepoint_t, UniqueGPUTransferBuffer> transferBuffers{};
   for (const hb_glyph_info_t &glyphInfo : glyphInfos) {
-    GlyphCache::node_type cacheNode =
-        previousGlyphCache.extract(glyphInfo.codepoint);
-    GlyphCache::insert_return_type cacheInsert =
-        glyph_cache.insert(std::move(cacheNode));
-    if (cacheInsert.inserted)
+    if (glyph_cache.contains(glyphInfo.codepoint))
       continue;
     UniqueFreetypeGlyph freetypeGlyph =
         app->load_freetype_glyph(glyphInfo.codepoint);
