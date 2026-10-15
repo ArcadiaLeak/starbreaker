@@ -510,7 +510,7 @@ private:
     UniqueHarfbuzzBuffer harfbuzz_buffer;
     GlyphCache glyph_cache;
     UniqueGPUTexture combined_texture;
-    SDL_Rect combined_rect;
+    int combined_width = 0, combined_height = 0;
 
     void glyphs_shape(std::string_view textView);
     void glyphs_texturize();
@@ -528,6 +528,7 @@ private:
   UniqueGPUGraphicsPipeline glyph_pipeline;
 
   std::string caption_string = "Hello world kerning Text";
+  int caption_x = 0, caption_y = 0;
   GlyphCompositor caption_compositor{this};
 
   UniqueFreetypeGlyph load_freetype_glyph(hb_codepoint_t codepoint);
@@ -580,12 +581,11 @@ SDL_AppResult AppState::iterate() noexcept {
   QuadUniforms uniforms{};
   uniforms.viewport[0] = static_cast<float>(swapchainWidth);
   uniforms.viewport[1] = static_cast<float>(swapchainHeight);
-  uniforms.rect_pos[0] = static_cast<float>(caption_compositor.combined_rect.x);
-  uniforms.rect_pos[1] = static_cast<float>(caption_compositor.combined_rect.y);
-  uniforms.rect_size[0] =
-      static_cast<float>(caption_compositor.combined_rect.w);
+  uniforms.rect_pos[0] = static_cast<float>(caption_x);
+  uniforms.rect_pos[1] = static_cast<float>(caption_y);
+  uniforms.rect_size[0] = static_cast<float>(caption_compositor.combined_width);
   uniforms.rect_size[1] =
-      static_cast<float>(caption_compositor.combined_rect.h);
+      static_cast<float>(caption_compositor.combined_height);
   SDL_PushGPUVertexUniformData(commandBuffer.get(), 0, &uniforms,
                                sizeof(QuadUniforms));
 
@@ -614,10 +614,8 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
     return SDL_APP_CONTINUE;
   } else if (event->type == SDL_EVENT_WINDOW_RESIZED) {
-    caption_compositor.combined_rect.x =
-        (event->window.data1 - caption_compositor.combined_rect.w) / 2;
-    caption_compositor.combined_rect.y =
-        (event->window.data2 - caption_compositor.combined_rect.h) / 2;
+    caption_x = (event->window.data1 - caption_compositor.combined_width) / 2;
+    caption_y = (event->window.data2 - caption_compositor.combined_height) / 2;
     return SDL_APP_CONTINUE;
   } else
     return SDL_APP_CONTINUE;
@@ -725,19 +723,17 @@ void AppState::GlyphCompositor::glyphs_combine() {
     maxY = std::max(maxY, bottom);
   }
 
-  combined_rect.w = static_cast<std::int32_t>(
+  combined_width = static_cast<std::int32_t>(
       std::ceil(static_cast<float>(maxX - minX) / 64.0f));
-  combined_rect.h = static_cast<std::int32_t>(
+  combined_height = static_cast<std::int32_t>(
       std::ceil(static_cast<float>(maxY - minY) / 64.0f));
-  combined_rect.x = (INITIAL_WINDOW_WIDTH - combined_rect.w) / 2;
-  combined_rect.y = (INITIAL_WINDOW_HEIGHT - combined_rect.h) / 2;
 
   EngagedGPUCommandBuffer commandBuffer =
       acquireGPUCommandBuffer(app->device_ctx.get());
   GPUTextureCreateInfo textureInfo{
       .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
-      .texture_width = static_cast<std::uint32_t>(combined_rect.w),
-      .texture_height = static_cast<std::uint32_t>(combined_rect.h),
+      .texture_width = static_cast<std::uint32_t>(combined_width),
+      .texture_height = static_cast<std::uint32_t>(combined_height),
   };
   combined_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
   UniqueGPURenderPass renderPass =
@@ -761,8 +757,8 @@ void AppState::GlyphCompositor::glyphs_combine() {
     FT_BitmapGlyph bitmapGlyph =
         asBitmapGlyph(cacheIt->second.freetypeGlyph.get());
     GlyphUniforms uniforms{};
-    uniforms.viewport[0] = static_cast<float>(combined_rect.w);
-    uniforms.viewport[1] = static_cast<float>(combined_rect.h);
+    uniforms.viewport[0] = static_cast<float>(combined_width);
+    uniforms.viewport[1] = static_cast<float>(combined_height);
     uniforms.rect_pos[0] =
         static_cast<float>(c.pen_x + positions[c.glyph_index].x_offset +
                            bitmapGlyph->left * 64 - minX) /
@@ -807,6 +803,8 @@ void AppState::caption_text_compose() {
   caption_compositor.glyphs_shape(caption_string);
   caption_compositor.glyphs_texturize();
   caption_compositor.glyphs_combine();
+  caption_x = (INITIAL_WINDOW_WIDTH - caption_compositor.combined_width) / 2;
+  caption_y = (INITIAL_WINDOW_HEIGHT - caption_compositor.combined_height) / 2;
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
