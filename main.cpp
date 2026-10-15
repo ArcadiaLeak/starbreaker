@@ -6,7 +6,6 @@
 #include <format>
 #include <map>
 #include <memory>
-#include <ranges>
 #include <stdexcept>
 #include <string>
 
@@ -41,11 +40,10 @@ void FreetypeGlyphDeleter::operator()(FT_Glyph freetypeGlyph) const {
   FT_Done_Glyph(freetypeGlyph);
 }
 
-FT_Bitmap &getFreetypeBitmap(FT_Glyph freetypeGlyph) {
-  if (freetypeGlyph->format == FT_GLYPH_FORMAT_BITMAP)
-    return reinterpret_cast<FT_BitmapGlyph>(freetypeGlyph)->bitmap;
-  else
+FT_BitmapGlyph asBitmapGlyph(FT_Glyph freetypeGlyph) {
+  if (freetypeGlyph->format != FT_GLYPH_FORMAT_BITMAP)
     throw std::runtime_error{"Unexpected FT_Glyph format!"};
+  return reinterpret_cast<FT_BitmapGlyph>(freetypeGlyph);
 }
 
 struct HarfbuzzFontDeleter {
@@ -502,8 +500,11 @@ void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
 class AppState {
 private:
   struct GlyphCompositor {
-    using GlyphCacheValue = std::pair<UniqueFreetypeGlyph, UniqueGPUTexture>;
-    using GlyphCache = std::map<hb_codepoint_t, GlyphCacheValue>;
+    struct GlyphCacheItem {
+      UniqueFreetypeGlyph freetypeGlyph;
+      UniqueGPUTexture texture;
+    };
+    using GlyphCache = std::map<hb_codepoint_t, GlyphCacheItem>;
     AppState *app;
 
     UniqueHarfbuzzBuffer harfbuzz_buffer;
@@ -647,15 +648,15 @@ void AppState::GlyphCompositor::glyphs_texturize() {
       continue;
     UniqueFreetypeGlyph freetypeGlyph =
         app->load_freetype_glyph(glyphInfo.codepoint);
-    const FT_Bitmap &bitmap = getFreetypeBitmap(freetypeGlyph.get());
+    const FT_Bitmap &bitmap = asBitmapGlyph(freetypeGlyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
     GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                      .texture_width = bitmap.width,
                                      .texture_height = bitmap.rows};
-    glyph_cache[glyphInfo.codepoint] = {
-        std::move(freetypeGlyph),
-        createGPUTexture(app->device_ctx.get(), textureInfo)};
+    glyph_cache[glyphInfo.codepoint] =
+        GlyphCacheItem{std::move(freetypeGlyph),
+                       createGPUTexture(app->device_ctx.get(), textureInfo)};
     std::uint32_t transferSize =
         static_cast<std::uint32_t>(bitmap.width * bitmap.rows);
     transferBuffers[glyphInfo.codepoint] =
@@ -674,7 +675,7 @@ void AppState::GlyphCompositor::glyphs_texturize() {
   UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(commandBuffer.get())};
   for (const auto &[codepoint, transferBuffer] : transferBuffers) {
     const auto &[freetypeGlyph, glyphTexture] = glyph_cache[codepoint];
-    const FT_Bitmap &bitmap = getFreetypeBitmap(freetypeGlyph.get());
+    const FT_Bitmap &bitmap = asBitmapGlyph(freetypeGlyph.get())->bitmap;
     SDL_GPUTextureTransferInfo source{.transfer_buffer = transferBuffer.get(),
                                       .offset = 0,
                                       .pixels_per_row = bitmap.width,
@@ -692,20 +693,31 @@ void AppState::GlyphCompositor::glyphs_combine() {
                 maxX = std::numeric_limits<hb_position_t>::min();
   hb_position_t minY = std::numeric_limits<hb_position_t>::max(),
                 maxY = std::numeric_limits<hb_position_t>::min();
+  hb_glyph_info_t *infos =
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
+  hb_glyph_position_t *positions =
+      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
 
-  for (hb_position_t accumulatedX{}; const GlyphInfo &glyphInfo : glyph_infos) {
-    hb_position_t penX = accumulatedX;
-    accumulatedX += glyphInfo.x_advance;
-
-    if (glyphInfo.width == 0 || glyphInfo.height == 0)
+  struct GlyphCarry {
+    unsigned int glyph_index;
+    hb_position_t pen_x;
+  };
+  for (GlyphCarry c{};
+       c.glyph_index < hb_buffer_get_length(harfbuzz_buffer.get());
+       c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
+    GlyphCache::iterator cacheIt =
+        glyph_cache.find(infos[c.glyph_index].codepoint);
+    if (cacheIt == glyph_cache.end())
       continue;
 
-    hb_position_t left = penX + glyphInfo.x_offset + glyphInfo.bitmap_left * 64;
-    hb_position_t right =
-        left + static_cast<hb_position_t>(glyphInfo.width) * 64;
-    hb_position_t top = -glyphInfo.y_offset - glyphInfo.bitmap_top * 64;
-    hb_position_t bottom =
-        top + static_cast<hb_position_t>(glyphInfo.height) * 64;
+    FT_BitmapGlyph bitmapGlyph =
+        asBitmapGlyph(cacheIt->second.freetypeGlyph.get());
+    hb_position_t left =
+        c.pen_x + positions[c.glyph_index].x_offset + bitmapGlyph->left * 64;
+    hb_position_t right = left + bitmapGlyph->bitmap.width * 64;
+    hb_position_t top =
+        -positions[c.glyph_index].y_offset - bitmapGlyph->top * 64;
+    hb_position_t bottom = top + bitmapGlyph->bitmap.rows * 64;
 
     minX = std::min(minX, left);
     maxX = std::max(maxX, right);
@@ -738,35 +750,36 @@ void AppState::GlyphCompositor::glyphs_combine() {
     float rect_pos[2];
     float rect_size[2];
   };
-  for (hb_position_t accumulatedX{};
-       auto &&[glyphInfo, glyphTexture] :
-       std::views::zip(glyph_infos, glyph_textures)) {
-    hb_position_t penX = accumulatedX;
-    accumulatedX += glyphInfo.x_advance;
-
-    if (glyphInfo.width == 0 || glyphInfo.height == 0)
+  for (GlyphCarry c{};
+       c.glyph_index < hb_buffer_get_length(harfbuzz_buffer.get());
+       c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
+    GlyphCache::iterator cacheIt =
+        glyph_cache.find(infos[c.glyph_index].codepoint);
+    if (cacheIt == glyph_cache.end())
       continue;
 
+    FT_BitmapGlyph bitmapGlyph =
+        asBitmapGlyph(cacheIt->second.freetypeGlyph.get());
     GlyphUniforms uniforms{};
     uniforms.viewport[0] = static_cast<float>(combined_rect.w);
     uniforms.viewport[1] = static_cast<float>(combined_rect.h);
     uniforms.rect_pos[0] =
-        static_cast<float>(penX + glyphInfo.x_offset +
-                           glyphInfo.bitmap_left * 64 - minX) /
+        static_cast<float>(c.pen_x + positions[c.glyph_index].x_offset +
+                           bitmapGlyph->left * 64 - minX) /
         64.0f;
     uniforms.rect_pos[1] =
-        static_cast<float>(-glyphInfo.y_offset - glyphInfo.bitmap_top * 64 -
-                           minY) /
+        static_cast<float>(-positions[c.glyph_index].y_offset -
+                           bitmapGlyph->top * 64 - minY) /
         64.0f;
-    uniforms.rect_size[0] = static_cast<float>(glyphInfo.width);
-    uniforms.rect_size[1] = static_cast<float>(glyphInfo.height);
+    uniforms.rect_size[0] = static_cast<float>(bitmapGlyph->bitmap.width);
+    uniforms.rect_size[1] = static_cast<float>(bitmapGlyph->bitmap.rows);
     SDL_PushGPUVertexUniformData(commandBuffer.get(), 0, &uniforms,
                                  sizeof(GlyphUniforms));
 
-    SDL_GPUTextureSamplerBinding sb{};
-    sb.texture = glyphTexture.get();
-    sb.sampler = app->caption_sampler.get();
-    SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &sb, 1);
+    SDL_GPUTextureSamplerBinding samplerBinding{};
+    samplerBinding.texture = cacheIt->second.texture.get();
+    samplerBinding.sampler = app->caption_sampler.get();
+    SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
     SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
   }
@@ -791,13 +804,9 @@ UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
 }
 
 void AppState::caption_text_compose() {
-  GlyphCompositor compositor{this};
-  compositor.glyphs_shape(caption_string);
-  compositor.glyphs_texturize();
-  compositor.glyphs_combine();
-  caption_glyph_infos = std::move(compositor.glyph_infos);
-  caption_texture = std::move(compositor.combined_texture);
-  caption_rect = std::move(compositor.combined_rect);
+  caption_compositor.glyphs_shape(caption_string);
+  caption_compositor.glyphs_texturize();
+  caption_compositor.glyphs_combine();
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
