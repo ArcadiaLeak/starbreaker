@@ -537,6 +537,7 @@ private:
     void instantiate();
     void glyphs_shape(std::string_view textView);
     bool glyphs_fill_cache();
+    void pack_atlas();
     void texturize_atlas();
     void measure_text();
   };
@@ -709,7 +710,7 @@ bool AppState::GlyphCombinator::glyphs_fill_cache() {
   std::span<hb_glyph_info_t> glyphInfos(
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get()));
-  bool texturizeFlag = false;
+  bool isAtlasDirty = false;
   for (const hb_glyph_info_t &info : glyphInfos) {
     if (glyph_cache.contains(info.codepoint))
       continue;
@@ -718,9 +719,9 @@ bool AppState::GlyphCombinator::glyphs_fill_cache() {
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
     glyph_cache[info.codepoint] = std::move(glyph);
-    texturizeFlag = true;
+    isAtlasDirty = true;
   }
-  return texturizeFlag;
+  return isAtlasDirty;
 }
 
 void AppState::GlyphCombinator::texturize_atlas() {}
@@ -747,9 +748,11 @@ UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
 
 void AppState::caption_text_combine() {
   caption_combinator.glyphs_shape(caption_string);
-  bool texturizeFlag = caption_combinator.glyphs_fill_cache();
-  if (texturizeFlag)
+  bool isAtlasDirty = caption_combinator.glyphs_fill_cache();
+  if (isAtlasDirty) {
+    caption_combinator.pack_atlas();
     caption_combinator.texturize_atlas();
+  }
   caption_combinator.measure_text();
   caption_x = (INITIAL_WINDOW_WIDTH - caption_combinator.measured_width) / 2;
   caption_y = (INITIAL_WINDOW_HEIGHT - caption_combinator.measured_height) / 2;
