@@ -710,15 +710,14 @@ bool AppState::GlyphCombinator::glyphs_fill_cache() {
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get()));
   bool texturizeFlag = false;
-  for (const hb_glyph_info_t &glyphInfo : glyphInfos) {
-    if (glyph_cache.contains(glyphInfo.codepoint))
+  for (const hb_glyph_info_t &info : glyphInfos) {
+    if (glyph_cache.contains(info.codepoint))
       continue;
-    UniqueFreetypeGlyph freetypeGlyph =
-        app->load_freetype_glyph(glyphInfo.codepoint);
-    const FT_Bitmap &bitmap = asBitmapGlyph(freetypeGlyph.get())->bitmap;
+    UniqueFreetypeGlyph glyph = app->load_freetype_glyph(info.codepoint);
+    const FT_Bitmap &bitmap = asBitmapGlyph(glyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
-    glyph_cache[glyphInfo.codepoint] = std::move(freetypeGlyph);
+    glyph_cache[info.codepoint] = std::move(glyph);
     texturizeFlag = true;
   }
   return texturizeFlag;
