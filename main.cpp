@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -7,8 +8,10 @@
 #include <format>
 #include <map>
 #include <memory>
+#include <ranges>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL.h>
@@ -526,10 +529,17 @@ private:
 
   struct GlyphCombinator {
     AppState *app;
-
-    using GlyphCache = std::map<hb_codepoint_t, UniqueFreetypeGlyph>;
-    GlyphCache glyph_cache;
     UniqueHarfbuzzBuffer harfbuzz_buffer;
+
+    struct GlyphCacheItem {
+      UniqueFreetypeGlyph freetype_glyph;
+      int atlas_x, atlas_y, atlas_page;
+    };
+    using GlyphCache =
+        std::map<hb_codepoint_t, std::shared_ptr<GlyphCacheItem>>;
+    GlyphCache glyph_cache;
+
+    static constexpr std::uint32_t ATLAS_SIDE = 256;
     UniqueGPUTransferBuffer atlas_transfer;
     UniqueGPUTexture atlas_texture;
     int measured_width = 0, measured_height = 0;
@@ -688,7 +698,6 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
 }
 
 void AppState::GlyphCombinator::instantiate() {
-  constexpr std::uint32_t ATLAS_SIDE = 256;
   GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                    .texture_width = ATLAS_SIDE,
                                    .texture_height = ATLAS_SIDE};
@@ -718,10 +727,25 @@ bool AppState::GlyphCombinator::glyphs_fill_cache() {
     const FT_Bitmap &bitmap = asBitmapGlyph(glyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
-    glyph_cache[info.codepoint] = std::move(glyph);
+    glyph_cache[info.codepoint] =
+        std::make_shared<GlyphCacheItem>(std::move(glyph));
     isAtlasDirty = true;
   }
   return isAtlasDirty;
+}
+
+void AppState::GlyphCombinator::pack_atlas() {
+  std::vector<std::uint8_t> atlasBitmap(ATLAS_SIDE * ATLAS_SIDE);
+  using GlyphCacheEntry =
+      std::pair<hb_codepoint_t, std::shared_ptr<GlyphCacheItem>>;
+  std::vector<GlyphCacheEntry> cacheEntries{std::from_range, glyph_cache};
+  auto rowsProject = [](const GlyphCacheEntry &cacheEntry) -> std::uint32_t {
+    const auto &[codepoint, cacheItem] = cacheEntry;
+    return asBitmapGlyph(cacheItem->freetype_glyph.get())->bitmap.rows;
+  };
+  std::ranges::sort(cacheEntries, std::ranges::greater{}, rowsProject);
+  for (const auto &[codepoint, cacheItem] : cacheEntries) {
+  }
 }
 
 void AppState::GlyphCombinator::texturize_atlas() {}
