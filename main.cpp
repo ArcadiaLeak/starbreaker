@@ -437,44 +437,6 @@ createCaptionGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window) {
   return createGPUGraphicsPipeline(device, &pipelineInfo);
 }
 
-UniqueGPUGraphicsPipeline
-createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device) {
-  GPUShaderCreateInfo vertexInfo{.filepath = "glyph.vert.spv",
-                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-                                 .num_samplers = 0,
-                                 .num_uniform_buffers = 1};
-  UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
-
-  GPUShaderCreateInfo fragmentInfo{.filepath = "glyph.frag.spv",
-                                   .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                   .num_samplers = 1,
-                                   .num_uniform_buffers = 0};
-  UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
-
-  SDL_GPUColorTargetBlendState blendState{};
-  blendState.enable_blend = true;
-  blendState.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-  blendState.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-  blendState.color_blend_op = SDL_GPU_BLENDOP_MAX;
-  blendState.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-  blendState.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-  blendState.alpha_blend_op = SDL_GPU_BLENDOP_MAX;
-  blendState.color_write_mask = SDL_GPU_COLORCOMPONENT_R;
-
-  SDL_GPUColorTargetDescription colorTargetDescription{};
-  colorTargetDescription.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
-  colorTargetDescription.blend_state = blendState;
-
-  SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
-  pipelineInfo.vertex_shader = vertexShader.get();
-  pipelineInfo.fragment_shader = fragmentShader.get();
-  pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
-  pipelineInfo.target_info.color_target_descriptions = &colorTargetDescription;
-  pipelineInfo.target_info.num_color_targets = 1;
-
-  return createGPUGraphicsPipeline(device, &pipelineInfo);
-}
-
 struct GPUCommandBufferSubmitter {
   void operator()(SDL_GPUCommandBuffer *commandBuffer) const;
 };
@@ -565,20 +527,18 @@ private:
   struct GlyphCombinator {
     AppState *app;
 
-    UniqueHarfbuzzBuffer harfbuzz_buffer;
-    UniqueGPUTexture combined_texture;
-    int combined_width = 0, combined_height = 0;
-
-    struct GlyphCacheItem {
-      UniqueFreetypeGlyph freetypeGlyph;
-      UniqueGPUTexture texture;
-    };
-    using GlyphCache = std::map<hb_codepoint_t, GlyphCacheItem>;
+    using GlyphCache = std::map<hb_codepoint_t, UniqueFreetypeGlyph>;
     GlyphCache glyph_cache;
+    UniqueHarfbuzzBuffer harfbuzz_buffer;
+    UniqueGPUTransferBuffer atlas_transfer;
+    UniqueGPUTexture atlas_texture;
+    int measured_width = 0, measured_height = 0;
 
+    void instantiate();
     void glyphs_shape(std::string_view textView);
-    void glyphs_texturize();
-    void glyphs_combine();
+    bool glyphs_fill_cache();
+    void texturize_atlas();
+    void measure_text();
   };
 
   UniqueHarfbuzzFont harfbuzz_font;
@@ -589,7 +549,6 @@ private:
 
   UniqueGPUSampler caption_sampler;
   UniqueGPUGraphicsPipeline caption_pipeline;
-  UniqueGPUGraphicsPipeline glyph_pipeline;
 
   std::string caption_string = "Hello world kerning Text";
   int caption_x = 0, caption_y = 0;
@@ -616,7 +575,7 @@ AppState::AppState(FT_Library library) {
   caption_sampler = createCaptionGPUSampler(device_ctx.get());
   caption_pipeline =
       createCaptionGPUGraphicsPipeline(device_ctx.get(), main_window.get());
-  glyph_pipeline = createGlyphGPUGraphicsPipeline(device_ctx.get());
+  caption_combinator.instantiate();
 }
 
 void AppState::FrameCompositor::instantiate() {
@@ -635,9 +594,9 @@ void AppState::FrameCompositor::copy_instance_data() {
   instanceData.rect_pos[0] = static_cast<float>(app->caption_x);
   instanceData.rect_pos[1] = static_cast<float>(app->caption_y);
   instanceData.rect_size[0] =
-      static_cast<float>(app->caption_combinator.combined_width);
+      static_cast<float>(app->caption_combinator.measured_width);
   instanceData.rect_size[1] =
-      static_cast<float>(app->caption_combinator.combined_height);
+      static_cast<float>(app->caption_combinator.measured_height);
   std::uint32_t bufferSize{
       static_cast<std::uint32_t>(sizeof(GlyphInstanceData))};
   std::memcpy(mappedBuffer.get(), &instanceData, bufferSize);
@@ -720,11 +679,21 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
     return SDL_APP_CONTINUE;
   } else if (event->type == SDL_EVENT_WINDOW_RESIZED) {
-    caption_x = (event->window.data1 - caption_combinator.combined_width) / 2;
-    caption_y = (event->window.data2 - caption_combinator.combined_height) / 2;
+    caption_x = (event->window.data1 - caption_combinator.measured_width) / 2;
+    caption_y = (event->window.data2 - caption_combinator.measured_height) / 2;
     return SDL_APP_CONTINUE;
   } else
     return SDL_APP_CONTINUE;
+}
+
+void AppState::GlyphCombinator::instantiate() {
+  constexpr std::uint32_t ATLAS_SIDE = 256;
+  GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                   .texture_width = ATLAS_SIDE,
+                                   .texture_height = ATLAS_SIDE};
+  atlas_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
+  atlas_transfer =
+      createGPUTransferBuffer(app->device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
 }
 
 void AppState::GlyphCombinator::glyphs_shape(std::string_view textView) {
@@ -736,11 +705,11 @@ void AppState::GlyphCombinator::glyphs_shape(std::string_view textView) {
   hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
 }
 
-void AppState::GlyphCombinator::glyphs_texturize() {
+bool AppState::GlyphCombinator::glyphs_fill_cache() {
   std::span<hb_glyph_info_t> glyphInfos(
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get()));
-  std::map<hb_codepoint_t, UniqueGPUTransferBuffer> transferBuffers{};
+  bool texturizeFlag = false;
   for (const hb_glyph_info_t &glyphInfo : glyphInfos) {
     if (glyph_cache.contains(glyphInfo.codepoint))
       continue;
@@ -749,138 +718,15 @@ void AppState::GlyphCombinator::glyphs_texturize() {
     const FT_Bitmap &bitmap = asBitmapGlyph(freetypeGlyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
-    GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-                                     .texture_width = bitmap.width,
-                                     .texture_height = bitmap.rows};
-    glyph_cache[glyphInfo.codepoint] =
-        GlyphCacheItem{std::move(freetypeGlyph),
-                       createGPUTexture(app->device_ctx.get(), textureInfo)};
-    std::uint32_t transferSize =
-        static_cast<std::uint32_t>(bitmap.width * bitmap.rows);
-    transferBuffers[glyphInfo.codepoint] =
-        createGPUTransferBuffer(app->device_ctx.get(), transferSize);
-    UniqueGPUMappedBuffer mappedBuffer =
-        mapGPUTransferBuffer(app->device_ctx.get(),
-                             transferBuffers[glyphInfo.codepoint].get(), false);
-    for (std::uint32_t row = 0; row < bitmap.rows; ++row) {
-      const uint8_t *source = bitmap.buffer + row * std::abs(bitmap.pitch);
-      uint8_t *destination =
-          static_cast<uint8_t *>(mappedBuffer.get()) + row * bitmap.width;
-      std::memcpy(destination, source, bitmap.width);
-    }
+    glyph_cache[glyphInfo.codepoint] = std::move(freetypeGlyph);
+    texturizeFlag = true;
   }
-  EngagedGPUCommandBuffer commandBuffer =
-      acquireGPUCommandBuffer(app->device_ctx.get());
-  UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(commandBuffer.get())};
-  for (const auto &[codepoint, transferBuffer] : transferBuffers) {
-    const auto &[freetypeGlyph, glyphTexture] = glyph_cache[codepoint];
-    const FT_Bitmap &bitmap = asBitmapGlyph(freetypeGlyph.get())->bitmap;
-    SDL_GPUTextureTransferInfo source{.transfer_buffer = transferBuffer.get(),
-                                      .offset = 0,
-                                      .pixels_per_row = bitmap.width,
-                                      .rows_per_layer = bitmap.rows};
-    SDL_GPUTextureRegion destination{.texture = glyphTexture.get(),
-                                     .w = bitmap.width,
-                                     .h = bitmap.rows,
-                                     .d = 1};
-    SDL_UploadToGPUTexture(copyPass.get(), &source, &destination, false);
-  }
+  return texturizeFlag;
 }
 
-void AppState::GlyphCombinator::glyphs_combine() {
-  hb_position_t minX = std::numeric_limits<hb_position_t>::max(),
-                maxX = std::numeric_limits<hb_position_t>::min();
-  hb_position_t minY = std::numeric_limits<hb_position_t>::max(),
-                maxY = std::numeric_limits<hb_position_t>::min();
-  hb_glyph_info_t *infos =
-      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
-  hb_glyph_position_t *positions =
-      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
+void AppState::GlyphCombinator::texturize_atlas() {}
 
-  struct GlyphCarry {
-    unsigned int glyph_index;
-    hb_position_t pen_x;
-  };
-  for (GlyphCarry c{};
-       c.glyph_index < hb_buffer_get_length(harfbuzz_buffer.get());
-       c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
-    GlyphCache::iterator cacheIt =
-        glyph_cache.find(infos[c.glyph_index].codepoint);
-    if (cacheIt == glyph_cache.end())
-      continue;
-
-    FT_BitmapGlyph bitmapGlyph =
-        asBitmapGlyph(cacheIt->second.freetypeGlyph.get());
-    hb_position_t left =
-        c.pen_x + positions[c.glyph_index].x_offset + bitmapGlyph->left * 64;
-    hb_position_t right = left + bitmapGlyph->bitmap.width * 64;
-    hb_position_t top =
-        -positions[c.glyph_index].y_offset - bitmapGlyph->top * 64;
-    hb_position_t bottom = top + bitmapGlyph->bitmap.rows * 64;
-
-    minX = std::min(minX, left);
-    maxX = std::max(maxX, right);
-    minY = std::min(minY, top);
-    maxY = std::max(maxY, bottom);
-  }
-
-  combined_width = static_cast<std::int32_t>(
-      std::ceil(static_cast<float>(maxX - minX) / 64.0f));
-  combined_height = static_cast<std::int32_t>(
-      std::ceil(static_cast<float>(maxY - minY) / 64.0f));
-
-  EngagedGPUCommandBuffer commandBuffer =
-      acquireGPUCommandBuffer(app->device_ctx.get());
-  GPUTextureCreateInfo textureInfo{
-      .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
-      .texture_width = static_cast<std::uint32_t>(combined_width),
-      .texture_height = static_cast<std::uint32_t>(combined_height),
-  };
-  combined_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
-  UniqueGPURenderPass renderPass =
-      beginGPURenderPass(commandBuffer.get(), combined_texture.get(),
-                         SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f});
-  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->glyph_pipeline.get());
-
-  struct GlyphUniforms {
-    float viewport[2];
-    float rect_pos[2];
-    float rect_size[2];
-  };
-  for (GlyphCarry c{};
-       c.glyph_index < hb_buffer_get_length(harfbuzz_buffer.get());
-       c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
-    GlyphCache::iterator cacheIt =
-        glyph_cache.find(infos[c.glyph_index].codepoint);
-    if (cacheIt == glyph_cache.end())
-      continue;
-
-    FT_BitmapGlyph bitmapGlyph =
-        asBitmapGlyph(cacheIt->second.freetypeGlyph.get());
-    GlyphUniforms uniforms{};
-    uniforms.viewport[0] = static_cast<float>(combined_width);
-    uniforms.viewport[1] = static_cast<float>(combined_height);
-    uniforms.rect_pos[0] =
-        static_cast<float>(c.pen_x + positions[c.glyph_index].x_offset +
-                           bitmapGlyph->left * 64 - minX) /
-        64.0f;
-    uniforms.rect_pos[1] =
-        static_cast<float>(-positions[c.glyph_index].y_offset -
-                           bitmapGlyph->top * 64 - minY) /
-        64.0f;
-    uniforms.rect_size[0] = static_cast<float>(bitmapGlyph->bitmap.width);
-    uniforms.rect_size[1] = static_cast<float>(bitmapGlyph->bitmap.rows);
-    SDL_PushGPUVertexUniformData(commandBuffer.get(), 0, &uniforms,
-                                 sizeof(GlyphUniforms));
-
-    SDL_GPUTextureSamplerBinding samplerBinding{};
-    samplerBinding.texture = cacheIt->second.texture.get();
-    samplerBinding.sampler = app->caption_sampler.get();
-    SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
-
-    SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
-  }
-}
+void AppState::GlyphCombinator::measure_text() {}
 
 UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
   FT_Error errcode{};
@@ -902,10 +748,12 @@ UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
 
 void AppState::caption_text_combine() {
   caption_combinator.glyphs_shape(caption_string);
-  caption_combinator.glyphs_texturize();
-  caption_combinator.glyphs_combine();
-  caption_x = (INITIAL_WINDOW_WIDTH - caption_combinator.combined_width) / 2;
-  caption_y = (INITIAL_WINDOW_HEIGHT - caption_combinator.combined_height) / 2;
+  bool texturizeFlag = caption_combinator.glyphs_fill_cache();
+  if (texturizeFlag)
+    caption_combinator.texturize_atlas();
+  caption_combinator.measure_text();
+  caption_x = (INITIAL_WINDOW_WIDTH - caption_combinator.measured_width) / 2;
+  caption_y = (INITIAL_WINDOW_HEIGHT - caption_combinator.measured_height) / 2;
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
