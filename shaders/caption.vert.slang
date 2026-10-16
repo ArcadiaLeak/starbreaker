@@ -11,9 +11,9 @@ struct GlyphUniforms {
 ConstantBuffer<GlyphUniforms> u;
 
 struct InstanceIn {
-    float2 rect_pos  : TEXCOORD1;
-    float2 rect_size : TEXCOORD2;
-    float4 uv_rect   : TEXCOORD3;
+    [[vk::location(0)]] float2 rect_pos  : TEXCOORD0;
+    [[vk::location(1)]] float2 rect_size : TEXCOORD1;
+    [[vk::location(2)]] float4 uv_rect   : TEXCOORD2;
 };
 
 [shader("vertex")]
