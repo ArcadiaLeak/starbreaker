@@ -807,6 +807,7 @@ void AppState::GlyphCombinator::pack_atlas() {
       }
   UniqueGPUMappedBuffer atlasTransfer{
       mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true)};
+  std::memset(atlasTransfer.get(), 0, ATLAS_SIDE * ATLAS_SIDE);
   auto copyBitmapRow = [&atlasTransfer](const CacheEntryView &entryView,
                                         std::uint32_t row) -> void {
     const FT_Bitmap &bitmap = asBitmapGlyph(entryView.freetype_glyph)->bitmap;
