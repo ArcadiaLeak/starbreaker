@@ -737,40 +737,67 @@ bool AppState::GlyphCombinator::glyphs_fill_cache() {
 }
 
 void AppState::GlyphCombinator::pack_atlas() {
-  struct CacheItemView {
+  struct CacheEntryView {
+    hb_codepoint_t codepoint;
     FT_Glyph freetype_glyph;
     GlyphAtlasInfo *atlas;
+    std::uint32_t accumulated_x;
   };
-  using GlyphEntryView = std::pair<hb_codepoint_t, CacheItemView>;
-  auto cacheProject = [](const auto &cacheEntry) {
+  auto entryProject = [](const auto &cacheEntry) {
     const auto &[codepoint, cacheItem] = cacheEntry;
-    CacheItemView cacheView{cacheItem.freetype_glyph.get(),
-                            cacheItem.atlas.get()};
-    return std::make_pair(codepoint, cacheView);
+    return CacheEntryView{.codepoint = codepoint,
+                          .freetype_glyph = cacheItem.freetype_glyph.get(),
+                          .atlas = cacheItem.atlas.get(),
+                          .accumulated_x = 0};
   };
-  auto entriesView = glyph_cache | std::views::transform(cacheProject);
-  std::vector<GlyphEntryView> entriesVec{std::from_range, entriesView};
-  auto rowsProject = [](const GlyphEntryView &entryView) {
-    const auto &[codepoint, cacheItem] = entryView;
-    return asBitmapGlyph(cacheItem.freetype_glyph)->bitmap.rows;
+  auto entriesView = glyph_cache | std::views::transform(entryProject);
+  std::vector<CacheEntryView> entriesViewVec{std::from_range, entriesView};
+  auto rowsProject = [](const CacheEntryView &entryView) {
+    return asBitmapGlyph(entryView.freetype_glyph)->bitmap.rows;
   };
-  std::ranges::sort(entriesVec, std::ranges::greater{}, rowsProject);
-
-  std::vector<unsigned char> atlasBitmap(ATLAS_SIDE * ATLAS_SIDE);
-  size_t atlasRow{}, atlasCol{}, shelfHeight{}, bitmapRow{}, entryIdx{};
-  for (const auto &[codepoint, cacheItem] : entriesVec) {
-    const FT_Bitmap &bitmap = asBitmapGlyph(cacheItem.freetype_glyph)->bitmap;
-    if (atlasCol + bitmap.width >= ATLAS_SIDE) {
-      atlasRow += shelfHeight;
-      atlasCol = 0;
-    }
-    for (std::uint32_t bitmapRow : std::views::iota(0u, bitmap.rows)) {
-      unsigned char *source = bitmap.buffer + bitmapRow * bitmap.pitch;
-      std::uint32_t atlasOffset =
-          (atlasRow + bitmapRow) * ATLAS_SIDE + atlasCol;
-      unsigned char *destination = &atlasBitmap.at(atlasOffset);
-    }
+  std::ranges::sort(entriesViewVec, std::ranges::greater{}, rowsProject);
+  for (std::uint32_t accumulatedX{};
+       CacheEntryView &entryView : entriesViewVec) {
+    std::uint32_t bitmapWidth =
+        asBitmapGlyph(entryView.freetype_glyph)->bitmap.width;
+    if (bitmapWidth > ATLAS_SIDE)
+      continue;
+    entryView.accumulated_x =
+        accumulatedX + bitmapWidth > ATLAS_SIDE ? 0 : accumulatedX;
+    accumulatedX += bitmapWidth;
   }
+  struct CacheShelfView {
+    std::vector<CacheEntryView> entries;
+    std::uint32_t accumulated_y;
+  };
+  auto shelfPredicate = [](const CacheEntryView &viewA,
+                           const CacheEntryView &viewB) {
+    return viewA.accumulated_x < viewB.accumulated_x;
+  };
+  auto shelfProject = [](auto entriesSubrange) {
+    std::vector<CacheEntryView> entries{std::from_range, entriesSubrange};
+    return CacheShelfView{.entries = std::move(entries), .accumulated_y = 0};
+  };
+  auto shelvesView = entriesViewVec | std::views::chunk_by(shelfPredicate) |
+                     std::views::transform(shelfProject);
+  std::vector<CacheShelfView> shelvesViewVec{std::from_range, shelvesView};
+  for (std::uint32_t accumulatedY{};
+       CacheShelfView &shelfView : shelvesViewVec) {
+    std::uint32_t shelfHeight =
+        asBitmapGlyph(shelfView.entries.front().freetype_glyph)->bitmap.rows;
+    if (shelfHeight > ATLAS_SIDE)
+      continue;
+    shelfView.accumulated_y =
+        accumulatedY + shelfHeight > ATLAS_SIDE ? 0 : accumulatedY;
+    accumulatedY += shelfHeight;
+  }
+  auto pagePredicate = [](const CacheShelfView &viewA,
+                          const CacheShelfView &viewB) {
+    return viewA.accumulated_y < viewB.accumulated_y;
+  };
+  auto pagesViewVec =
+      shelvesViewVec | std::views::chunk_by(pagePredicate) |
+      std::ranges::to<std::vector<std::vector<CacheShelfView>>>();
 }
 
 void AppState::GlyphCombinator::texturize_atlas() {}
