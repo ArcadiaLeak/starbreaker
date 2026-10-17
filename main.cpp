@@ -542,6 +542,7 @@ private:
     GlyphCache glyph_cache;
 
     static constexpr std::uint32_t ATLAS_SIDE = 1024;
+    static constexpr std::uint32_t ATLAS_PADDING = 1;
     UniqueGPUTransferBuffer atlas_transfer;
     UniqueGPUTexture atlas_texture;
     int measured_width = 0, measured_height = 0;
@@ -764,7 +765,7 @@ void AppState::GlyphCombinator::pack_atlas() {
       continue;
     entryView.accumulated_x =
         accumulatedX + bitmapWidth > ATLAS_SIDE ? 0 : accumulatedX;
-    accumulatedX += bitmapWidth;
+    accumulatedX = entryView.accumulated_x + bitmapWidth + ATLAS_PADDING;
   }
   struct CacheShelfView {
     std::vector<CacheEntryView> entries;
@@ -789,7 +790,7 @@ void AppState::GlyphCombinator::pack_atlas() {
       continue;
     shelfView.accumulated_y =
         accumulatedY + shelfHeight > ATLAS_SIDE ? 0 : accumulatedY;
-    accumulatedY += shelfHeight;
+    accumulatedY = shelfView.accumulated_y + shelfHeight + ATLAS_PADDING;
   }
   auto pagePredicate = [](const CacheShelfView &viewA,
                           const CacheShelfView &viewB) {
