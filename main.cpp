@@ -532,7 +532,7 @@ private:
     UniqueHarfbuzzBuffer harfbuzz_buffer;
 
     struct GlyphAtlasInfo {
-      int x, y, page;
+      std::uint32_t x, y, page;
     };
     struct GlyphCacheItem {
       UniqueFreetypeGlyph freetype_glyph;
@@ -796,9 +796,17 @@ void AppState::GlyphCombinator::pack_atlas() {
                           const CacheShelfView &viewB) {
     return viewA.accumulated_y < viewB.accumulated_y;
   };
-  auto pagesViewVec =
-      shelvesViewVec | std::views::chunk_by(pagePredicate) |
-      std::ranges::to<std::vector<std::vector<CacheShelfView>>>();
+  auto pagesView = shelvesViewVec | std::views::chunk_by(pagePredicate) |
+                   std::views::enumerate;
+  for (const auto &[pageIdx, shelves] : pagesView) {
+    for (const CacheShelfView &shelfView : shelves) {
+      for (const CacheEntryView &entryView : shelfView.entries) {
+        entryView.atlas->page = static_cast<std::uint32_t>(pageIdx);
+        entryView.atlas->y = shelfView.accumulated_y;
+        entryView.atlas->x = entryView.accumulated_x;
+      }
+    }
+  }
 }
 
 void AppState::GlyphCombinator::texturize_atlas() {}
