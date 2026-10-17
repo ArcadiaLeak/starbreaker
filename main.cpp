@@ -521,7 +521,7 @@ private:
     UniqueGPUTransferBuffer instance_transfer;
     EngagedGPUCommandBuffer command_buffer;
 
-    void instantiate();
+    void initiate();
     void copy_instance_data();
     void issue_copy_pass();
     void issue_render_pass();
@@ -545,14 +545,16 @@ private:
     static constexpr std::uint32_t ATLAS_PADDING = 1;
     UniqueGPUTransferBuffer atlas_transfer;
     UniqueGPUTexture atlas_texture;
+    bool is_atlas_dirty = false;
     int measured_width = 0, measured_height = 0;
 
     void instantiate();
     void glyphs_shape(std::string_view textView);
-    bool glyphs_fill_cache();
+    void glyphs_fill_cache();
     void pack_atlas();
-    void texturize_atlas();
     void measure_text();
+
+    void issue_copy_pass(SDL_GPUCopyPass *copyPass);
   };
 
   UniqueHarfbuzzFont harfbuzz_font;
@@ -592,7 +594,7 @@ AppState::AppState(FT_Library library) {
   caption_combinator.instantiate();
 }
 
-void AppState::FrameCompositor::instantiate() {
+void AppState::FrameCompositor::initiate() {
   command_buffer = acquireGPUCommandBuffer(app->device_ctx.get());
   std::uint32_t bufferSize{
       static_cast<std::uint32_t>(sizeof(GlyphInstanceData))};
@@ -607,10 +609,8 @@ void AppState::FrameCompositor::copy_instance_data() {
   GlyphInstanceData instanceData{.uv_rect = {0.0f, 0.0f, 1.0f, 1.0f}};
   instanceData.rect_pos[0] = static_cast<float>(app->caption_x);
   instanceData.rect_pos[1] = static_cast<float>(app->caption_y);
-  instanceData.rect_size[0] =
-      static_cast<float>(app->caption_combinator.measured_width);
-  instanceData.rect_size[1] =
-      static_cast<float>(app->caption_combinator.measured_height);
+  instanceData.rect_size[0] = static_cast<float>(1024.0f);
+  instanceData.rect_size[1] = static_cast<float>(1024.0f);
   std::uint32_t bufferSize{
       static_cast<std::uint32_t>(sizeof(GlyphInstanceData))};
   std::memcpy(mappedBuffer.get(), &instanceData, bufferSize);
@@ -618,6 +618,7 @@ void AppState::FrameCompositor::copy_instance_data() {
 
 void AppState::FrameCompositor::issue_copy_pass() {
   UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(command_buffer.get())};
+  app->caption_combinator.issue_copy_pass(copyPass.get());
   SDL_GPUTransferBufferLocation src{.transfer_buffer = instance_transfer.get(),
                                     .offset = 0};
   std::uint32_t bufferSize{
@@ -664,7 +665,7 @@ void AppState::FrameCompositor::issue_render_pass() {
                                  sizeof(BlitUniforms));
 
   SDL_GPUTextureSamplerBinding samplerBinding{};
-  samplerBinding.texture = app->caption_combinator.combined_texture.get();
+  samplerBinding.texture = app->caption_combinator.atlas_texture.get();
   samplerBinding.sampler = app->caption_sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
@@ -674,7 +675,7 @@ void AppState::FrameCompositor::issue_render_pass() {
 SDL_AppResult AppState::iterate() noexcept {
   try {
     FrameCompositor frame_compositor{this};
-    frame_compositor.instantiate();
+    frame_compositor.initiate();
     frame_compositor.copy_instance_data();
     frame_compositor.issue_copy_pass();
     frame_compositor.issue_render_pass();
@@ -719,11 +720,10 @@ void AppState::GlyphCombinator::glyphs_shape(std::string_view textView) {
   hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
 }
 
-bool AppState::GlyphCombinator::glyphs_fill_cache() {
+void AppState::GlyphCombinator::glyphs_fill_cache() {
   std::span<hb_glyph_info_t> glyphInfos(
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get()));
-  bool isAtlasDirty = false;
   for (const hb_glyph_info_t &info : glyphInfos) {
     if (glyph_cache.contains(info.codepoint))
       continue;
@@ -733,9 +733,8 @@ bool AppState::GlyphCombinator::glyphs_fill_cache() {
       continue;
     glyph_cache[info.codepoint] =
         GlyphCacheItem{std::move(glyph), std::make_unique<GlyphAtlasInfo>()};
-    isAtlasDirty = true;
+    is_atlas_dirty = true;
   }
-  return isAtlasDirty;
 }
 
 void AppState::GlyphCombinator::pack_atlas() {
@@ -813,8 +812,9 @@ void AppState::GlyphCombinator::pack_atlas() {
                                         std::uint32_t row) -> void {
     const FT_Bitmap &bitmap = asBitmapGlyph(entryView.freetype_glyph)->bitmap;
     unsigned char *source = bitmap.buffer + row * bitmap.pitch;
-    std::uint32_t atlasOffset =
-        entryView.atlas->y * ATLAS_SIDE + row * ATLAS_SIDE + entryView.atlas->x;
+    std::uint32_t atlasOffset = entryView.atlas->y * ATLAS_SIDE +
+                                bitmap.rows * ATLAS_SIDE - row * ATLAS_SIDE +
+                                entryView.atlas->x;
     unsigned char *transferStart =
         static_cast<unsigned char *>(atlasTransfer.get());
     std::memcpy(transferStart + atlasOffset, source, bitmap.width);
@@ -826,9 +826,20 @@ void AppState::GlyphCombinator::pack_atlas() {
   }
 }
 
-void AppState::GlyphCombinator::texturize_atlas() {}
-
 void AppState::GlyphCombinator::measure_text() {}
+
+void AppState::GlyphCombinator::issue_copy_pass(SDL_GPUCopyPass *copyPass) {
+  if (not is_atlas_dirty)
+    return;
+  is_atlas_dirty = false;
+  SDL_GPUTextureTransferInfo src{.transfer_buffer = atlas_transfer.get(),
+                                 .offset = 0,
+                                 .pixels_per_row = ATLAS_SIDE,
+                                 .rows_per_layer = ATLAS_SIDE};
+  SDL_GPUTextureRegion dst{
+      .texture = atlas_texture.get(), .w = ATLAS_SIDE, .h = ATLAS_SIDE, .d = 1};
+  SDL_UploadToGPUTexture(copyPass, &src, &dst, false);
+}
 
 UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
   FT_Error errcode{};
@@ -850,11 +861,9 @@ UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
 
 void AppState::caption_text_combine() {
   caption_combinator.glyphs_shape(caption_string);
-  bool isAtlasDirty = caption_combinator.glyphs_fill_cache();
-  if (isAtlasDirty) {
+  caption_combinator.glyphs_fill_cache();
+  if (caption_combinator.is_atlas_dirty)
     caption_combinator.pack_atlas();
-    caption_combinator.texturize_atlas();
-  }
   caption_combinator.measure_text();
   caption_x = (INITIAL_WINDOW_WIDTH - caption_combinator.measured_width) / 2;
   caption_y = (INITIAL_WINDOW_HEIGHT - caption_combinator.measured_height) / 2;
