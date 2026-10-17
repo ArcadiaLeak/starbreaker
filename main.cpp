@@ -707,10 +707,11 @@ void AppState::GlyphCombinator::instantiate() {
   atlas_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
   atlas_transfer =
       createGPUTransferBuffer(app->device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
+  harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
 }
 
 void AppState::GlyphCombinator::glyphs_shape(std::string_view textView) {
-  harfbuzz_buffer.reset(hb_buffer_create());
+  hb_buffer_reset(harfbuzz_buffer.get());
   hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
                      static_cast<int>(textView.size()), 0,
                      static_cast<int>(textView.size()));
