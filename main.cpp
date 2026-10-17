@@ -807,6 +807,23 @@ void AppState::GlyphCombinator::pack_atlas() {
       }
     }
   }
+  UniqueGPUMappedBuffer atlasTransfer{
+      mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true)};
+  auto copyBitmapRow = [&atlasTransfer](const FT_Bitmap &bitmap,
+                                        const CacheEntryView &entryView,
+                                        std::uint32_t row) -> void {
+    unsigned char *source = bitmap.buffer + row * bitmap.pitch;
+    std::uint32_t atlasOffset =
+        entryView.atlas->y * ATLAS_SIDE + row * ATLAS_SIDE + entryView.atlas->x;
+    unsigned char *transferStart =
+        static_cast<unsigned char *>(atlasTransfer.get());
+    std::memcpy(transferStart + atlasOffset, source, bitmap.width);
+  };
+  for (const CacheEntryView &entryView : entriesView) {
+    const FT_Bitmap &bitmap = asBitmapGlyph(entryView.freetype_glyph)->bitmap;
+    for (std::uint32_t row = 0; row < bitmap.rows; ++row)
+      copyBitmapRow(bitmap, entryView, row);
+  }
 }
 
 void AppState::GlyphCombinator::texturize_atlas() {}
