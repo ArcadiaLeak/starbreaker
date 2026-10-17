@@ -798,20 +798,18 @@ void AppState::GlyphCombinator::pack_atlas() {
   };
   auto pagesView = shelvesViewVec | std::views::chunk_by(pagePredicate) |
                    std::views::enumerate;
-  for (const auto &[pageIdx, shelves] : pagesView) {
-    for (const CacheShelfView &shelfView : shelves) {
+  for (const auto &[pageIdx, shelves] : pagesView)
+    for (const CacheShelfView &shelfView : shelves)
       for (const CacheEntryView &entryView : shelfView.entries) {
         entryView.atlas->page = static_cast<std::uint32_t>(pageIdx);
         entryView.atlas->y = shelfView.accumulated_y;
         entryView.atlas->x = entryView.accumulated_x;
       }
-    }
-  }
   UniqueGPUMappedBuffer atlasTransfer{
       mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true)};
-  auto copyBitmapRow = [&atlasTransfer](const FT_Bitmap &bitmap,
-                                        const CacheEntryView &entryView,
+  auto copyBitmapRow = [&atlasTransfer](const CacheEntryView &entryView,
                                         std::uint32_t row) -> void {
+    const FT_Bitmap &bitmap = asBitmapGlyph(entryView.freetype_glyph)->bitmap;
     unsigned char *source = bitmap.buffer + row * bitmap.pitch;
     std::uint32_t atlasOffset =
         entryView.atlas->y * ATLAS_SIDE + row * ATLAS_SIDE + entryView.atlas->x;
@@ -822,7 +820,7 @@ void AppState::GlyphCombinator::pack_atlas() {
   for (const CacheEntryView &entryView : entriesView) {
     const FT_Bitmap &bitmap = asBitmapGlyph(entryView.freetype_glyph)->bitmap;
     for (std::uint32_t row = 0; row < bitmap.rows; ++row)
-      copyBitmapRow(bitmap, entryView, row);
+      copyBitmapRow(entryView, row);
   }
 }
 
