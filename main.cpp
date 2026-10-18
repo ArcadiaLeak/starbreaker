@@ -609,8 +609,8 @@ void AppState::FrameCompositor::copy_instance_data() {
   UniqueGPUMappedBuffer mappedBuffer{mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true)};
   std::vector instanceData = app->caption_combinator.make_instance_data();
-  std::memcpy(mappedBuffer.get(), instanceData.data(),
-              instanceData.size() * sizeof(GlyphInstanceData));
+  std::size_t bufferSize = instanceData.size() * sizeof(GlyphInstanceData);
+  std::memcpy(mappedBuffer.get(), instanceData.data(), bufferSize);
 }
 
 void AppState::FrameCompositor::issue_copy_pass() {
