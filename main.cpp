@@ -514,9 +514,6 @@ class AppState {
 private:
   struct FrameCompositor {
     AppState *app;
-
-    UniqueGPUBuffer instance_buffer;
-    UniqueGPUTransferBuffer instance_transfer;
     EngagedGPUCommandBuffer command_buffer;
 
     void initiate();
@@ -545,6 +542,10 @@ private:
     UniqueGPUTexture atlas_texture;
     bool is_atlas_dirty = false;
     int measured_width = 0, measured_height = 0;
+
+    UniqueGPUBuffer instance_buffer;
+    UniqueGPUTransferBuffer instance_transfer;
+    std::uint32_t instance_capacity = 0;
 
     void instantiate();
     void glyphs_shape(std::string_view textView);
@@ -601,29 +602,35 @@ void AppState::FrameCompositor::initiate() {
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
       hb_buffer_get_length(app->caption_combinator.harfbuzz_buffer.get()) *
       sizeof(GlyphInstanceData))};
-  instance_buffer = createGPUVertexBuffer(app->device_ctx.get(), bufferSize);
-  instance_transfer =
-      createGPUTransferBuffer(app->device_ctx.get(), bufferSize);
+  GlyphCombinator &caption = app->caption_combinator;
+  if (caption.instance_capacity < bufferSize) {
+    SDL_GPUDevice *device = app->device_ctx.get();
+    caption.instance_buffer = createGPUVertexBuffer(device, bufferSize);
+    caption.instance_transfer = createGPUTransferBuffer(device, bufferSize);
+    caption.instance_capacity = bufferSize;
+  }
 }
 
 void AppState::FrameCompositor::copy_instance_data() {
+  GlyphCombinator &caption = app->caption_combinator;
   UniqueGPUMappedBuffer mappedBuffer{mapGPUTransferBuffer(
-      app->device_ctx.get(), instance_transfer.get(), true)};
-  std::vector instanceData = app->caption_combinator.make_instance_data();
+      app->device_ctx.get(), caption.instance_transfer.get(), true)};
+  std::vector instanceData = caption.make_instance_data();
   std::size_t bufferSize = instanceData.size() * sizeof(GlyphInstanceData);
   std::memcpy(mappedBuffer.get(), instanceData.data(), bufferSize);
 }
 
 void AppState::FrameCompositor::issue_copy_pass() {
   UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(command_buffer.get())};
-  app->caption_combinator.issue_copy_pass(copyPass.get());
-  SDL_GPUTransferBufferLocation src{.transfer_buffer = instance_transfer.get(),
-                                    .offset = 0};
+  GlyphCombinator &caption = app->caption_combinator;
+  caption.issue_copy_pass(copyPass.get());
+  SDL_GPUTransferBufferLocation src{
+      .transfer_buffer = caption.instance_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      hb_buffer_get_length(app->caption_combinator.harfbuzz_buffer.get()) *
+      hb_buffer_get_length(caption.harfbuzz_buffer.get()) *
       sizeof(GlyphInstanceData))};
   SDL_GPUBufferRegion dst{
-      .buffer = instance_buffer.get(), .offset = 0, .size = bufferSize};
+      .buffer = caption.instance_buffer.get(), .offset = 0, .size = bufferSize};
   SDL_UploadToGPUBuffer(copyPass.get(), &src, &dst, true);
 }
 
@@ -640,7 +647,8 @@ void AppState::FrameCompositor::issue_render_pass() {
                          SDL_FColor{0.08f, 0.08f, 0.10f, 1.0f});
   SDL_BindGPUGraphicsPipeline(renderPass.get(), app->caption_pipeline.get());
 
-  SDL_GPUBufferBinding instanceBinding{instance_buffer.get(), 0};
+  SDL_GPUBufferBinding instanceBinding{
+      app->caption_combinator.instance_buffer.get(), 0};
   SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
 
   struct QuadUniforms {
@@ -668,10 +676,9 @@ void AppState::FrameCompositor::issue_render_pass() {
   samplerBinding.sampler = app->caption_sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
-  SDL_DrawGPUPrimitives(
-      renderPass.get(), 4,
-      hb_buffer_get_length(app->caption_combinator.harfbuzz_buffer.get()), 0,
-      0);
+  std::uint32_t numInstances =
+      hb_buffer_get_length(app->caption_combinator.harfbuzz_buffer.get());
+  SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
 }
 
 SDL_AppResult AppState::iterate() noexcept {
