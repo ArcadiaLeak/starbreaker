@@ -555,6 +555,7 @@ private:
     void measure_text();
 
     void issue_copy_pass(SDL_GPUCopyPass *copyPass);
+    std::vector<GlyphInstanceData> make_instance_data();
   };
 
   UniqueHarfbuzzFont harfbuzz_font;
@@ -596,8 +597,9 @@ AppState::AppState(FT_Library library) {
 
 void AppState::FrameCompositor::initiate() {
   command_buffer = acquireGPUCommandBuffer(app->device_ctx.get());
-  std::uint32_t bufferSize{
-      static_cast<std::uint32_t>(sizeof(GlyphInstanceData))};
+  std::uint32_t bufferSize{static_cast<std::uint32_t>(
+      hb_buffer_get_length(app->caption_combinator.harfbuzz_buffer.get()) *
+      sizeof(GlyphInstanceData))};
   instance_buffer = createGPUVertexBuffer(app->device_ctx.get(), bufferSize);
   instance_transfer =
       createGPUTransferBuffer(app->device_ctx.get(), bufferSize);
@@ -606,14 +608,9 @@ void AppState::FrameCompositor::initiate() {
 void AppState::FrameCompositor::copy_instance_data() {
   UniqueGPUMappedBuffer mappedBuffer{mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true)};
-  GlyphInstanceData instanceData{.uv_rect = {0.0f, 0.0f, 1.0f, 1.0f}};
-  instanceData.rect_pos[0] = static_cast<float>(app->caption_x);
-  instanceData.rect_pos[1] = static_cast<float>(app->caption_y);
-  instanceData.rect_size[0] = static_cast<float>(1024.0f);
-  instanceData.rect_size[1] = static_cast<float>(1024.0f);
-  std::uint32_t bufferSize{
-      static_cast<std::uint32_t>(sizeof(GlyphInstanceData))};
-  std::memcpy(mappedBuffer.get(), &instanceData, bufferSize);
+  std::vector instanceData = app->caption_combinator.make_instance_data();
+  std::memcpy(mappedBuffer.get(), instanceData.data(),
+              instanceData.size() * sizeof(GlyphInstanceData));
 }
 
 void AppState::FrameCompositor::issue_copy_pass() {
@@ -621,8 +618,9 @@ void AppState::FrameCompositor::issue_copy_pass() {
   app->caption_combinator.issue_copy_pass(copyPass.get());
   SDL_GPUTransferBufferLocation src{.transfer_buffer = instance_transfer.get(),
                                     .offset = 0};
-  std::uint32_t bufferSize{
-      static_cast<std::uint32_t>(sizeof(GlyphInstanceData))};
+  std::uint32_t bufferSize{static_cast<std::uint32_t>(
+      hb_buffer_get_length(app->caption_combinator.harfbuzz_buffer.get()) *
+      sizeof(GlyphInstanceData))};
   SDL_GPUBufferRegion dst{
       .buffer = instance_buffer.get(), .offset = 0, .size = bufferSize};
   SDL_UploadToGPUBuffer(copyPass.get(), &src, &dst, true);
@@ -669,7 +667,10 @@ void AppState::FrameCompositor::issue_render_pass() {
   samplerBinding.sampler = app->caption_sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
-  SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
+  SDL_DrawGPUPrimitives(
+      renderPass.get(), 4,
+      hb_buffer_get_length(app->caption_combinator.harfbuzz_buffer.get()), 0,
+      0);
 }
 
 SDL_AppResult AppState::iterate() noexcept {
@@ -808,22 +809,72 @@ void AppState::GlyphCombinator::pack_atlas() {
   UniqueGPUMappedBuffer atlasTransfer{
       mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true)};
   std::memset(atlasTransfer.get(), 0, ATLAS_SIDE * ATLAS_SIDE);
-  auto copyBitmapRow = [&atlasTransfer](const CacheEntryView &entryView,
-                                        std::uint32_t row) -> void {
-    const FT_Bitmap &bitmap = asBitmapGlyph(entryView.freetype_glyph)->bitmap;
-    unsigned char *source = bitmap.buffer + row * bitmap.pitch;
-    std::uint32_t atlasOffset = entryView.atlas->y * ATLAS_SIDE +
-                                bitmap.rows * ATLAS_SIDE - row * ATLAS_SIDE +
-                                entryView.atlas->x;
+  auto copyBitmapRow =
+      [&atlasTransfer](std::uint32_t row,
+                       const GlyphCacheItem &cacheItem) -> void {
+    const FT_Bitmap &bitmap =
+        asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
+    unsigned char *source = bitmap.buffer + bitmap.rows * bitmap.pitch -
+                            row * bitmap.pitch - bitmap.pitch;
+    std::uint32_t atlasVertOffset = cacheItem.atlas->y + row;
+    std::uint32_t atlasFullOffset =
+        atlasVertOffset * ATLAS_SIDE + cacheItem.atlas->x;
     unsigned char *transferStart =
         static_cast<unsigned char *>(atlasTransfer.get());
-    std::memcpy(transferStart + atlasOffset, source, bitmap.width);
+    std::memcpy(transferStart + atlasFullOffset, source, bitmap.width);
   };
-  for (const CacheEntryView &entryView : entriesView) {
-    const FT_Bitmap &bitmap = asBitmapGlyph(entryView.freetype_glyph)->bitmap;
+  for (const auto &[codepoint, cacheItem] : glyph_cache) {
+    const FT_Bitmap &bitmap =
+        asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
     for (std::uint32_t row = 0; row < bitmap.rows; ++row)
-      copyBitmapRow(entryView, row);
+      copyBitmapRow(row, cacheItem);
   }
+}
+
+std::vector<GlyphInstanceData> AppState::GlyphCombinator::make_instance_data() {
+  hb_glyph_info_t *glyphInfos =
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
+  hb_glyph_position_t *positions =
+      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
+  std::vector<GlyphInstanceData> instanceData{};
+  struct GlyphCarry {
+    unsigned int glyph_index;
+    hb_position_t pen_x;
+  };
+  for (GlyphCarry c{};
+       c.glyph_index < hb_buffer_get_length(harfbuzz_buffer.get());
+       c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
+    GlyphCache::iterator cacheIt =
+        glyph_cache.find(glyphInfos[c.glyph_index].codepoint);
+    if (cacheIt == glyph_cache.end())
+      continue;
+    FT_BitmapGlyph bitmapGlyph =
+        asBitmapGlyph(cacheIt->second.freetype_glyph.get());
+    GlyphInstanceData &instanceDatum = instanceData.emplace_back();
+    instanceDatum.rect_pos[0] =
+        static_cast<float>(c.pen_x + positions[c.glyph_index].x_offset +
+                           bitmapGlyph->left * 64) /
+        64.0f;
+    instanceDatum.rect_pos[1] =
+        15.0f - static_cast<float>(positions[c.glyph_index].y_offset) / 64.0f +
+        static_cast<float>(bitmapGlyph->top -
+                           static_cast<int>(bitmapGlyph->bitmap.rows));
+    float bitmapW = static_cast<float>(bitmapGlyph->bitmap.width);
+    float bitmapH = static_cast<float>(bitmapGlyph->bitmap.rows);
+    instanceDatum.rect_size[0] = bitmapW;
+    instanceDatum.rect_size[1] = bitmapH;
+    float atlasU = static_cast<float>(cacheIt->second.atlas->x) /
+                   static_cast<float>(ATLAS_SIDE);
+    float atlasV = static_cast<float>(cacheIt->second.atlas->y) /
+                   static_cast<float>(ATLAS_SIDE);
+    instanceDatum.uv_rect[0] = atlasU;
+    instanceDatum.uv_rect[1] = atlasV;
+    instanceDatum.uv_rect[2] =
+        atlasU + bitmapW / static_cast<float>(ATLAS_SIDE);
+    instanceDatum.uv_rect[3] =
+        atlasV + bitmapH / static_cast<float>(ATLAS_SIDE);
+  }
+  return instanceData;
 }
 
 void AppState::GlyphCombinator::measure_text() {}
