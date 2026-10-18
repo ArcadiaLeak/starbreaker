@@ -852,11 +852,13 @@ std::vector<GlyphInstanceData> AppState::GlyphCombinator::make_instance_data() {
         asBitmapGlyph(cacheIt->second.freetype_glyph.get());
     GlyphInstanceData &instanceDatum = instanceData.emplace_back();
     instanceDatum.rect_pos[0] =
+        static_cast<float>(app->caption_x) +
         static_cast<float>(c.pen_x + positions[c.glyph_index].x_offset +
                            bitmapGlyph->left * 64) /
-        64.0f;
+            64.0f;
     instanceDatum.rect_pos[1] =
-        15.0f - static_cast<float>(positions[c.glyph_index].y_offset) / 64.0f +
+        static_cast<float>(app->caption_y) -
+        static_cast<float>(positions[c.glyph_index].y_offset) / 64.0f +
         static_cast<float>(bitmapGlyph->top -
                            static_cast<int>(bitmapGlyph->bitmap.rows));
     float bitmapW = static_cast<float>(bitmapGlyph->bitmap.width);
@@ -877,7 +879,48 @@ std::vector<GlyphInstanceData> AppState::GlyphCombinator::make_instance_data() {
   return instanceData;
 }
 
-void AppState::GlyphCombinator::measure_text() {}
+void AppState::GlyphCombinator::measure_text() {
+  hb_position_t minX = std::numeric_limits<hb_position_t>::max(),
+                maxX = std::numeric_limits<hb_position_t>::min();
+  hb_position_t minY = std::numeric_limits<hb_position_t>::max(),
+                maxY = std::numeric_limits<hb_position_t>::min();
+  hb_glyph_info_t *infos =
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
+  hb_glyph_position_t *positions =
+      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
+
+  struct GlyphCarry {
+    unsigned int glyph_index;
+    hb_position_t pen_x;
+  };
+  for (GlyphCarry c{};
+       c.glyph_index < hb_buffer_get_length(harfbuzz_buffer.get());
+       c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
+    GlyphCache::iterator cacheIt =
+        glyph_cache.find(infos[c.glyph_index].codepoint);
+    if (cacheIt == glyph_cache.end())
+      continue;
+
+    FT_BitmapGlyph bitmapGlyph =
+        asBitmapGlyph(cacheIt->second.freetype_glyph.get());
+    hb_position_t left =
+        c.pen_x + positions[c.glyph_index].x_offset + bitmapGlyph->left * 64;
+    hb_position_t right = left + bitmapGlyph->bitmap.width * 64;
+    hb_position_t top =
+        -positions[c.glyph_index].y_offset - bitmapGlyph->top * 64;
+    hb_position_t bottom = top + bitmapGlyph->bitmap.rows * 64;
+
+    minX = std::min(minX, left);
+    maxX = std::max(maxX, right);
+    minY = std::min(minY, top);
+    maxY = std::max(maxY, bottom);
+  }
+
+  measured_width = static_cast<std::int32_t>(
+      std::ceil(static_cast<float>(maxX - minX) / 64.0f));
+  measured_height = static_cast<std::int32_t>(
+      std::ceil(static_cast<float>(maxY - minY) / 64.0f));
+}
 
 void AppState::GlyphCombinator::issue_copy_pass(SDL_GPUCopyPass *copyPass) {
   if (not is_atlas_dirty)
