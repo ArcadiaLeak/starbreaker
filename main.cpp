@@ -124,10 +124,9 @@ void WindowDeleter::operator()(SDL_Window *window) const {
   SDL_DestroyWindow(window);
 }
 
-UniqueWindow createWindow() {
-  SDL_Window *window =
-      SDL_CreateWindow("Hello GPU", INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT,
-                       SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+UniqueWindow createWindow(const char *title, int width, int height) {
+  SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+  SDL_Window *window = SDL_CreateWindow(title, width, height, flags);
   if (not window) {
     std::string errorMsg{"SDL_CreateWindow failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
@@ -163,9 +162,8 @@ float getWindowDisplayScale(SDL_Window *window) {
   return scale;
 }
 
-void setWindowMinimumSize(SDL_Window *window) {
-  if (not SDL_SetWindowMinimumSize(window, INITIAL_WINDOW_WIDTH,
-                                   INITIAL_WINDOW_HEIGHT)) {
+void setWindowMinimumSize(SDL_Window *window, int minW, int minH) {
+  if (not SDL_SetWindowMinimumSize(window, minW, minH)) {
     std::string errorMsg{"SDL_SetWindowMinimumSize failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
@@ -584,7 +582,10 @@ public:
 
 AppState::AppState(FT_Library library) {
   device_ctx = createGPUDevice();
-  main_window = createWindow();
+  main_window =
+      createWindow("Hello GPU", INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT);
+  setWindowMinimumSize(main_window.get(), INITIAL_WINDOW_WIDTH,
+                       INITIAL_WINDOW_HEIGHT);
   main_window_for_gpu_device =
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
