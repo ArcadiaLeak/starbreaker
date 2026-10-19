@@ -3,12 +3,12 @@ struct VSOutput {
     float2 uv       : TEXCOORD0;
 };
 
-struct GlyphUniforms {
+struct RectUniform {
     float2 viewport;
 };
 
 [[vk::binding(0, 1)]]
-ConstantBuffer<GlyphUniforms> u;
+ConstantBuffer<RectUniform> u;
 
 struct InstanceIn {
     [[vk::location(0)]] float2 rect_pos  : TEXCOORD0;
@@ -17,8 +17,7 @@ struct InstanceIn {
 };
 
 [shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VulkanVertexID, InstanceIn inst)
-{
+VSOutput vs_main(uint vertexID : SV_VulkanVertexID, InstanceIn inst) {
     uint i = vertexID & 3u;
     float2 corner = float2(float(i & 1u), float(i >> 1u));
     float2 pixel = inst.rect_pos + corner * inst.rect_size;

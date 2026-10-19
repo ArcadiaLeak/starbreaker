@@ -3,19 +3,18 @@ struct VSOutput {
     float2 uv       : TEXCOORD0;
 };
 
-[[vk::binding(0, 2)]]
-Sampler2D<float> textTex;
-
-struct BlitUniforms {
+struct BlitUniform {
     float4 tint;
 };
 
+[[vk::binding(0, 2)]]
+Sampler2D<float> coverageTexture;
+
 [[vk::binding(0, 3)]]
-ConstantBuffer<BlitUniforms> u;
+ConstantBuffer<BlitUniform> u;
 
 [shader("fragment")]
-float4 fs_main(VSOutput input) : SV_Target
-{
-    float coverage = textTex.Sample(input.uv);
+float4 fs_main(VSOutput input) : SV_Target {
+    float coverage = coverageTexture.Sample(input.uv);
     return float4(u.tint.rgb, u.tint.a * coverage);
 }

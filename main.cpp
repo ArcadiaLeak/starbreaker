@@ -254,8 +254,8 @@ void GPUTextureDeleter::operator()(SDL_GPUTexture *texture) const {
 
 struct GPUTextureCreateInfo {
   SDL_GPUTextureUsageFlags usage;
-  std::uint32_t texture_width;
-  std::uint32_t texture_height;
+  std::uint32_t texture_w;
+  std::uint32_t texture_h;
 };
 UniqueGPUTexture createGPUTexture(SDL_GPUDevice *device,
                                   GPUTextureCreateInfo createInfo) {
@@ -263,8 +263,8 @@ UniqueGPUTexture createGPUTexture(SDL_GPUDevice *device,
   textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
   textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
   textureInfo.usage = createInfo.usage;
-  textureInfo.width = createInfo.texture_width;
-  textureInfo.height = createInfo.texture_height;
+  textureInfo.width = createInfo.texture_w;
+  textureInfo.height = createInfo.texture_h;
   textureInfo.layer_count_or_depth = 1;
   textureInfo.num_levels = 1;
   textureInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
@@ -371,13 +371,13 @@ createGPUGraphicsPipeline(SDL_GPUDevice *device,
 
 UniqueGPUGraphicsPipeline
 createCaptionGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window) {
-  GPUShaderCreateInfo vertexInfo{.filepath = "caption.vert.spv",
+  GPUShaderCreateInfo vertexInfo{.filepath = "rectangle.vert.spv",
                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                  .num_samplers = 0,
                                  .num_uniform_buffers = 1};
   UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
 
-  GPUShaderCreateInfo fragmentInfo{.filepath = "caption.frag.spv",
+  GPUShaderCreateInfo fragmentInfo{.filepath = "coverage_tint.frag.spv",
                                    .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                    .num_samplers = 1,
                                    .num_uniform_buffers = 1};
@@ -526,11 +526,11 @@ private:
     AppState *app;
     GPUCommandSequencer *command_sequencer;
 
-    std::uint32_t swapchain_width, swapchain_height;
+    std::uint32_t swapchain_w, swapchain_h;
     SDL_GPUTexture *swapchain_texture;
 
-    void draw_swapchain();
-    void draw_middlestep();
+    void draw_scene(SDL_GPUTexture *texture);
+    void verify_offscreen();
   };
 
   struct GlyphSequencer {
@@ -583,6 +583,9 @@ private:
 
   UniqueFreetypeGlyph load_freetype_glyph(hb_codepoint_t codepoint);
 
+  UniqueGPUTexture offscreen_texture;
+  std::uint32_t offscreen_w, offscreen_h;
+
 public:
   AppState(FT_Library library);
 
@@ -614,11 +617,13 @@ void AppState::GPUCommandSequencer::initiate() {
       hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get()) *
       sizeof(GlyphInstanceData))};
   GlyphSequencer &caption = app->caption_sequencer;
-  if (caption.instance_capacity < bufferSize) {
-    SDL_GPUDevice *device = app->device_ctx.get();
-    caption.instance_buffer = createGPUVertexBuffer(device, bufferSize);
-    caption.instance_transfer = createGPUTransferBuffer(device, bufferSize);
-    caption.instance_capacity = bufferSize;
+  if (bufferSize > caption.instance_capacity) {
+    caption.instance_capacity = std::max(1u << std::bit_width(bufferSize),
+                                         caption.instance_capacity * 2u);
+    caption.instance_buffer =
+        createGPUVertexBuffer(app->device_ctx.get(), caption.instance_capacity);
+    caption.instance_transfer = createGPUTransferBuffer(
+        app->device_ctx.get(), caption.instance_capacity);
   }
 }
 
@@ -649,16 +654,17 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
   GPURenderSequencer render_sequencer{app, this};
   render_sequencer.swapchain_texture = waitAndAcquireGPUSwapchainTexture(
       command_buffer.get(), app->main_window.get(),
-      &render_sequencer.swapchain_width, &render_sequencer.swapchain_height);
+      &render_sequencer.swapchain_w, &render_sequencer.swapchain_h);
   if (not render_sequencer.swapchain_texture)
     return;
-  render_sequencer.draw_swapchain();
+  render_sequencer.draw_scene(render_sequencer.swapchain_texture);
+  render_sequencer.verify_offscreen();
 }
 
-void AppState::GPURenderSequencer::draw_swapchain() {
+void AppState::GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture) {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   UniqueGPURenderPass renderPass =
-      beginGPURenderPass(cmd, swapchain_texture, {0.08f, 0.08f, 0.10f, 1.0f});
+      beginGPURenderPass(cmd, scene_texture, {0.08f, 0.08f, 0.10f, 1.0f});
   SDL_BindGPUGraphicsPipeline(renderPass.get(), app->caption_pipeline.get());
 
   SDL_GPUBufferBinding instanceBinding{
@@ -669,8 +675,8 @@ void AppState::GPURenderSequencer::draw_swapchain() {
     float viewport[2];
   };
   QuadUniforms uniforms{};
-  uniforms.viewport[0] = static_cast<float>(swapchain_width);
-  uniforms.viewport[1] = static_cast<float>(swapchain_height);
+  uniforms.viewport[0] = static_cast<float>(swapchain_w);
+  uniforms.viewport[1] = static_cast<float>(swapchain_h);
   SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(QuadUniforms));
 
   struct BlitUniforms {
@@ -693,7 +699,24 @@ void AppState::GPURenderSequencer::draw_swapchain() {
   SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
 }
 
-void AppState::GPURenderSequencer::draw_middlestep() {}
+void AppState::GPURenderSequencer::verify_offscreen() {
+  bool isFineW = app->offscreen_w >= swapchain_w;
+  bool isFineH = app->offscreen_h >= swapchain_h;
+  if (isFineW && isFineH)
+    return;
+  if (not isFineW)
+    app->offscreen_w =
+        std::max(1u << std::bit_width(swapchain_w), app->offscreen_w * 2u);
+  if (not isFineH)
+    app->offscreen_h =
+        std::max(1u << std::bit_width(swapchain_h), app->offscreen_h * 2u);
+  SDL_GPUTextureUsageFlags textureUsage =
+      SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+  GPUTextureCreateInfo textureInfo{.usage = textureUsage,
+                                   .texture_w = app->offscreen_w,
+                                   .texture_h = app->offscreen_h};
+  app->offscreen_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
+}
 
 SDL_AppResult AppState::iterate() noexcept {
   try {
@@ -726,8 +749,8 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
 
 void AppState::GlyphSequencer::instantiate() {
   GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-                                   .texture_width = ATLAS_SIDE,
-                                   .texture_height = ATLAS_SIDE};
+                                   .texture_w = ATLAS_SIDE,
+                                   .texture_h = ATLAS_SIDE};
   atlas_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
   atlas_transfer =
       createGPUTransferBuffer(app->device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
