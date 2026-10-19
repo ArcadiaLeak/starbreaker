@@ -525,13 +525,12 @@ private:
   struct GPURenderSequencer {
     AppState *app;
     GPUCommandSequencer *command_sequencer;
-    UniqueGPURenderPass render_pass;
 
     std::uint32_t swapchain_width, swapchain_height;
     SDL_GPUTexture *swapchain_texture;
 
-    void initiate();
-    void prepare_then_draw();
+    void draw_swapchain();
+    void draw_middlestep();
   };
 
   struct GlyphSequencer {
@@ -648,29 +647,23 @@ void AppState::GPUCommandSequencer::issue_copy_pass() {
 
 void AppState::GPUCommandSequencer::issue_render_pass() {
   GPURenderSequencer render_sequencer{app, this};
-  render_sequencer.initiate();
-  render_sequencer.prepare_then_draw();
+  render_sequencer.swapchain_texture = waitAndAcquireGPUSwapchainTexture(
+      command_buffer.get(), app->main_window.get(),
+      &render_sequencer.swapchain_width, &render_sequencer.swapchain_height);
+  if (not render_sequencer.swapchain_texture)
+    return;
+  render_sequencer.draw_swapchain();
 }
 
-void AppState::GPURenderSequencer::initiate() {
-  swapchain_texture = waitAndAcquireGPUSwapchainTexture(
-      command_sequencer->command_buffer.get(), app->main_window.get(),
-      &swapchain_width, &swapchain_height);
-  if (not swapchain_texture)
-    return;
-  render_pass = beginGPURenderPass(command_sequencer->command_buffer.get(),
-                                   swapchain_texture,
-                                   SDL_FColor{0.08f, 0.08f, 0.10f, 1.0f});
-}
-
-void AppState::GPURenderSequencer::prepare_then_draw() {
-  if (not render_pass)
-    return;
-  SDL_BindGPUGraphicsPipeline(render_pass.get(), app->caption_pipeline.get());
+void AppState::GPURenderSequencer::draw_swapchain() {
+  SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
+  UniqueGPURenderPass renderPass =
+      beginGPURenderPass(cmd, swapchain_texture, {0.08f, 0.08f, 0.10f, 1.0f});
+  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->caption_pipeline.get());
 
   SDL_GPUBufferBinding instanceBinding{
       app->caption_sequencer.instance_buffer.get(), 0};
-  SDL_BindGPUVertexBuffers(render_pass.get(), 0, &instanceBinding, 1);
+  SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
 
   struct QuadUniforms {
     float viewport[2];
@@ -678,8 +671,7 @@ void AppState::GPURenderSequencer::prepare_then_draw() {
   QuadUniforms uniforms{};
   uniforms.viewport[0] = static_cast<float>(swapchain_width);
   uniforms.viewport[1] = static_cast<float>(swapchain_height);
-  SDL_PushGPUVertexUniformData(command_sequencer->command_buffer.get(), 0,
-                               &uniforms, sizeof(QuadUniforms));
+  SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(QuadUniforms));
 
   struct BlitUniforms {
     float tint[4];
@@ -689,18 +681,19 @@ void AppState::GPURenderSequencer::prepare_then_draw() {
   blit.tint[1] = 1.0f;
   blit.tint[2] = 1.0f;
   blit.tint[3] = 1.0f;
-  SDL_PushGPUFragmentUniformData(command_sequencer->command_buffer.get(), 0,
-                                 &blit, sizeof(BlitUniforms));
+  SDL_PushGPUFragmentUniformData(cmd, 0, &blit, sizeof(BlitUniforms));
 
   SDL_GPUTextureSamplerBinding samplerBinding{};
   samplerBinding.texture = app->caption_sequencer.atlas_texture.get();
   samplerBinding.sampler = app->caption_sampler.get();
-  SDL_BindGPUFragmentSamplers(render_pass.get(), 0, &samplerBinding, 1);
+  SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
   std::uint32_t numInstances =
       hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get());
-  SDL_DrawGPUPrimitives(render_pass.get(), 4, numInstances, 0, 0);
+  SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
 }
+
+void AppState::GPURenderSequencer::draw_middlestep() {}
 
 SDL_AppResult AppState::iterate() noexcept {
   try {
