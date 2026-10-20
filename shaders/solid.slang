@@ -6,6 +6,6 @@ struct SolidUniform {
 ConstantBuffer<SolidUniform> u;
 
 [shader("fragment")]
-float4 fs_main() : SV_Target {
+float4 main() : SV_Target {
     return u.color;
 }

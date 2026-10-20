@@ -14,7 +14,7 @@ Sampler2D<float> coverageTexture;
 ConstantBuffer<BlitUniform> u;
 
 [shader("fragment")]
-float4 fs_main(VSOutput input) : SV_Target {
+float4 main(VSOutput input) : SV_Target {
     float coverage = coverageTexture.Sample(input.uv);
     return float4(u.tint.rgb, u.tint.a * coverage);
 }

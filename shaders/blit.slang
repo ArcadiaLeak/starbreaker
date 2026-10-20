@@ -7,6 +7,6 @@ struct VSOutput {
 Sampler2D blitTexture;
 
 [shader("fragment")]
-float4 fs_main(VSOutput input) : SV_Target {
+float4 main(VSOutput input) : SV_Target {
     return blitTexture.Sample(input.uv);
 }

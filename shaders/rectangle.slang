@@ -17,7 +17,7 @@ struct InstanceIn {
 };
 
 [shader("vertex")]
-VSOutput vs_main(uint vertexID : SV_VulkanVertexID, InstanceIn inst) {
+VSOutput main(uint vertexID : SV_VulkanVertexID, InstanceIn inst) {
     uint i = vertexID & 3u;
     float2 corner = float2(float(i & 1u), float(i >> 1u));
     float2 pixel = inst.rect_pos + corner * inst.rect_size;

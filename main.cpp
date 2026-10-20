@@ -226,7 +226,7 @@ void GPUSamplerDeleter::operator()(SDL_GPUSampler *sampler) const {
   SDL_ReleaseGPUSampler(device, sampler);
 }
 
-UniqueGPUSampler createCaptionGPUSampler(SDL_GPUDevice *device) {
+UniqueGPUSampler createGlyphGPUSampler(SDL_GPUDevice *device) {
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
   samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -253,6 +253,7 @@ void GPUTextureDeleter::operator()(SDL_GPUTexture *texture) const {
 }
 
 struct GPUTextureCreateInfo {
+  SDL_GPUTextureFormat format;
   SDL_GPUTextureUsageFlags usage;
   std::uint32_t texture_w;
   std::uint32_t texture_h;
@@ -261,7 +262,7 @@ UniqueGPUTexture createGPUTexture(SDL_GPUDevice *device,
                                   GPUTextureCreateInfo createInfo) {
   SDL_GPUTextureCreateInfo textureInfo{};
   textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
-  textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+  textureInfo.format = createInfo.format;
   textureInfo.usage = createInfo.usage;
   textureInfo.width = createInfo.texture_w;
   textureInfo.height = createInfo.texture_h;
@@ -370,21 +371,22 @@ createGPUGraphicsPipeline(SDL_GPUDevice *device,
 }
 
 UniqueGPUGraphicsPipeline
-createCaptionGPUGraphicsPipeline(SDL_GPUDevice *device, SDL_Window *window) {
-  GPUShaderCreateInfo vertexInfo{.filepath = "rectangle.vert.spv",
+createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
+                               SDL_GPUTextureFormat targetFormat) {
+  GPUShaderCreateInfo vertexInfo{.filepath = "rectangle.spv",
                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                  .num_samplers = 0,
                                  .num_uniform_buffers = 1};
   UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
 
-  GPUShaderCreateInfo fragmentInfo{.filepath = "coverage_tint.frag.spv",
+  GPUShaderCreateInfo fragmentInfo{.filepath = "coverage_tint.spv",
                                    .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                    .num_samplers = 1,
                                    .num_uniform_buffers = 1};
   UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
 
   SDL_GPUColorTargetDescription colorTarget{};
-  colorTarget.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+  colorTarget.format = targetFormat;
   colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
   colorTarget.blend_state.dst_color_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -529,7 +531,7 @@ private:
     std::uint32_t swapchain_w, swapchain_h;
     SDL_GPUTexture *swapchain_texture;
 
-    void draw_scene(SDL_GPUTexture *texture);
+    void draw_scene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
     void verify_offscreen();
   };
 
@@ -558,7 +560,11 @@ private:
     UniqueGPUTransferBuffer instance_transfer;
     std::uint32_t instance_capacity = 0;
 
-    void instantiate();
+    UniqueGPUSampler sampler;
+    UniqueGPUGraphicsPipeline swapchain_pipeline;
+    UniqueGPUGraphicsPipeline offscreen_pipeline;
+
+    void instantiate(SDL_Window *window);
     void glyphs_shape(std::string_view textView);
     void glyphs_fill_cache();
     void pack_atlas();
@@ -573,9 +579,6 @@ private:
   UniqueGPUDevice device_ctx;
   UniqueWindow main_window;
   UniqueWindowForGPUDevice main_window_for_gpu_device;
-
-  UniqueGPUSampler caption_sampler;
-  UniqueGPUGraphicsPipeline caption_pipeline;
 
   std::string caption_string = "Hello world kerning Text";
   int caption_x = 0, caption_y = 0;
@@ -605,10 +608,7 @@ AppState::AppState(FT_Library library) {
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
-  caption_sampler = createCaptionGPUSampler(device_ctx.get());
-  caption_pipeline =
-      createCaptionGPUGraphicsPipeline(device_ctx.get(), main_window.get());
-  caption_sequencer.instantiate();
+  caption_sequencer.instantiate(main_window.get());
 }
 
 void AppState::GPUCommandSequencer::initiate() {
@@ -657,12 +657,15 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
       &render_sequencer.swapchain_w, &render_sequencer.swapchain_h);
   if (not render_sequencer.swapchain_texture)
     return;
-  render_sequencer.draw_scene(render_sequencer.swapchain_texture);
+  render_sequencer.draw_scene(render_sequencer.swapchain_texture,
+                              app->caption_sequencer.swapchain_pipeline.get());
   render_sequencer.verify_offscreen();
-  render_sequencer.draw_scene(app->offscreen_texture.get());
+  render_sequencer.draw_scene(app->offscreen_texture.get(),
+                              app->caption_sequencer.offscreen_pipeline.get());
 }
 
-void AppState::GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture) {
+void AppState::GPURenderSequencer::draw_scene(
+    SDL_GPUTexture *scene_texture, SDL_GPUGraphicsPipeline *pipeline) {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   UniqueGPURenderPass renderPass =
       beginGPURenderPass(cmd, scene_texture, {0.08f, 0.08f, 0.10f, 1.0f});
@@ -678,13 +681,13 @@ void AppState::GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture) {
                    static_cast<int>(swapchain_h)};
   SDL_SetGPUScissor(renderPass.get(), &scissor);
 
-  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->caption_pipeline.get());
+  SDL_BindGPUGraphicsPipeline(renderPass.get(), pipeline);
   SDL_GPUBufferBinding instanceBinding{
       app->caption_sequencer.instance_buffer.get(), 0};
   SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
   SDL_GPUTextureSamplerBinding samplerBinding{};
   samplerBinding.texture = app->caption_sequencer.atlas_texture.get();
-  samplerBinding.sampler = app->caption_sampler.get();
+  samplerBinding.sampler = app->caption_sequencer.sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
   struct QuadUniforms {
@@ -720,11 +723,12 @@ void AppState::GPURenderSequencer::verify_offscreen() {
   if (not isFineH)
     app->offscreen_h =
         std::max(1u << std::bit_width(swapchain_h), app->offscreen_h * 2u);
-  SDL_GPUTextureUsageFlags textureUsage =
+  GPUTextureCreateInfo textureInfo{};
+  textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+  textureInfo.usage =
       SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
-  GPUTextureCreateInfo textureInfo{.usage = textureUsage,
-                                   .texture_w = app->offscreen_w,
-                                   .texture_h = app->offscreen_h};
+  textureInfo.texture_w = app->offscreen_w;
+  textureInfo.texture_h = app->offscreen_h;
   app->offscreen_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
 }
 
@@ -757,14 +761,22 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     return SDL_APP_CONTINUE;
 }
 
-void AppState::GlyphSequencer::instantiate() {
-  GPUTextureCreateInfo textureInfo{.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+void AppState::GlyphSequencer::instantiate(SDL_Window *window) {
+  GPUTextureCreateInfo textureInfo{.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                    .texture_w = ATLAS_SIDE,
                                    .texture_h = ATLAS_SIDE};
   atlas_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
   atlas_transfer =
       createGPUTransferBuffer(app->device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
   harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
+
+  sampler = createGlyphGPUSampler(app->device_ctx.get());
+  swapchain_pipeline = createGlyphGPUGraphicsPipeline(
+      app->device_ctx.get(),
+      SDL_GetGPUSwapchainTextureFormat(app->device_ctx.get(), window));
+  offscreen_pipeline = createGlyphGPUGraphicsPipeline(
+      app->device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
 }
 
 void AppState::GlyphSequencer::glyphs_shape(std::string_view textView) {
