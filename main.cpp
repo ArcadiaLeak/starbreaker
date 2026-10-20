@@ -659,17 +659,33 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
     return;
   render_sequencer.draw_scene(render_sequencer.swapchain_texture);
   render_sequencer.verify_offscreen();
+  render_sequencer.draw_scene(app->offscreen_texture.get());
 }
 
 void AppState::GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture) {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   UniqueGPURenderPass renderPass =
       beginGPURenderPass(cmd, scene_texture, {0.08f, 0.08f, 0.10f, 1.0f});
-  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->caption_pipeline.get());
 
+  SDL_GPUViewport viewport{.x = 0,
+                           .y = 0,
+                           .w = static_cast<float>(swapchain_w),
+                           .h = static_cast<float>(swapchain_h),
+                           .min_depth = 0.0f,
+                           .max_depth = 1.0f};
+  SDL_SetGPUViewport(renderPass.get(), &viewport);
+  SDL_Rect scissor{0, 0, static_cast<int>(swapchain_w),
+                   static_cast<int>(swapchain_h)};
+  SDL_SetGPUScissor(renderPass.get(), &scissor);
+
+  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->caption_pipeline.get());
   SDL_GPUBufferBinding instanceBinding{
       app->caption_sequencer.instance_buffer.get(), 0};
   SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
+  SDL_GPUTextureSamplerBinding samplerBinding{};
+  samplerBinding.texture = app->caption_sequencer.atlas_texture.get();
+  samplerBinding.sampler = app->caption_sampler.get();
+  SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
   struct QuadUniforms {
     float viewport[2];
@@ -678,7 +694,6 @@ void AppState::GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture) {
   uniforms.viewport[0] = static_cast<float>(swapchain_w);
   uniforms.viewport[1] = static_cast<float>(swapchain_h);
   SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(QuadUniforms));
-
   struct BlitUniforms {
     float tint[4];
   };
@@ -688,11 +703,6 @@ void AppState::GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture) {
   blit.tint[2] = 1.0f;
   blit.tint[3] = 1.0f;
   SDL_PushGPUFragmentUniformData(cmd, 0, &blit, sizeof(BlitUniforms));
-
-  SDL_GPUTextureSamplerBinding samplerBinding{};
-  samplerBinding.texture = app->caption_sequencer.atlas_texture.get();
-  samplerBinding.sampler = app->caption_sampler.get();
-  SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
   std::uint32_t numInstances =
       hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get());
