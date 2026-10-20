@@ -572,7 +572,8 @@ private:
     SDL_GPUTexture *swapchain_texture;
 
     void draw_scene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
-    void verify_offscreen();
+    void verify_postprocessing();
+    void blend_selected_areas();
   };
 
   struct GlyphSequencer {
@@ -627,6 +628,7 @@ private:
   UniqueFreetypeGlyph load_freetype_glyph(hb_codepoint_t codepoint);
 
   UniqueGPUTexture offscreen_texture;
+  UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
   UniqueGPUComputePipeline selection_pipeline;
 
@@ -701,9 +703,10 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
     return;
   render_sequencer.draw_scene(render_sequencer.swapchain_texture,
                               app->caption_sequencer.swapchain_pipeline.get());
-  render_sequencer.verify_offscreen();
+  render_sequencer.verify_postprocessing();
   render_sequencer.draw_scene(app->offscreen_texture.get(),
                               app->caption_sequencer.offscreen_pipeline.get());
+  render_sequencer.blend_selected_areas();
 }
 
 void AppState::GPURenderSequencer::draw_scene(
@@ -754,7 +757,7 @@ void AppState::GPURenderSequencer::draw_scene(
   SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
 }
 
-void AppState::GPURenderSequencer::verify_offscreen() {
+void AppState::GPURenderSequencer::verify_postprocessing() {
   bool isFineW = app->offscreen_w >= swapchain_w;
   bool isFineH = app->offscreen_h >= swapchain_h;
   if (isFineW && isFineH)
@@ -765,14 +768,25 @@ void AppState::GPURenderSequencer::verify_offscreen() {
   if (not isFineH)
     app->offscreen_h =
         std::max(1u << std::bit_width(swapchain_h), app->offscreen_h * 2u);
-  GPUTextureCreateInfo textureInfo{};
-  textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-  textureInfo.usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
-                      SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
-  textureInfo.texture_w = app->offscreen_w;
-  textureInfo.texture_h = app->offscreen_h;
-  app->offscreen_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
+  GPUTextureCreateInfo offscreenInfo{};
+  offscreenInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+  offscreenInfo.texture_w = app->offscreen_w;
+  offscreenInfo.texture_h = app->offscreen_h;
+  offscreenInfo.usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
+                        SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+  app->offscreen_texture =
+      createGPUTexture(app->device_ctx.get(), offscreenInfo);
+  GPUTextureCreateInfo processedInfo{};
+  processedInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+  processedInfo.texture_w = app->offscreen_w;
+  processedInfo.texture_h = app->offscreen_h;
+  processedInfo.usage =
+      SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+  app->processed_texture =
+      createGPUTexture(app->device_ctx.get(), processedInfo);
 }
+
+void AppState::GPURenderSequencer::blend_selected_areas() {}
 
 SDL_AppResult AppState::iterate() noexcept {
   try {
