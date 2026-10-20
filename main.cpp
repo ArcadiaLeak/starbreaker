@@ -440,6 +440,46 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
   return createGPUGraphicsPipeline(device, &pipelineInfo);
 }
 
+struct GPUComputePipelineDeleter {
+  SDL_GPUDevice *device_ctx;
+  void operator()(SDL_GPUComputePipeline *pipeline) const;
+};
+using UniqueGPUComputePipeline =
+    std::unique_ptr<SDL_GPUComputePipeline, GPUComputePipelineDeleter>;
+void GPUComputePipelineDeleter::operator()(
+    SDL_GPUComputePipeline *pipeline) const {
+  SDL_ReleaseGPUComputePipeline(device_ctx, pipeline);
+}
+
+UniqueGPUComputePipeline
+createGPUComputePipeline(SDL_GPUDevice *device,
+                         SDL_GPUComputePipelineCreateInfo *pipelineInfo) {
+  SDL_GPUComputePipeline *pipeline =
+      SDL_CreateGPUComputePipeline(device, pipelineInfo);
+  if (not pipeline) {
+    std::string errorMsg{"SDL_CreateGPUComputePipeline failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
+  }
+  return UniqueGPUComputePipeline{pipeline, GPUComputePipelineDeleter{device}};
+}
+
+UniqueGPUComputePipeline
+createDifferenceBlendGPUPipeline(SDL_GPUDevice *device) {
+  SDL_GPUComputePipelineCreateInfo pipelineInfo{};
+  UniqueFileContent shaderCode =
+      loadFile("difference_blend.spv", &pipelineInfo.code_size);
+  pipelineInfo.code = static_cast<const Uint8 *>(shaderCode.get());
+  pipelineInfo.entrypoint = "main";
+  pipelineInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  pipelineInfo.num_uniform_buffers = 1;
+  pipelineInfo.num_readonly_storage_textures = 1;
+  pipelineInfo.num_readwrite_storage_textures = 1;
+  pipelineInfo.threadcount_x = 8;
+  pipelineInfo.threadcount_y = 8;
+  pipelineInfo.threadcount_z = 1;
+  return createGPUComputePipeline(device, &pipelineInfo);
+}
+
 struct GPUCommandBufferSubmitter {
   void operator()(SDL_GPUCommandBuffer *commandBuffer) const;
 };
@@ -587,7 +627,8 @@ private:
   UniqueFreetypeGlyph load_freetype_glyph(hb_codepoint_t codepoint);
 
   UniqueGPUTexture offscreen_texture;
-  std::uint32_t offscreen_w, offscreen_h;
+  std::uint32_t offscreen_w = 0, offscreen_h = 0;
+  UniqueGPUComputePipeline selection_pipeline;
 
 public:
   AppState(FT_Library library);
@@ -608,6 +649,7 @@ AppState::AppState(FT_Library library) {
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
+  selection_pipeline = createDifferenceBlendGPUPipeline(device_ctx.get());
   caption_sequencer.instantiate(main_window.get());
 }
 
@@ -725,8 +767,8 @@ void AppState::GPURenderSequencer::verify_offscreen() {
         std::max(1u << std::bit_width(swapchain_h), app->offscreen_h * 2u);
   GPUTextureCreateInfo textureInfo{};
   textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-  textureInfo.usage =
-      SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+  textureInfo.usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
+                      SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
   textureInfo.texture_w = app->offscreen_w;
   textureInfo.texture_h = app->offscreen_h;
   app->offscreen_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
@@ -1051,7 +1093,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 }
 
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
-  AppState *app = (AppState *)appstate;
+  AppState *app = static_cast<AppState *>(appstate);
   delete app;
   if (globalFTLibrary) {
     FT_Done_FreeType(globalFTLibrary);
