@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <format>
 #include <map>
 #include <memory>
@@ -664,9 +665,14 @@ private:
     virtual ~CopypassTask() = default;
     virtual void execute(SDL_GPUCopyPass *copypass) const = 0;
   };
-  std::vector<std::unique_ptr<CopypassTask>> copypass_tasks;
+  std::deque<std::unique_ptr<CopypassTask>> copypass_tasks;
 
-  struct GlyphCopypassTask : CopypassTask {
+  struct GlyphAtlasCopypassTask : CopypassTask {
+    GlyphSequencer *sequencer;
+    void execute(SDL_GPUCopyPass *copypass) const;
+  };
+
+  struct GlyphVertexCopypassTask : CopypassTask {
     GlyphSequencer *sequencer;
     void execute(SDL_GPUCopyPass *copypass) const;
   };
@@ -737,8 +743,10 @@ void AppState::GPUCommandSequencer::blit_transfer_data() {
 
 void AppState::GPUCommandSequencer::issue_copy_pass() {
   UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
-  for (const std::unique_ptr<CopypassTask> &copypassTask : app->copypass_tasks)
-    copypassTask->execute(copypass.get());
+  while (not app->copypass_tasks.empty()) {
+    app->copypass_tasks.front()->execute(copypass.get());
+    app->copypass_tasks.pop_front();
+  }
   GlyphSequencer &caption = app->caption_sequencer;
   SDL_GPUTransferBufferLocation src{
       .transfer_buffer = caption.instance_transfer.get(), .offset = 0};
@@ -940,7 +948,7 @@ void AppState::GlyphSequencer::verify_glyph_cache() {
   }
   if (everInserted) {
     pack_atlas();
-    std::unique_ptr glyph_copypass = std::make_unique<GlyphCopypassTask>();
+    std::unique_ptr glyph_copypass = std::make_unique<GlyphAtlasCopypassTask>();
     glyph_copypass->sequencer = this;
     app->copypass_tasks.push_back(std::move(glyph_copypass));
   }
@@ -1131,7 +1139,8 @@ void AppState::GlyphSequencer::measure_text() {
       std::ceil(static_cast<float>(maxY - minY) / 64.0f));
 }
 
-void AppState::GlyphCopypassTask::execute(SDL_GPUCopyPass *copypass) const {
+void AppState::GlyphAtlasCopypassTask::execute(
+    SDL_GPUCopyPass *copypass) const {
   SDL_GPUTextureTransferInfo source{
       .transfer_buffer = sequencer->atlas_transfer.get(),
       .offset = 0,
