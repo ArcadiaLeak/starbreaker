@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <format>
 #include <generator>
 #include <map>
@@ -625,7 +624,8 @@ private:
     std::generator<GlyphVertexInstance> generate_vertex_instances();
 
     void verify_instance_capacity(std::uint32_t bufferSize);
-    void write_instance_data();
+    void transfer_vertex_instances();
+    void queue_vertex_copypass();
 
     UniqueGPUSampler sampler;
     UniqueGPUGraphicsPipeline swapchain_pipeline;
@@ -660,6 +660,8 @@ private:
   std::uint32_t selection_capacity = 0;
   std::vector<std::array<std::uint32_t, 4>> selection_areas;
 
+  void verify_selection_capacity(std::uint32_t bufferSize);
+
   struct CopypassTask {
     CopypassTask(const CopypassTask &) = delete;
     CopypassTask &operator=(const CopypassTask &) = delete;
@@ -670,7 +672,7 @@ private:
     virtual ~CopypassTask() = default;
     virtual void execute(SDL_GPUCopyPass *copypass) const = 0;
   };
-  std::deque<std::unique_ptr<CopypassTask>> copypass_tasks;
+  std::vector<std::unique_ptr<CopypassTask>> copypass_tasks;
 
   struct GlyphAtlasCopypassTask : CopypassTask {
     GlyphSequencer *sequencer;
@@ -688,7 +690,8 @@ public:
   SDL_AppResult iterate() noexcept;
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
 
-  void caption_layout_calculate();
+  void caption_calculate();
+  void selection_calculate();
 };
 
 AppState::AppState(FT_Library library) {
@@ -707,27 +710,13 @@ AppState::AppState(FT_Library library) {
 
 void AppState::GPUCommandSequencer::initiate() {
   command_buffer = acquireGPUCommandBuffer(app->device_ctx.get());
-
-  if (std::uint32_t bufferSize{static_cast<std::uint32_t>(
-          app->selection_areas.size() * sizeof(DifferenceBlendArea))};
-      bufferSize > app->selection_capacity) {
-    app->selection_capacity = std::max(1u << std::bit_width(bufferSize),
-                                       app->selection_capacity * 2u);
-    SDL_GPUBufferCreateInfo bufferInfo{
-        .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
-        .size = app->selection_capacity};
-    app->selection_buffer = createGPUBuffer(app->device_ctx.get(), &bufferInfo);
-    app->selection_transfer =
-        createGPUTransferBuffer(app->device_ctx.get(), app->selection_capacity);
-  }
 }
 
 void AppState::GPUCommandSequencer::issue_copy_pass() {
   UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
-  while (not app->copypass_tasks.empty()) {
-    app->copypass_tasks.front()->execute(copypass.get());
-    app->copypass_tasks.pop_front();
-  }
+  for (const std::unique_ptr<CopypassTask> &task : app->copypass_tasks)
+    task->execute(copypass.get());
+  app->copypass_tasks.clear();
 }
 
 void AppState::GlyphVertexCopypassTask::execute(
@@ -1100,16 +1089,20 @@ AppState::GlyphSequencer::generate_vertex_instances() {
   }
 }
 
-void AppState::GlyphSequencer::write_instance_data() {
-  std::uint32_t bufferSize =
-      static_cast<std::uint32_t>(hb_buffer_get_length(harfbuzz_buffer.get()) *
-                                 sizeof(GlyphVertexInstance));
-  verify_instance_capacity(bufferSize);
+void AppState::GlyphSequencer::transfer_vertex_instances() {
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true);
   for (auto [idx, data] : generate_vertex_instances() | std::views::enumerate)
     std::memcpy(static_cast<GlyphVertexInstance *>(mappedBuffer.get()) + idx,
                 &data, sizeof(GlyphVertexInstance));
+}
+
+void AppState::GlyphSequencer::queue_vertex_copypass() {
+  std::uint32_t bufferSize =
+      static_cast<std::uint32_t>(hb_buffer_get_length(harfbuzz_buffer.get()) *
+                                 sizeof(GlyphVertexInstance));
+  verify_instance_capacity(bufferSize);
+  transfer_vertex_instances();
   std::unique_ptr instanceCopypass =
       std::make_unique<GlyphVertexCopypassTask>();
   instanceCopypass->sequencer = this;
@@ -1191,13 +1184,33 @@ UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
   return UniqueFreetypeGlyph{glyph};
 }
 
-void AppState::caption_layout_calculate() {
+void AppState::caption_calculate() {
   caption_sequencer.glyphs_shape(caption_string);
   caption_sequencer.verify_glyph_cache();
   caption_sequencer.measure_text();
   caption_x = (INITIAL_WINDOW_WIDTH - caption_sequencer.measured_width) / 2;
   caption_y = (INITIAL_WINDOW_HEIGHT - caption_sequencer.measured_height) / 2;
-  caption_sequencer.write_instance_data();
+  caption_sequencer.queue_vertex_copypass();
+}
+
+void AppState::selection_calculate() {
+  selection_areas = {{200, 100, 300, 300}};
+  std::uint32_t bufferSize{static_cast<std::uint32_t>(
+      selection_areas.size() * sizeof(DifferenceBlendArea))};
+  verify_selection_capacity(bufferSize);
+}
+
+void AppState::verify_selection_capacity(std::uint32_t bufferSize) {
+  if (bufferSize <= selection_capacity)
+    return;
+  selection_capacity =
+      std::max(1u << std::bit_width(bufferSize), selection_capacity * 2u);
+  SDL_GPUBufferCreateInfo bufferInfo{
+      .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
+      .size = selection_capacity};
+  selection_buffer = createGPUBuffer(device_ctx.get(), &bufferInfo);
+  selection_transfer =
+      createGPUTransferBuffer(device_ctx.get(), selection_capacity);
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
@@ -1212,7 +1225,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   try {
     AppState *app = new AppState{globalFTLibrary};
     *appstate = app;
-    app->caption_layout_calculate();
+    app->caption_calculate();
+    app->selection_calculate();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[AppInit] %s", e.what());
