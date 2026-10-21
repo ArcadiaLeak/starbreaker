@@ -5,10 +5,11 @@ struct VSOutput {
 
 struct RectUniform {
     float2 viewport;
+    float2 translate;
 };
 
 [[vk::binding(0, 1)]]
-ConstantBuffer<RectUniform> u;
+ConstantBuffer<RectUniform> rectUni;
 
 struct InstanceIn {
     [[vk::location(0)]] float2 rect_pos  : TEXCOORD0;
@@ -20,11 +21,12 @@ struct InstanceIn {
 VSOutput main(uint vertexID : SV_VulkanVertexID, InstanceIn inst) {
     uint i = vertexID & 3u;
     float2 corner = float2(float(i & 1u), float(i >> 1u));
-    float2 pixel = inst.rect_pos + corner * inst.rect_size;
-    float2 ndc = pixel * (2.0 / u.viewport) - 1.0;
+    float2 pixelCoords =
+        rectUni.translate + inst.rect_pos + corner * inst.rect_size;
+    float2 deviceCoords = pixelCoords * (2.0 / rectUni.viewport) - 1.0;
 
     VSOutput o;
-    o.position = float4(ndc, 0.0, 1.0);
+    o.position = float4(deviceCoords, 0.0, 1.0);
     o.uv = lerp(inst.uv_rect.xy, inst.uv_rect.zw, corner);
     return o;
 }

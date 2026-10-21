@@ -1,4 +1,3 @@
-#include <SDL3/SDL_pixels.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -8,6 +7,7 @@
 #include <cstring>
 #include <deque>
 #include <format>
+#include <generator>
 #include <map>
 #include <memory>
 #include <ranges>
@@ -579,7 +579,6 @@ private:
     EngagedGPUCommandBuffer command_buffer;
 
     void initiate();
-    void blit_transfer_data();
     void issue_copy_pass();
     void issue_render_pass();
   };
@@ -620,6 +619,13 @@ private:
     UniqueGPUTransferBuffer instance_transfer;
     std::uint32_t instance_capacity = 0;
 
+    std::optional<GlyphVertexInstance>
+    create_vertex_instance(unsigned int glyphIndex, hb_position_t penX);
+    std::generator<GlyphVertexInstance> generate_vertex_instances();
+
+    void verify_instance_capacity(std::uint32_t bufferSize);
+    void write_instance_data();
+
     UniqueGPUSampler sampler;
     UniqueGPUGraphicsPipeline swapchain_pipeline;
     UniqueGPUGraphicsPipeline offscreen_pipeline;
@@ -629,8 +635,6 @@ private:
     void verify_glyph_cache();
     void pack_atlas();
     void measure_text();
-
-    std::vector<GlyphVertexInstance> make_instance_data();
   };
 
   UniqueHarfbuzzFont harfbuzz_font;
@@ -704,21 +708,6 @@ void AppState::GPUCommandSequencer::initiate() {
   command_buffer = acquireGPUCommandBuffer(app->device_ctx.get());
 
   if (std::uint32_t bufferSize{static_cast<std::uint32_t>(
-          hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get()) *
-          sizeof(GlyphVertexInstance))};
-      bufferSize > app->caption_sequencer.instance_capacity) {
-    GlyphSequencer &caption = app->caption_sequencer;
-    caption.instance_capacity = std::max(1u << std::bit_width(bufferSize),
-                                         caption.instance_capacity * 2u);
-    SDL_GPUBufferCreateInfo bufferInfo{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
-                                       .size = caption.instance_capacity};
-    caption.instance_buffer =
-        createGPUBuffer(app->device_ctx.get(), &bufferInfo);
-    caption.instance_transfer = createGPUTransferBuffer(
-        app->device_ctx.get(), caption.instance_capacity);
-  }
-
-  if (std::uint32_t bufferSize{static_cast<std::uint32_t>(
           app->selection_areas.size() * sizeof(DifferenceBlendArea))};
       bufferSize > app->selection_capacity) {
     app->selection_capacity = std::max(1u << std::bit_width(bufferSize),
@@ -732,30 +721,25 @@ void AppState::GPUCommandSequencer::initiate() {
   }
 }
 
-void AppState::GPUCommandSequencer::blit_transfer_data() {
-  GlyphSequencer &caption = app->caption_sequencer;
-  UniqueGPUMappedBuffer mappedBuffer{mapGPUTransferBuffer(
-      app->device_ctx.get(), caption.instance_transfer.get(), true)};
-  std::vector instanceData = caption.make_instance_data();
-  std::size_t bufferSize = instanceData.size() * sizeof(GlyphVertexInstance);
-  std::memcpy(mappedBuffer.get(), instanceData.data(), bufferSize);
-}
-
 void AppState::GPUCommandSequencer::issue_copy_pass() {
   UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
   while (not app->copypass_tasks.empty()) {
     app->copypass_tasks.front()->execute(copypass.get());
     app->copypass_tasks.pop_front();
   }
-  GlyphSequencer &caption = app->caption_sequencer;
+}
+
+void AppState::GlyphVertexCopypassTask::execute(
+    SDL_GPUCopyPass *copypass) const {
   SDL_GPUTransferBufferLocation src{
-      .transfer_buffer = caption.instance_transfer.get(), .offset = 0};
+      .transfer_buffer = sequencer->instance_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      hb_buffer_get_length(caption.harfbuzz_buffer.get()) *
+      hb_buffer_get_length(sequencer->harfbuzz_buffer.get()) *
       sizeof(GlyphVertexInstance))};
-  SDL_GPUBufferRegion dst{
-      .buffer = caption.instance_buffer.get(), .offset = 0, .size = bufferSize};
-  SDL_UploadToGPUBuffer(copypass.get(), &src, &dst, true);
+  SDL_GPUBufferRegion dst{.buffer = sequencer->instance_buffer.get(),
+                          .offset = 0,
+                          .size = bufferSize};
+  SDL_UploadToGPUBuffer(copypass, &src, &dst, false);
 }
 
 void AppState::GPUCommandSequencer::issue_render_pass() {
@@ -802,13 +786,16 @@ void AppState::GPURenderSequencer::draw_scene(
   samplerBinding.sampler = app->caption_sequencer.sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
-  struct QuadUniforms {
+  struct RectUniforms {
     float viewport[2];
+    float translate[2];
   };
-  QuadUniforms uniforms{};
+  RectUniforms uniforms{};
   uniforms.viewport[0] = static_cast<float>(swapchain_w);
   uniforms.viewport[1] = static_cast<float>(swapchain_h);
-  SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(QuadUniforms));
+  uniforms.translate[0] = static_cast<float>(app->caption_x);
+  uniforms.translate[1] = static_cast<float>(app->caption_y);
+  SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(RectUniforms));
   struct BlitUniforms {
     float tint[4];
   };
@@ -878,7 +865,6 @@ SDL_AppResult AppState::iterate() noexcept {
   try {
     GPUCommandSequencer command_sequencer{this};
     command_sequencer.initiate();
-    command_sequencer.blit_transfer_data();
     command_sequencer.issue_copy_pass();
     command_sequencer.issue_render_pass();
     return SDL_APP_CONTINUE;
@@ -948,9 +934,9 @@ void AppState::GlyphSequencer::verify_glyph_cache() {
   }
   if (everInserted) {
     pack_atlas();
-    std::unique_ptr glyph_copypass = std::make_unique<GlyphAtlasCopypassTask>();
-    glyph_copypass->sequencer = this;
-    app->copypass_tasks.push_back(std::move(glyph_copypass));
+    std::unique_ptr atlasCopypass = std::make_unique<GlyphAtlasCopypassTask>();
+    atlasCopypass->sequencer = this;
+    app->copypass_tasks.push_back(std::move(atlasCopypass));
   }
 }
 
@@ -1047,53 +1033,86 @@ void AppState::GlyphSequencer::pack_atlas() {
   }
 }
 
-std::vector<GlyphVertexInstance>
-AppState::GlyphSequencer::make_instance_data() {
+void AppState::GlyphSequencer::verify_instance_capacity(
+    std::uint32_t bufferSize) {
+  if (instance_capacity >= bufferSize)
+    return;
+  instance_capacity =
+      std::max(1u << std::bit_width(bufferSize), instance_capacity * 2u);
+  SDL_GPUBufferCreateInfo bufferInfo{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+                                     .size = instance_capacity};
+  instance_buffer = createGPUBuffer(app->device_ctx.get(), &bufferInfo);
+  instance_transfer =
+      createGPUTransferBuffer(app->device_ctx.get(), instance_capacity);
+}
+
+std::optional<GlyphVertexInstance>
+AppState::GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
+                                                 hb_position_t penX) {
   hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
-  std::vector<GlyphVertexInstance> instanceData{};
-  struct GlyphCarry {
-    unsigned int glyph_index;
-    hb_position_t pen_x;
-  };
-  for (GlyphCarry c{};
-       c.glyph_index < hb_buffer_get_length(harfbuzz_buffer.get());
-       c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
-    GlyphCache::iterator cacheIt =
-        glyph_cache.find(glyphInfos[c.glyph_index].codepoint);
-    if (cacheIt == glyph_cache.end())
-      continue;
-    FT_BitmapGlyph bitmapGlyph =
-        asBitmapGlyph(cacheIt->second.freetype_glyph.get());
-    GlyphVertexInstance &instanceDatum = instanceData.emplace_back();
-    instanceDatum.rect_pos[0] =
-        static_cast<float>(app->caption_x) +
-        static_cast<float>(c.pen_x + positions[c.glyph_index].x_offset +
-                           bitmapGlyph->left * 64) /
-            64.0f;
-    instanceDatum.rect_pos[1] =
-        static_cast<float>(app->caption_y) -
-        static_cast<float>(positions[c.glyph_index].y_offset) / 64.0f +
-        static_cast<float>(bitmapGlyph->top -
-                           static_cast<int>(bitmapGlyph->bitmap.rows));
-    float bitmapW = static_cast<float>(bitmapGlyph->bitmap.width);
-    float bitmapH = static_cast<float>(bitmapGlyph->bitmap.rows);
-    instanceDatum.rect_size[0] = bitmapW;
-    instanceDatum.rect_size[1] = bitmapH;
-    float atlasU = static_cast<float>(cacheIt->second.atlas->x) /
-                   static_cast<float>(ATLAS_SIDE);
-    float atlasV = static_cast<float>(cacheIt->second.atlas->y) /
-                   static_cast<float>(ATLAS_SIDE);
-    instanceDatum.uv_rect[0] = atlasU;
-    instanceDatum.uv_rect[1] = atlasV;
-    instanceDatum.uv_rect[2] =
-        atlasU + bitmapW / static_cast<float>(ATLAS_SIDE);
-    instanceDatum.uv_rect[3] =
-        atlasV + bitmapH / static_cast<float>(ATLAS_SIDE);
+  GlyphCache::iterator cacheIt =
+      glyph_cache.find(glyphInfos[glyphIndex].codepoint);
+  if (cacheIt == glyph_cache.end())
+    return std::nullopt;
+  FT_BitmapGlyph bitmapGlyph =
+      asBitmapGlyph(cacheIt->second.freetype_glyph.get());
+  GlyphVertexInstance vertexInstance{};
+  vertexInstance.rect_pos[0] =
+      static_cast<float>(penX + positions[glyphIndex].x_offset +
+                         bitmapGlyph->left * 64) /
+      64.0f;
+  vertexInstance.rect_pos[1] =
+      -1.0f * static_cast<float>(positions[glyphIndex].y_offset) / 64.0f +
+      static_cast<float>(bitmapGlyph->top -
+                         static_cast<int>(bitmapGlyph->bitmap.rows));
+  float bitmapW = static_cast<float>(bitmapGlyph->bitmap.width);
+  float bitmapH = static_cast<float>(bitmapGlyph->bitmap.rows);
+  vertexInstance.rect_size[0] = bitmapW;
+  vertexInstance.rect_size[1] = bitmapH;
+  float atlasU = static_cast<float>(cacheIt->second.atlas->x) /
+                 static_cast<float>(ATLAS_SIDE);
+  float atlasV = static_cast<float>(cacheIt->second.atlas->y) /
+                 static_cast<float>(ATLAS_SIDE);
+  vertexInstance.uv_rect[0] = atlasU;
+  vertexInstance.uv_rect[1] = atlasV;
+  vertexInstance.uv_rect[2] = atlasU + bitmapW / static_cast<float>(ATLAS_SIDE);
+  vertexInstance.uv_rect[3] = atlasV + bitmapH / static_cast<float>(ATLAS_SIDE);
+  return vertexInstance;
+}
+
+std::generator<GlyphVertexInstance>
+AppState::GlyphSequencer::generate_vertex_instances() {
+  unsigned int glyphIndex{}, bufferLength{};
+  hb_glyph_position_t *positions =
+      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), &bufferLength);
+  hb_position_t penX{};
+  while (glyphIndex < bufferLength) {
+    std::optional<GlyphVertexInstance> vertexInstance{
+        create_vertex_instance(glyphIndex, penX)};
+    if (vertexInstance)
+      co_yield vertexInstance.value();
+    penX += positions[glyphIndex].x_advance;
+    ++glyphIndex;
   }
-  return instanceData;
+}
+
+void AppState::GlyphSequencer::write_instance_data() {
+  std::uint32_t bufferSize =
+      static_cast<std::uint32_t>(hb_buffer_get_length(harfbuzz_buffer.get()) *
+                                 sizeof(GlyphVertexInstance));
+  verify_instance_capacity(bufferSize);
+  UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
+      app->device_ctx.get(), instance_transfer.get(), true);
+  for (auto [idx, data] : generate_vertex_instances() | std::views::enumerate)
+    std::memcpy(static_cast<GlyphVertexInstance *>(mappedBuffer.get()) + idx,
+                &data, sizeof(GlyphVertexInstance));
+  std::unique_ptr instanceCopypass =
+      std::make_unique<GlyphVertexCopypassTask>();
+  instanceCopypass->sequencer = this;
+  app->copypass_tasks.push_back(std::move(instanceCopypass));
 }
 
 void AppState::GlyphSequencer::measure_text() {
@@ -1177,6 +1196,7 @@ void AppState::caption_text_combine() {
   caption_sequencer.measure_text();
   caption_x = (INITIAL_WINDOW_WIDTH - caption_sequencer.measured_width) / 2;
   caption_y = (INITIAL_WINDOW_HEIGHT - caption_sequencer.measured_height) / 2;
+  caption_sequencer.write_instance_data();
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
