@@ -687,7 +687,7 @@ public:
   SDL_AppResult iterate() noexcept;
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
 
-  void caption_text_combine();
+  void caption_layout_calculate();
 };
 
 AppState::AppState(FT_Library library) {
@@ -1190,7 +1190,7 @@ UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
   return UniqueFreetypeGlyph{glyph};
 }
 
-void AppState::caption_text_combine() {
+void AppState::caption_layout_calculate() {
   caption_sequencer.glyphs_shape(caption_string);
   caption_sequencer.verify_glyph_cache();
   caption_sequencer.measure_text();
@@ -1211,7 +1211,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   try {
     AppState *app = new AppState{globalFTLibrary};
     *appstate = app;
-    app->caption_text_combine();
+    app->caption_layout_calculate();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[AppInit] %s", e.what());
