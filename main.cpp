@@ -1,3 +1,4 @@
+#include <SDL3/SDL_pixels.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -520,15 +521,11 @@ void GPURenderPassDeleter::operator()(SDL_GPURenderPass *renderPass) const {
   SDL_EndGPURenderPass(renderPass);
 }
 
-UniqueGPURenderPass beginGPURenderPass(SDL_GPUCommandBuffer *commandBuffer,
-                                       SDL_GPUTexture *texture,
-                                       SDL_FColor clearColor) {
-  SDL_GPUColorTargetInfo colorTarget{.texture = texture,
-                                     .clear_color = clearColor,
-                                     .load_op = SDL_GPU_LOADOP_CLEAR,
-                                     .store_op = SDL_GPU_STOREOP_STORE};
+UniqueGPURenderPass
+beginGPURenderPass(SDL_GPUCommandBuffer *commandBuffer,
+                   const SDL_GPUColorTargetInfo *targetInfo) {
   SDL_GPURenderPass *renderPass =
-      SDL_BeginGPURenderPass(commandBuffer, &colorTarget, 1, nullptr);
+      SDL_BeginGPURenderPass(commandBuffer, targetInfo, 1, nullptr);
   return UniqueGPURenderPass{renderPass};
 }
 
@@ -550,6 +547,23 @@ struct GPUCopyPassDeleter {
 using UniqueGPUCopyPass = std::unique_ptr<SDL_GPUCopyPass, GPUCopyPassDeleter>;
 void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
   SDL_EndGPUCopyPass(copyPass);
+}
+
+struct GPUComputePassDeleter {
+  void operator()(SDL_GPUComputePass *computePass) const;
+};
+using UniqueGPUComputePass =
+    std::unique_ptr<SDL_GPUComputePass, GPUComputePassDeleter>;
+void GPUComputePassDeleter::operator()(SDL_GPUComputePass *computePass) const {
+  SDL_EndGPUComputePass(computePass);
+}
+
+UniqueGPUComputePass beginGPUComputePass(
+    SDL_GPUCommandBuffer *commandBuffer,
+    const SDL_GPUStorageTextureReadWriteBinding *textureBinding) {
+  SDL_GPUComputePass *computePass =
+      SDL_BeginGPUComputePass(commandBuffer, textureBinding, 1, nullptr, 0);
+  return UniqueGPUComputePass{computePass};
 }
 
 class AppState {
@@ -712,8 +726,11 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
 void AppState::GPURenderSequencer::draw_scene(
     SDL_GPUTexture *scene_texture, SDL_GPUGraphicsPipeline *pipeline) {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
-  UniqueGPURenderPass renderPass =
-      beginGPURenderPass(cmd, scene_texture, {0.08f, 0.08f, 0.10f, 1.0f});
+  SDL_GPUColorTargetInfo colorTarget{.texture = scene_texture,
+                                     .clear_color = {0.08f, 0.08f, 0.10f, 1.0f},
+                                     .load_op = SDL_GPU_LOADOP_CLEAR,
+                                     .store_op = SDL_GPU_STOREOP_STORE};
+  UniqueGPURenderPass renderPass = beginGPURenderPass(cmd, &colorTarget);
 
   SDL_GPUViewport viewport{.x = 0,
                            .y = 0,
@@ -786,7 +803,26 @@ void AppState::GPURenderSequencer::verify_postprocessing() {
       createGPUTexture(app->device_ctx.get(), processedInfo);
 }
 
-void AppState::GPURenderSequencer::blend_selected_areas() {}
+void AppState::GPURenderSequencer::blend_selected_areas() {
+  SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
+  SDL_GPUStorageTextureReadWriteBinding textureRW{
+      .texture = app->processed_texture.get()};
+  UniqueGPUComputePass computePass = beginGPUComputePass(cmd, &textureRW);
+  SDL_BindGPUComputePipeline(computePass.get(), app->selection_pipeline.get());
+
+  SDL_GPUTexture *baseTexture = app->offscreen_texture.get();
+  SDL_BindGPUComputeStorageTextures(computePass.get(), 0, &baseTexture, 1);
+
+  struct SelectionArea {
+    std::uint32_t rect[4];
+    float color[4];
+  };
+  SelectionArea area{.rect = {200, 100, 300, 300},
+                     .color = {1.0f, 1.0f, 1.0f, 1.0f}};
+  SDL_PushGPUComputeUniformData(cmd, 0, &area, sizeof(area));
+  SDL_DispatchGPUCompute(computePass.get(), (area.rect[2] + 7) / 8,
+                         (area.rect[3] + 7) / 8, 1);
+}
 
 SDL_AppResult AppState::iterate() noexcept {
   try {
