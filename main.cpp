@@ -623,7 +623,7 @@ private:
     create_vertex_instance(unsigned int glyphIndex, hb_position_t penX);
     std::generator<GlyphVertexInstance> generate_vertex_instances();
 
-    void verify_instance_capacity(std::uint32_t bufferSize);
+    void verify_instance_capacity();
     void transfer_vertex_instances();
     void queue_vertex_copypass();
 
@@ -660,7 +660,8 @@ private:
   std::uint32_t selection_capacity = 0;
   std::vector<std::array<std::uint32_t, 4>> selection_areas;
 
-  void verify_selection_capacity(std::uint32_t bufferSize);
+  void verify_selection_capacity();
+  void transfer_selection_areas();
 
   struct CopypassTask {
     CopypassTask(const CopypassTask &) = delete;
@@ -681,6 +682,11 @@ private:
 
   struct GlyphVertexCopypassTask : CopypassTask {
     GlyphSequencer *sequencer;
+    void execute(SDL_GPUCopyPass *copypass) const;
+  };
+
+  struct SelectionCopypassTask : CopypassTask {
+    AppState *app;
     void execute(SDL_GPUCopyPass *copypass) const;
   };
 
@@ -713,6 +719,8 @@ void AppState::GPUCommandSequencer::initiate() {
 }
 
 void AppState::GPUCommandSequencer::issue_copy_pass() {
+  if (app->copypass_tasks.empty())
+    return;
   UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
   for (const std::unique_ptr<CopypassTask> &task : app->copypass_tasks)
     task->execute(copypass.get());
@@ -744,7 +752,7 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
   render_sequencer.verify_storage_textures();
   render_sequencer.draw_scene(app->offscreen_texture.get(),
                               app->caption_sequencer.offscreen_pipeline.get());
-  // render_sequencer.blend_selected_areas();
+  render_sequencer.blend_selected_areas();
 }
 
 void AppState::GPURenderSequencer::draw_scene(
@@ -776,25 +784,21 @@ void AppState::GPURenderSequencer::draw_scene(
   samplerBinding.sampler = app->caption_sequencer.sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
-  struct RectUniforms {
+  struct RectUniform {
     float viewport[2];
     float translate[2];
   };
-  RectUniforms uniforms{};
+  RectUniform uniforms{};
   uniforms.viewport[0] = static_cast<float>(swapchain_w);
   uniforms.viewport[1] = static_cast<float>(swapchain_h);
   uniforms.translate[0] = static_cast<float>(app->caption_x);
   uniforms.translate[1] = static_cast<float>(app->caption_y);
-  SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(RectUniforms));
-  struct BlitUniforms {
+  SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(RectUniform));
+  struct BlitUniform {
     float tint[4];
   };
-  BlitUniforms blit{};
-  blit.tint[0] = 1.0f;
-  blit.tint[1] = 1.0f;
-  blit.tint[2] = 1.0f;
-  blit.tint[3] = 1.0f;
-  SDL_PushGPUFragmentUniformData(cmd, 0, &blit, sizeof(BlitUniforms));
+  BlitUniform blit{.tint = {1.0f, 1.0f, 1.0f, 1.0f}};
+  SDL_PushGPUFragmentUniformData(cmd, 0, &blit, sizeof(BlitUniform));
 
   std::uint32_t numInstances =
       hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get());
@@ -832,23 +836,27 @@ void AppState::GPURenderSequencer::verify_storage_textures() {
 
 void AppState::GPURenderSequencer::blend_selected_areas() {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
+
   SDL_GPUStorageTextureReadWriteBinding textureRW{
       .texture = app->processed_texture.get()};
   UniqueGPUComputePass computePass = beginGPUComputePass(cmd, &textureRW);
-  SDL_BindGPUComputePipeline(computePass.get(), app->selection_pipeline.get());
 
+  SDL_BindGPUComputePipeline(computePass.get(), app->selection_pipeline.get());
+  SDL_GPUBuffer *areaBuf = app->selection_buffer.get();
+  SDL_BindGPUComputeStorageBuffers(computePass.get(), 0, &areaBuf, 1);
   SDL_GPUTexture *baseTexture = app->offscreen_texture.get();
   SDL_BindGPUComputeStorageTextures(computePass.get(), 0, &baseTexture, 1);
 
-  struct SelectionArea {
-    std::uint32_t rect[4];
-    float color[4];
+  struct DifferenceBlendUniform {
+    uint length;
   };
-  SelectionArea area{.rect = {200, 100, 300, 300},
-                     .color = {1.0f, 1.0f, 1.0f, 1.0f}};
-  SDL_PushGPUComputeUniformData(cmd, 0, &area, sizeof(area));
-  SDL_DispatchGPUCompute(computePass.get(), (area.rect[2] + 7) / 8,
-                         (area.rect[3] + 7) / 8, 1);
+  DifferenceBlendUniform diffUni{.length = 1};
+  SDL_PushGPUComputeUniformData(cmd, 0, &diffUni,
+                                sizeof(DifferenceBlendUniform));
+
+  std::uint32_t ceiledX{(swapchain_w + 7) / 8};
+  std::uint32_t ceiledY{(swapchain_h + 7) / 8};
+  SDL_DispatchGPUCompute(computePass.get(), ceiledX, ceiledY, 1);
 }
 
 SDL_AppResult AppState::iterate() noexcept {
@@ -1023,8 +1031,10 @@ void AppState::GlyphSequencer::pack_atlas() {
   }
 }
 
-void AppState::GlyphSequencer::verify_instance_capacity(
-    std::uint32_t bufferSize) {
+void AppState::GlyphSequencer::verify_instance_capacity() {
+  std::uint32_t bufferSize =
+      static_cast<std::uint32_t>(hb_buffer_get_length(harfbuzz_buffer.get()) *
+                                 sizeof(GlyphVertexInstance));
   if (instance_capacity >= bufferSize)
     return;
   instance_capacity =
@@ -1098,10 +1108,7 @@ void AppState::GlyphSequencer::transfer_vertex_instances() {
 }
 
 void AppState::GlyphSequencer::queue_vertex_copypass() {
-  std::uint32_t bufferSize =
-      static_cast<std::uint32_t>(hb_buffer_get_length(harfbuzz_buffer.get()) *
-                                 sizeof(GlyphVertexInstance));
-  verify_instance_capacity(bufferSize);
+  verify_instance_capacity();
   transfer_vertex_instances();
   std::unique_ptr instanceCopypass =
       std::make_unique<GlyphVertexCopypassTask>();
@@ -1193,14 +1200,28 @@ void AppState::caption_calculate() {
   caption_sequencer.queue_vertex_copypass();
 }
 
-void AppState::selection_calculate() {
-  selection_areas = {{200, 100, 300, 300}};
+void AppState::SelectionCopypassTask::execute(SDL_GPUCopyPass *copypass) const {
+  SDL_GPUTransferBufferLocation source{
+      .transfer_buffer = app->selection_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      selection_areas.size() * sizeof(DifferenceBlendArea))};
-  verify_selection_capacity(bufferSize);
+      app->selection_areas.size() * sizeof(DifferenceBlendArea))};
+  SDL_GPUBufferRegion destination{
+      .buffer = app->selection_buffer.get(), .offset = 0, .size = bufferSize};
+  SDL_UploadToGPUBuffer(copypass, &source, &destination, false);
 }
 
-void AppState::verify_selection_capacity(std::uint32_t bufferSize) {
+void AppState::selection_calculate() {
+  selection_areas = {{200, 100, 300, 300}};
+  verify_selection_capacity();
+  transfer_selection_areas();
+  std::unique_ptr selectionCopypass = std::make_unique<SelectionCopypassTask>();
+  selectionCopypass->app = this;
+  copypass_tasks.push_back(std::move(selectionCopypass));
+}
+
+void AppState::verify_selection_capacity() {
+  std::uint32_t bufferSize{static_cast<std::uint32_t>(
+      selection_areas.size() * sizeof(DifferenceBlendArea))};
   if (bufferSize <= selection_capacity)
     return;
   selection_capacity =
@@ -1211,6 +1232,18 @@ void AppState::verify_selection_capacity(std::uint32_t bufferSize) {
   selection_buffer = createGPUBuffer(device_ctx.get(), &bufferInfo);
   selection_transfer =
       createGPUTransferBuffer(device_ctx.get(), selection_capacity);
+}
+
+void AppState::transfer_selection_areas() {
+  UniqueGPUMappedBuffer mappedBuffer =
+      mapGPUTransferBuffer(device_ctx.get(), selection_transfer.get(), true);
+  for (auto [idx, rect] : selection_areas | std::views::enumerate) {
+    DifferenceBlendArea area{.rect = {std::get<0>(rect), std::get<1>(rect),
+                                      std::get<2>(rect), std::get<3>(rect)},
+                             .color = {1.0f, 1.0f, 1.0f, 1.0f}};
+    std::memcpy(static_cast<DifferenceBlendArea *>(mappedBuffer.get()) + idx,
+                &area, sizeof(DifferenceBlendArea));
+  }
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
