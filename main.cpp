@@ -25,10 +25,15 @@
 #include <harfbuzz/hb.h>
 #include <vulkan/vulkan.h>
 
-struct GlyphInstanceData {
+struct GlyphVertexInstance {
   float rect_pos[2];
   float rect_size[2];
   float uv_rect[4];
+};
+
+struct DifferenceBlendArea {
+  std::uint32_t rect[4];
+  float color[4];
 };
 
 static FT_Library globalFTLibrary = nullptr;
@@ -335,16 +340,14 @@ void GPUBufferDeleter::operator()(SDL_GPUBuffer *buffer) const {
   SDL_ReleaseGPUBuffer(device_ctx, buffer);
 }
 
-UniqueGPUBuffer createGPUVertexBuffer(SDL_GPUDevice *device,
-                                      std::uint32_t bufferSize) {
-  SDL_GPUBufferCreateInfo buf_info = {.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
-                                      .size = bufferSize};
-  SDL_GPUBuffer *instance_buffer = SDL_CreateGPUBuffer(device, &buf_info);
-  if (not instance_buffer) {
+UniqueGPUBuffer createGPUBuffer(SDL_GPUDevice *device,
+                                const SDL_GPUBufferCreateInfo *createInfo) {
+  SDL_GPUBuffer *buffer = SDL_CreateGPUBuffer(device, createInfo);
+  if (not buffer) {
     std::string errorMsg{"SDL_CreateGPUBuffer failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
-  return UniqueGPUBuffer{instance_buffer, GPUBufferDeleter{device}};
+  return UniqueGPUBuffer{buffer, GPUBufferDeleter{device}};
 }
 
 struct GPUGraphicsPipelineDeleter {
@@ -409,19 +412,21 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
   std::get<0>(vertexAttributes).location = 0;
   std::get<0>(vertexAttributes).buffer_slot = 0;
   std::get<0>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<0>(vertexAttributes).offset = offsetof(GlyphInstanceData, rect_pos);
+  std::get<0>(vertexAttributes).offset =
+      offsetof(GlyphVertexInstance, rect_pos);
   std::get<1>(vertexAttributes).location = 1;
   std::get<1>(vertexAttributes).buffer_slot = 0;
   std::get<1>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<1>(vertexAttributes).offset = offsetof(GlyphInstanceData, rect_size);
+  std::get<1>(vertexAttributes).offset =
+      offsetof(GlyphVertexInstance, rect_size);
   std::get<2>(vertexAttributes).location = 2;
   std::get<2>(vertexAttributes).buffer_slot = 0;
   std::get<2>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-  std::get<2>(vertexAttributes).offset = offsetof(GlyphInstanceData, uv_rect);
+  std::get<2>(vertexAttributes).offset = offsetof(GlyphVertexInstance, uv_rect);
 
   SDL_GPUVertexBufferDescription vertexBufferDescriptions{};
   vertexBufferDescriptions.slot = 0;
-  vertexBufferDescriptions.pitch = sizeof(GlyphInstanceData);
+  vertexBufferDescriptions.pitch = sizeof(GlyphVertexInstance);
   vertexBufferDescriptions.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
   vertexBufferDescriptions.instance_step_rate = 0;
 
@@ -573,7 +578,7 @@ private:
     EngagedGPUCommandBuffer command_buffer;
 
     void initiate();
-    void copy_instance_data();
+    void blit_transfer_data();
     void issue_copy_pass();
     void issue_render_pass();
   };
@@ -586,7 +591,7 @@ private:
     SDL_GPUTexture *swapchain_texture;
 
     void draw_scene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
-    void verify_postprocessing();
+    void verify_storage_textures();
     void blend_selected_areas();
   };
 
@@ -608,7 +613,6 @@ private:
     static constexpr std::uint32_t ATLAS_PADDING = 1;
     UniqueGPUTransferBuffer atlas_transfer;
     UniqueGPUTexture atlas_texture;
-    bool is_atlas_dirty = false;
     int measured_width = 0, measured_height = 0;
 
     UniqueGPUBuffer instance_buffer;
@@ -621,12 +625,11 @@ private:
 
     void instantiate(SDL_Window *window);
     void glyphs_shape(std::string_view textView);
-    void glyphs_fill_cache();
+    void verify_glyph_cache();
     void pack_atlas();
     void measure_text();
 
-    void issue_copy_pass(SDL_GPUCopyPass *copyPass);
-    std::vector<GlyphInstanceData> make_instance_data();
+    std::vector<GlyphVertexInstance> make_instance_data();
   };
 
   UniqueHarfbuzzFont harfbuzz_font;
@@ -644,7 +647,29 @@ private:
   UniqueGPUTexture offscreen_texture;
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
+
   UniqueGPUComputePipeline selection_pipeline;
+  UniqueGPUBuffer selection_buffer;
+  UniqueGPUTransferBuffer selection_transfer;
+  std::uint32_t selection_capacity = 0;
+  std::vector<std::array<std::uint32_t, 4>> selection_areas;
+
+  struct CopypassTask {
+    CopypassTask(const CopypassTask &) = delete;
+    CopypassTask &operator=(const CopypassTask &) = delete;
+    CopypassTask(CopypassTask &&) = delete;
+    CopypassTask &operator=(CopypassTask &&) = delete;
+
+    CopypassTask() = default;
+    virtual ~CopypassTask() = default;
+    virtual void execute(SDL_GPUCopyPass *copypass) const = 0;
+  };
+  std::vector<std::unique_ptr<CopypassTask>> copypass_tasks;
+
+  struct GlyphCopypassTask : CopypassTask {
+    GlyphSequencer *sequencer;
+    void execute(SDL_GPUCopyPass *copypass) const;
+  };
 
 public:
   AppState(FT_Library library);
@@ -665,47 +690,64 @@ AppState::AppState(FT_Library library) {
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
-  selection_pipeline = createDifferenceBlendGPUPipeline(device_ctx.get());
+  // selection_pipeline = createDifferenceBlendGPUPipeline(device_ctx.get());
   caption_sequencer.instantiate(main_window.get());
 }
 
 void AppState::GPUCommandSequencer::initiate() {
   command_buffer = acquireGPUCommandBuffer(app->device_ctx.get());
-  std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get()) *
-      sizeof(GlyphInstanceData))};
-  GlyphSequencer &caption = app->caption_sequencer;
-  if (bufferSize > caption.instance_capacity) {
+
+  if (std::uint32_t bufferSize{static_cast<std::uint32_t>(
+          hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get()) *
+          sizeof(GlyphVertexInstance))};
+      bufferSize > app->caption_sequencer.instance_capacity) {
+    GlyphSequencer &caption = app->caption_sequencer;
     caption.instance_capacity = std::max(1u << std::bit_width(bufferSize),
                                          caption.instance_capacity * 2u);
+    SDL_GPUBufferCreateInfo bufferInfo{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+                                       .size = caption.instance_capacity};
     caption.instance_buffer =
-        createGPUVertexBuffer(app->device_ctx.get(), caption.instance_capacity);
+        createGPUBuffer(app->device_ctx.get(), &bufferInfo);
     caption.instance_transfer = createGPUTransferBuffer(
         app->device_ctx.get(), caption.instance_capacity);
   }
+
+  if (std::uint32_t bufferSize{static_cast<std::uint32_t>(
+          app->selection_areas.size() * sizeof(DifferenceBlendArea))};
+      bufferSize > app->selection_capacity) {
+    app->selection_capacity = std::max(1u << std::bit_width(bufferSize),
+                                       app->selection_capacity * 2u);
+    SDL_GPUBufferCreateInfo bufferInfo{
+        .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
+        .size = app->selection_capacity};
+    app->selection_buffer = createGPUBuffer(app->device_ctx.get(), &bufferInfo);
+    app->selection_transfer =
+        createGPUTransferBuffer(app->device_ctx.get(), app->selection_capacity);
+  }
 }
 
-void AppState::GPUCommandSequencer::copy_instance_data() {
+void AppState::GPUCommandSequencer::blit_transfer_data() {
   GlyphSequencer &caption = app->caption_sequencer;
   UniqueGPUMappedBuffer mappedBuffer{mapGPUTransferBuffer(
       app->device_ctx.get(), caption.instance_transfer.get(), true)};
   std::vector instanceData = caption.make_instance_data();
-  std::size_t bufferSize = instanceData.size() * sizeof(GlyphInstanceData);
+  std::size_t bufferSize = instanceData.size() * sizeof(GlyphVertexInstance);
   std::memcpy(mappedBuffer.get(), instanceData.data(), bufferSize);
 }
 
 void AppState::GPUCommandSequencer::issue_copy_pass() {
-  UniqueGPUCopyPass copyPass{SDL_BeginGPUCopyPass(command_buffer.get())};
+  UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
+  for (const std::unique_ptr<CopypassTask> &copypassTask : app->copypass_tasks)
+    copypassTask->execute(copypass.get());
   GlyphSequencer &caption = app->caption_sequencer;
-  caption.issue_copy_pass(copyPass.get());
   SDL_GPUTransferBufferLocation src{
       .transfer_buffer = caption.instance_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
       hb_buffer_get_length(caption.harfbuzz_buffer.get()) *
-      sizeof(GlyphInstanceData))};
+      sizeof(GlyphVertexInstance))};
   SDL_GPUBufferRegion dst{
       .buffer = caption.instance_buffer.get(), .offset = 0, .size = bufferSize};
-  SDL_UploadToGPUBuffer(copyPass.get(), &src, &dst, true);
+  SDL_UploadToGPUBuffer(copypass.get(), &src, &dst, true);
 }
 
 void AppState::GPUCommandSequencer::issue_render_pass() {
@@ -717,10 +759,10 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
     return;
   render_sequencer.draw_scene(render_sequencer.swapchain_texture,
                               app->caption_sequencer.swapchain_pipeline.get());
-  render_sequencer.verify_postprocessing();
+  render_sequencer.verify_storage_textures();
   render_sequencer.draw_scene(app->offscreen_texture.get(),
                               app->caption_sequencer.offscreen_pipeline.get());
-  render_sequencer.blend_selected_areas();
+  // render_sequencer.blend_selected_areas();
 }
 
 void AppState::GPURenderSequencer::draw_scene(
@@ -774,7 +816,7 @@ void AppState::GPURenderSequencer::draw_scene(
   SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
 }
 
-void AppState::GPURenderSequencer::verify_postprocessing() {
+void AppState::GPURenderSequencer::verify_storage_textures() {
   bool isFineW = app->offscreen_w >= swapchain_w;
   bool isFineH = app->offscreen_h >= swapchain_h;
   if (isFineW && isFineH)
@@ -828,7 +870,7 @@ SDL_AppResult AppState::iterate() noexcept {
   try {
     GPUCommandSequencer command_sequencer{this};
     command_sequencer.initiate();
-    command_sequencer.copy_instance_data();
+    command_sequencer.blit_transfer_data();
     command_sequencer.issue_copy_pass();
     command_sequencer.issue_render_pass();
     return SDL_APP_CONTINUE;
@@ -880,10 +922,11 @@ void AppState::GlyphSequencer::glyphs_shape(std::string_view textView) {
   hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
 }
 
-void AppState::GlyphSequencer::glyphs_fill_cache() {
-  std::span<hb_glyph_info_t> glyphInfos(
+void AppState::GlyphSequencer::verify_glyph_cache() {
+  std::span<hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
-      hb_buffer_get_length(harfbuzz_buffer.get()));
+      hb_buffer_get_length(harfbuzz_buffer.get())};
+  bool everInserted{};
   for (const hb_glyph_info_t &info : glyphInfos) {
     if (glyph_cache.contains(info.codepoint))
       continue;
@@ -893,7 +936,13 @@ void AppState::GlyphSequencer::glyphs_fill_cache() {
       continue;
     glyph_cache[info.codepoint] =
         GlyphCacheItem{std::move(glyph), std::make_unique<GlyphAtlasInfo>()};
-    is_atlas_dirty = true;
+    everInserted = true;
+  }
+  if (everInserted) {
+    pack_atlas();
+    std::unique_ptr glyph_copypass = std::make_unique<GlyphCopypassTask>();
+    glyph_copypass->sequencer = this;
+    app->copypass_tasks.push_back(std::move(glyph_copypass));
   }
 }
 
@@ -990,12 +1039,13 @@ void AppState::GlyphSequencer::pack_atlas() {
   }
 }
 
-std::vector<GlyphInstanceData> AppState::GlyphSequencer::make_instance_data() {
+std::vector<GlyphVertexInstance>
+AppState::GlyphSequencer::make_instance_data() {
   hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
-  std::vector<GlyphInstanceData> instanceData{};
+  std::vector<GlyphVertexInstance> instanceData{};
   struct GlyphCarry {
     unsigned int glyph_index;
     hb_position_t pen_x;
@@ -1009,7 +1059,7 @@ std::vector<GlyphInstanceData> AppState::GlyphSequencer::make_instance_data() {
       continue;
     FT_BitmapGlyph bitmapGlyph =
         asBitmapGlyph(cacheIt->second.freetype_glyph.get());
-    GlyphInstanceData &instanceDatum = instanceData.emplace_back();
+    GlyphVertexInstance &instanceDatum = instanceData.emplace_back();
     instanceDatum.rect_pos[0] =
         static_cast<float>(app->caption_x) +
         static_cast<float>(c.pen_x + positions[c.glyph_index].x_offset +
@@ -1081,17 +1131,17 @@ void AppState::GlyphSequencer::measure_text() {
       std::ceil(static_cast<float>(maxY - minY) / 64.0f));
 }
 
-void AppState::GlyphSequencer::issue_copy_pass(SDL_GPUCopyPass *copyPass) {
-  if (not is_atlas_dirty)
-    return;
-  is_atlas_dirty = false;
-  SDL_GPUTextureTransferInfo src{.transfer_buffer = atlas_transfer.get(),
-                                 .offset = 0,
-                                 .pixels_per_row = ATLAS_SIDE,
-                                 .rows_per_layer = ATLAS_SIDE};
-  SDL_GPUTextureRegion dst{
-      .texture = atlas_texture.get(), .w = ATLAS_SIDE, .h = ATLAS_SIDE, .d = 1};
-  SDL_UploadToGPUTexture(copyPass, &src, &dst, false);
+void AppState::GlyphCopypassTask::execute(SDL_GPUCopyPass *copypass) const {
+  SDL_GPUTextureTransferInfo source{
+      .transfer_buffer = sequencer->atlas_transfer.get(),
+      .offset = 0,
+      .pixels_per_row = GlyphSequencer::ATLAS_SIDE,
+      .rows_per_layer = GlyphSequencer::ATLAS_SIDE};
+  SDL_GPUTextureRegion destination{.texture = sequencer->atlas_texture.get(),
+                                   .w = GlyphSequencer::ATLAS_SIDE,
+                                   .h = GlyphSequencer::ATLAS_SIDE,
+                                   .d = 1};
+  SDL_UploadToGPUTexture(copypass, &source, &destination, false);
 }
 
 UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
@@ -1114,9 +1164,7 @@ UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
 
 void AppState::caption_text_combine() {
   caption_sequencer.glyphs_shape(caption_string);
-  caption_sequencer.glyphs_fill_cache();
-  if (caption_sequencer.is_atlas_dirty)
-    caption_sequencer.pack_atlas();
+  caption_sequencer.verify_glyph_cache();
   caption_sequencer.measure_text();
   caption_x = (INITIAL_WINDOW_WIDTH - caption_sequencer.measured_width) / 2;
   caption_y = (INITIAL_WINDOW_HEIGHT - caption_sequencer.measured_height) / 2;
