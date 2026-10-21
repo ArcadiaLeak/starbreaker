@@ -478,9 +478,10 @@ createDifferenceBlendGPUPipeline(SDL_GPUDevice *device) {
   pipelineInfo.code = static_cast<const Uint8 *>(shaderCode.get());
   pipelineInfo.entrypoint = "main";
   pipelineInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  pipelineInfo.num_uniform_buffers = 1;
   pipelineInfo.num_readonly_storage_textures = 1;
+  pipelineInfo.num_readonly_storage_buffers = 1;
   pipelineInfo.num_readwrite_storage_textures = 1;
+  pipelineInfo.num_uniform_buffers = 1;
   pipelineInfo.threadcount_x = 8;
   pipelineInfo.threadcount_y = 8;
   pipelineInfo.threadcount_z = 1;
@@ -700,7 +701,7 @@ AppState::AppState(FT_Library library) {
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
-  // selection_pipeline = createDifferenceBlendGPUPipeline(device_ctx.get());
+  selection_pipeline = createDifferenceBlendGPUPipeline(device_ctx.get());
   caption_sequencer.instantiate(main_window.get());
 }
 
