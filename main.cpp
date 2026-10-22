@@ -232,7 +232,7 @@ void GPUSamplerDeleter::operator()(SDL_GPUSampler *sampler) const {
   SDL_ReleaseGPUSampler(device, sampler);
 }
 
-UniqueGPUSampler createGlyphGPUSampler(SDL_GPUDevice *device) {
+UniqueGPUSampler createCommonGPUSampler(SDL_GPUDevice *device) {
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
   samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -377,7 +377,7 @@ createGPUGraphicsPipeline(SDL_GPUDevice *device,
 UniqueGPUGraphicsPipeline
 createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
                                SDL_GPUTextureFormat targetFormat) {
-  GPUShaderCreateInfo vertexInfo{.filepath = "rectangle.spv",
+  GPUShaderCreateInfo vertexInfo{.filepath = "rect_instance.spv",
                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                  .num_samplers = 0,
                                  .num_uniform_buffers = 1};
@@ -440,6 +440,36 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
   pipelineInfo.vertex_shader = vertexShader.get();
   pipelineInfo.fragment_shader = fragmentShader.get();
   pipelineInfo.vertex_input_state = vertexInputState;
+  pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
+  pipelineInfo.target_info = targetInfo;
+
+  return createGPUGraphicsPipeline(device, &pipelineInfo);
+}
+
+UniqueGPUGraphicsPipeline
+createImageblitGPUGraphicsPipeline(SDL_GPUDevice *device,
+                                   SDL_GPUTextureFormat targetFormat) {
+  GPUShaderCreateInfo vertexInfo{.filepath = "rect_image.spv",
+                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+                                 .num_samplers = 0,
+                                 .num_uniform_buffers = 1};
+  UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
+
+  GPUShaderCreateInfo fragmentInfo{.filepath = "blit.spv",
+                                   .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                   .num_samplers = 1,
+                                   .num_uniform_buffers = 0};
+  UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
+
+  SDL_GPUColorTargetDescription colorTarget{};
+  colorTarget.format = targetFormat;
+  SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
+  targetInfo.color_target_descriptions = &colorTarget;
+  targetInfo.num_color_targets = 1;
+
+  SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
+  pipelineInfo.vertex_shader = vertexShader.get();
+  pipelineInfo.fragment_shader = fragmentShader.get();
   pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
   pipelineInfo.target_info = targetInfo;
 
@@ -593,6 +623,7 @@ private:
     void draw_scene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
     void verify_storage_textures();
     void blend_selected_areas();
+    void draw_processed_image();
   };
 
   struct GlyphSequencer {
@@ -650,6 +681,8 @@ private:
 
   UniqueFreetypeGlyph load_freetype_glyph(hb_codepoint_t codepoint);
 
+  UniqueGPUGraphicsPipeline imageblit_pipeline;
+  UniqueGPUSampler imageblit_sampler;
   UniqueGPUTexture offscreen_texture;
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
@@ -710,6 +743,10 @@ AppState::AppState(FT_Library library) {
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
+  imageblit_pipeline = createImageblitGPUGraphicsPipeline(
+      device_ctx.get(),
+      SDL_GetGPUSwapchainTextureFormat(device_ctx.get(), main_window.get()));
+  imageblit_sampler = createCommonGPUSampler(device_ctx.get());
   selection_pipeline = createDifferenceBlendGPUPipeline(device_ctx.get());
   caption_sequencer.instantiate(main_window.get());
 }
@@ -747,12 +784,52 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
       &render_sequencer.swapchain_w, &render_sequencer.swapchain_h);
   if (not render_sequencer.swapchain_texture)
     return;
-  render_sequencer.draw_scene(render_sequencer.swapchain_texture,
-                              app->caption_sequencer.swapchain_pipeline.get());
-  render_sequencer.verify_storage_textures();
-  render_sequencer.draw_scene(app->offscreen_texture.get(),
-                              app->caption_sequencer.offscreen_pipeline.get());
-  render_sequencer.blend_selected_areas();
+  if (app->selection_areas.empty()) {
+    SDL_GPUGraphicsPipeline *scenePipeline =
+        app->caption_sequencer.swapchain_pipeline.get();
+    render_sequencer.draw_scene(render_sequencer.swapchain_texture,
+                                scenePipeline);
+  } else {
+    render_sequencer.verify_storage_textures();
+    SDL_GPUGraphicsPipeline *scenePipeline =
+        app->caption_sequencer.offscreen_pipeline.get();
+    render_sequencer.draw_scene(app->offscreen_texture.get(), scenePipeline);
+    render_sequencer.blend_selected_areas();
+    render_sequencer.draw_processed_image();
+  }
+}
+
+void AppState::GPURenderSequencer::draw_processed_image() {
+  SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
+  SDL_GPUColorTargetInfo colorTarget{.texture = swapchain_texture,
+                                     .load_op = SDL_GPU_LOADOP_DONT_CARE,
+                                     .store_op = SDL_GPU_STOREOP_STORE};
+  UniqueGPURenderPass renderPass = beginGPURenderPass(cmd, &colorTarget);
+
+  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->imageblit_pipeline.get());
+  SDL_GPUTextureSamplerBinding samplerBinding{};
+  samplerBinding.texture = app->processed_texture.get();
+  samplerBinding.sampler = app->imageblit_sampler.get();
+  SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
+
+  struct alignas(16) RectUniform {
+    float uv_rect[4];
+    float rect_size[2];
+    float rect_pos[2];
+    float viewport[2];
+  };
+  RectUniform rectUni{};
+  rectUni.uv_rect[2] = 1.0f;
+  rectUni.uv_rect[3] = 1.0f;
+  rectUni.rect_size[0] = static_cast<float>(app->offscreen_w);
+  rectUni.rect_size[1] = static_cast<float>(app->offscreen_h);
+  rectUni.rect_pos[1] = -1.0f * static_cast<float>(app->offscreen_h) +
+                        static_cast<float>(swapchain_h);
+  rectUni.viewport[0] = static_cast<float>(swapchain_w);
+  rectUni.viewport[1] = static_cast<float>(swapchain_h);
+  SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
+
+  SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
 }
 
 void AppState::GPURenderSequencer::draw_scene(
@@ -784,16 +861,16 @@ void AppState::GPURenderSequencer::draw_scene(
   samplerBinding.sampler = app->caption_sequencer.sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
-  struct RectUniform {
+  struct alignas(16) RectUniform {
     float viewport[2];
     float translate[2];
   };
-  RectUniform uniforms{};
-  uniforms.viewport[0] = static_cast<float>(swapchain_w);
-  uniforms.viewport[1] = static_cast<float>(swapchain_h);
-  uniforms.translate[0] = static_cast<float>(app->caption_x);
-  uniforms.translate[1] = static_cast<float>(app->caption_y);
-  SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(RectUniform));
+  RectUniform rectUni{};
+  rectUni.viewport[0] = static_cast<float>(swapchain_w);
+  rectUni.viewport[1] = static_cast<float>(swapchain_h);
+  rectUni.translate[0] = static_cast<float>(app->caption_x);
+  rectUni.translate[1] = static_cast<float>(app->caption_y);
+  SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
   struct BlitUniform {
     float tint[4];
   };
@@ -897,7 +974,7 @@ void AppState::GlyphSequencer::instantiate(SDL_Window *window) {
       createGPUTransferBuffer(app->device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
   harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
 
-  sampler = createGlyphGPUSampler(app->device_ctx.get());
+  sampler = createCommonGPUSampler(app->device_ctx.get());
   swapchain_pipeline = createGlyphGPUGraphicsPipeline(
       app->device_ctx.get(),
       SDL_GetGPUSwapchainTextureFormat(app->device_ctx.get(), window));
@@ -1014,8 +1091,7 @@ void AppState::GlyphSequencer::pack_atlas() {
                        const GlyphCacheItem &cacheItem) -> void {
     const FT_Bitmap &bitmap =
         asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
-    unsigned char *source = bitmap.buffer + bitmap.rows * bitmap.pitch -
-                            row * bitmap.pitch - bitmap.pitch;
+    unsigned char *source = bitmap.buffer + row * bitmap.pitch;
     std::uint32_t atlasVertOffset = cacheItem.atlas->y + row;
     std::uint32_t atlasFullOffset =
         atlasVertOffset * ATLAS_SIDE + cacheItem.atlas->x;

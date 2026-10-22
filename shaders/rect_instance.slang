@@ -1,0 +1,32 @@
+struct VSOutput {
+    float4 position : SV_Position;
+    float2 uv       : TEXCOORD0;
+};
+
+struct RectUniform {
+    float2 viewport;
+    float2 translate;
+};
+
+[[vk::binding(0, 1)]]
+ConstantBuffer<RectUniform> rectUni;
+
+struct InstanceIn {
+    [[vk::location(0)]] float2 rect_pos  : TEXCOORD0;
+    [[vk::location(1)]] float2 rect_size : TEXCOORD1;
+    [[vk::location(2)]] float4 uv_rect   : TEXCOORD2;
+};
+
+[shader("vertex")]
+VSOutput main(uint vertexID : SV_VulkanVertexID, InstanceIn inst) {
+    uint i = vertexID & 3u;
+    float2 corner = float2(float(i & 1u), float(i >> 1u));
+    float2 pixelCoords =
+        rectUni.translate + inst.rect_pos + corner * inst.rect_size;
+    float2 deviceCoords = pixelCoords * (2.0 / rectUni.viewport) - 1.0;
+
+    VSOutput o;
+    o.position = float4(deviceCoords, 0.0, 1.0);
+    o.uv = lerp(inst.uv_rect.xw, inst.uv_rect.zy, corner);
+    return o;
+}
