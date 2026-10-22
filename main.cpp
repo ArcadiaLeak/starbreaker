@@ -640,6 +640,13 @@ private:
     using GlyphCache = std::map<hb_codepoint_t, GlyphCacheItem>;
     GlyphCache glyph_cache;
 
+    struct AtlasCopier {
+      UniqueGPUMappedBuffer mapped_atlas;
+      const GlyphAtlasInfo *atlas_info;
+      const FT_Bitmap *bitmap;
+      void copy_bitmap(const GlyphCacheItem &cacheItem);
+      void copy_bitmap_row(std::uint32_t row);
+    };
     static constexpr std::uint32_t ATLAS_SIDE = 1024;
     static constexpr std::uint32_t ATLAS_PADDING = 1;
     UniqueGPUTransferBuffer atlas_transfer;
@@ -1083,28 +1090,29 @@ void AppState::GlyphSequencer::pack_atlas() {
         entryView.atlas->y = shelfView.accumulated_y;
         entryView.atlas->x = entryView.accumulated_x;
       }
-  UniqueGPUMappedBuffer atlasTransfer{
-      mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true)};
-  std::memset(atlasTransfer.get(), 0, ATLAS_SIDE * ATLAS_SIDE);
-  auto copyBitmapRow =
-      [&atlasTransfer](std::uint32_t row,
-                       const GlyphCacheItem &cacheItem) -> void {
-    const FT_Bitmap &bitmap =
-        asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
-    unsigned char *source = bitmap.buffer + row * bitmap.pitch;
-    std::uint32_t atlasVertOffset = cacheItem.atlas->y + row;
-    std::uint32_t atlasFullOffset =
-        atlasVertOffset * ATLAS_SIDE + cacheItem.atlas->x;
-    unsigned char *transferStart =
-        static_cast<unsigned char *>(atlasTransfer.get());
-    std::memcpy(transferStart + atlasFullOffset, source, bitmap.width);
-  };
-  for (const auto &[codepoint, cacheItem] : glyph_cache) {
-    const FT_Bitmap &bitmap =
-        asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
-    for (std::uint32_t row = 0; row < bitmap.rows; ++row)
-      copyBitmapRow(row, cacheItem);
-  }
+  AtlasCopier atlasCopier{};
+  atlasCopier.mapped_atlas =
+      mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true);
+  std::memset(atlasCopier.mapped_atlas.get(), 0, ATLAS_SIDE * ATLAS_SIDE);
+  for (const auto &[codepoint, cacheItem] : glyph_cache)
+    atlasCopier.copy_bitmap(cacheItem);
+}
+
+void AppState::GlyphSequencer::AtlasCopier::copy_bitmap(
+    const GlyphCacheItem &cacheItem) {
+  atlas_info = cacheItem.atlas.get();
+  bitmap = &asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
+  for (std::uint32_t row = 0; row < bitmap->rows; ++row)
+    copy_bitmap_row(row);
+}
+
+void AppState::GlyphSequencer::AtlasCopier::copy_bitmap_row(std::uint32_t row) {
+  unsigned char *source = bitmap->buffer + row * bitmap->pitch;
+  std::uint32_t atlasVertOffset = atlas_info->y + row;
+  std::uint32_t atlasFullOffset = atlasVertOffset * ATLAS_SIDE + atlas_info->x;
+  unsigned char *transferStart =
+      static_cast<unsigned char *>(mapped_atlas.get());
+  std::memcpy(transferStart + atlasFullOffset, source, bitmap->width);
 }
 
 void AppState::GlyphSequencer::verify_instance_capacity() {
