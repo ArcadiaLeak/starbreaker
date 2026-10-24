@@ -23,6 +23,7 @@
 #include <freetype/ftglyph.h>
 #include <harfbuzz/hb-ft.h>
 #include <harfbuzz/hb.h>
+#include <unicode/utext.h>
 #include <vulkan/vulkan.h>
 
 struct GlyphVertexInstance {
@@ -602,6 +603,39 @@ UniqueGPUComputePass beginGPUComputePass(
   return UniqueGPUComputePass{computePass};
 }
 
+struct UTextDeleter {
+  void operator()(UText *utextPtr) const { utext_close(utextPtr); }
+};
+using UniqueUText = std::unique_ptr<UText, UTextDeleter>;
+
+UniqueUText utextOpenUTF8(std::string_view strView) {
+  UErrorCode status{U_ZERO_ERROR};
+  UText *utextPtr =
+      utext_openUTF8(nullptr, strView.data(),
+                     static_cast<std::int64_t>(strView.size()), &status);
+  if (U_FAILURE(status))
+    throw std::runtime_error{std::string{"utext_openUTF8 failed: "} +
+                             u_errorName(status)};
+  return UniqueUText{utextPtr};
+}
+
+struct CodepointInfo {
+  std::uint32_t byte_offset;
+  UChar32 codepoint;
+};
+std::generator<CodepointInfo> emitCodepointInfo(std::string_view strView) {
+  UniqueUText utextCtx = utextOpenUTF8(strView);
+  while (true) {
+    std::int64_t nativeOffset = utext_getNativeIndex(utextCtx.get());
+    CodepointInfo codepointInfo{};
+    codepointInfo.byte_offset = static_cast<std::uint32_t>(nativeOffset);
+    codepointInfo.codepoint = utext_next32(utextCtx.get());
+    if (codepointInfo.codepoint == U_SENTINEL)
+      break;
+    co_yield codepointInfo;
+  }
+}
+
 class AppState {
 private:
   struct GPUCommandSequencer {
@@ -659,7 +693,7 @@ private:
 
     std::optional<GlyphVertexInstance>
     create_vertex_instance(unsigned int glyphIndex, hb_position_t penX);
-    std::generator<GlyphVertexInstance> generate_vertex_instances();
+    std::generator<GlyphVertexInstance> emit_vertex_instances();
 
     void verify_instance_capacity();
     void transfer_vertex_instances();
@@ -682,7 +716,7 @@ private:
   UniqueWindow main_window;
   UniqueWindowForGPUDevice main_window_for_gpu_device;
 
-  std::string caption_string = "Hello world kerning Text";
+  std::string caption_string = "Hello figure kerning Text";
   int caption_x = 0, caption_y = 0;
   GlyphSequencer caption_sequencer{this};
 
@@ -1168,7 +1202,7 @@ AppState::GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
 }
 
 std::generator<GlyphVertexInstance>
-AppState::GlyphSequencer::generate_vertex_instances() {
+AppState::GlyphSequencer::emit_vertex_instances() {
   unsigned int glyphIndex{}, bufferLength{};
   hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), &bufferLength);
@@ -1186,7 +1220,7 @@ AppState::GlyphSequencer::generate_vertex_instances() {
 void AppState::GlyphSequencer::transfer_vertex_instances() {
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true);
-  for (auto [idx, data] : generate_vertex_instances() | std::views::enumerate)
+  for (auto [idx, data] : emit_vertex_instances() | std::views::enumerate)
     std::memcpy(static_cast<GlyphVertexInstance *>(mappedBuffer.get()) + idx,
                 &data, sizeof(GlyphVertexInstance));
 }
@@ -1205,9 +1239,9 @@ void AppState::GlyphSequencer::measure_text() {
                 maxX = std::numeric_limits<hb_position_t>::min();
   hb_position_t minY = std::numeric_limits<hb_position_t>::max(),
                 maxY = std::numeric_limits<hb_position_t>::min();
-  hb_glyph_info_t *infos =
+  const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
-  hb_glyph_position_t *positions =
+  const hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
 
   struct GlyphCarry {
@@ -1218,7 +1252,7 @@ void AppState::GlyphSequencer::measure_text() {
        c.glyph_index < hb_buffer_get_length(harfbuzz_buffer.get());
        c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
     GlyphCache::iterator cacheIt =
-        glyph_cache.find(infos[c.glyph_index].codepoint);
+        glyph_cache.find(glyphInfos[c.glyph_index].codepoint);
     if (cacheIt == glyph_cache.end())
       continue;
 
@@ -1241,6 +1275,66 @@ void AppState::GlyphSequencer::measure_text() {
       std::ceil(static_cast<float>(maxX - minX) / 64.0f));
   measured_height = static_cast<std::int32_t>(
       std::ceil(static_cast<float>(maxY - minY) / 64.0f));
+
+  struct BufferInfo {
+    std::uint32_t cluster;
+    const hb_glyph_position_t *position;
+  };
+  std::vector<BufferInfo> bufferInfos{};
+  for (unsigned int i{}; i < hb_buffer_get_length(harfbuzz_buffer.get()); ++i)
+    bufferInfos.emplace_back(glyphInfos[i].cluster, positions + i);
+
+  std::vector<std::span<BufferInfo>> clusterSpans{};
+  auto clusterPredicate = [](const BufferInfo &infoA, const BufferInfo &infoB) {
+    return infoA.cluster == infoB.cluster;
+  };
+  for (const auto &clusterChunk :
+       bufferInfos | std::views::chunk_by(clusterPredicate))
+    clusterSpans.emplace_back(clusterChunk);
+
+  std::vector<CodepointInfo> codepointInfos{
+      std::from_range, emitCodepointInfo(app->caption_string)};
+
+  struct ClusterElement {
+    const hb_glyph_position_t *position;
+    std::optional<CodepointInfo> codepoint_info;
+    std::uint32_t cluster;
+  };
+  std::vector<ClusterElement> clusterElements{};
+  for (const auto &[spanA, spanB] : clusterSpans | std::views::pairwise) {
+    auto codepointA = std::ranges::lower_bound(
+        codepointInfos, spanA.front().cluster, std::ranges::less{},
+        &CodepointInfo::byte_offset);
+    auto codepointB = std::ranges::lower_bound(
+        codepointInfos, spanB.front().cluster, std::ranges::less{},
+        &CodepointInfo::byte_offset);
+    std::ranges::subrange codepointsA{codepointA, codepointB};
+    auto codepointProject = [](const CodepointInfo &codepointInfo) {
+      return std::make_optional(codepointInfo);
+    };
+    std::ranges::concat_view codepointOptionals{
+        codepointsA | std::views::transform(codepointProject),
+        std::ranges::repeat_view{std::nullopt}};
+    auto clusterProject = [](const BufferInfo &bufferInfo) {
+      return bufferInfo.position;
+    };
+    std::ranges::concat_view clusterPositions{
+        spanA | std::views::transform(clusterProject),
+        std::ranges::repeat_view{nullptr}};
+    std::size_t elementCount = std::max(spanA.size(), codepointsA.size());
+    std::ranges::zip_view elementTuples{
+        clusterPositions, codepointOptionals,
+        std::ranges::repeat_view{spanA.front().cluster}};
+    auto elementProject = [](const auto &elementTuple) {
+      return std::make_from_tuple<ClusterElement>(elementTuple);
+    };
+    clusterElements.append_range(elementTuples |
+                                 std::views::transform(elementProject) |
+                                 std::views::take(elementCount));
+  }
+
+  for (const ClusterElement &clusterElement : clusterElements) {
+  }
 }
 
 void AppState::GlyphAtlasCopypassTask::execute(
