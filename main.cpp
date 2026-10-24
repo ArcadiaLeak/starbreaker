@@ -739,7 +739,8 @@ private:
   UniqueGPUBuffer selection_buffer;
   UniqueGPUTransferBuffer selection_transfer;
   std::uint32_t selection_capacity = 0;
-  std::vector<std::array<std::uint32_t, 4>> selection_areas;
+  std::vector<std::array<std::uint32_t, 4>> selection_areas{
+      {200, 100, 300, 300}};
 
   void verify_selection_capacity();
   void transfer_selection_areas();
@@ -777,8 +778,8 @@ public:
   SDL_AppResult iterate() noexcept;
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
 
-  void caption_calculate();
-  void selection_calculate();
+  void caption_reflow();
+  void selection_reflow();
 };
 
 AppState::AppState(FT_Library library) {
@@ -1000,16 +1001,33 @@ SDL_AppResult AppState::iterate() noexcept {
 SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
   if (event->type == SDL_EVENT_QUIT)
     return SDL_APP_SUCCESS;
-  else if (event->type == SDL_EVENT_MOUSE_BUTTON_UP ||
-           event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+
+  if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+    SDL_Point clickPoint{};
+    clickPoint.x = static_cast<int>(event->button.x);
+    clickPoint.y = static_cast<int>(event->button.y);
+    SDL_Rect captionRect{caption_x, caption_y, caption_sequencer.measured_width,
+                         caption_sequencer.measured_height};
+    bool captionHit = SDL_PointInRect(&clickPoint, &captionRect);
+    if (not captionHit)
+      selection_areas.clear();
+    SDL_Log("x: %f, y: %f, hit: %d", event->button.x, event->button.y,
+            captionHit);
+    return SDL_APP_CONTINUE;
+  }
+
+  if (event->type == SDL_EVENT_MOUSE_BUTTON_UP) {
     SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
     return SDL_APP_CONTINUE;
-  } else if (event->type == SDL_EVENT_WINDOW_RESIZED) {
+  }
+
+  if (event->type == SDL_EVENT_WINDOW_RESIZED) {
     caption_x = (event->window.data1 - caption_sequencer.measured_width) / 2;
     caption_y = (event->window.data2 - caption_sequencer.measured_height) / 2;
     return SDL_APP_CONTINUE;
-  } else
-    return SDL_APP_CONTINUE;
+  }
+
+  return SDL_APP_CONTINUE;
 }
 
 void AppState::GlyphSequencer::instantiate(SDL_Window *window) {
@@ -1368,7 +1386,7 @@ UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
   return UniqueFreetypeGlyph{glyph};
 }
 
-void AppState::caption_calculate() {
+void AppState::caption_reflow() {
   caption_sequencer.glyphs_shape(caption_string);
   caption_sequencer.verify_glyph_cache();
   caption_sequencer.measure_text();
@@ -1387,8 +1405,9 @@ void AppState::SelectionCopypassTask::execute(SDL_GPUCopyPass *copypass) const {
   SDL_UploadToGPUBuffer(copypass, &source, &destination, false);
 }
 
-void AppState::selection_calculate() {
-  selection_areas = {{200, 100, 300, 300}};
+void AppState::selection_reflow() {
+  if (selection_areas.empty())
+    return;
   verify_selection_capacity();
   transfer_selection_areas();
   std::unique_ptr selectionCopypass = std::make_unique<SelectionCopypassTask>();
@@ -1435,8 +1454,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
   try {
     AppState *app = new AppState{globalFTLibrary};
     *appstate = app;
-    app->caption_calculate();
-    app->selection_calculate();
+    app->caption_reflow();
+    app->selection_reflow();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[AppInit] %s", e.what());
