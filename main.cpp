@@ -685,7 +685,14 @@ private:
     static constexpr std::uint32_t ATLAS_PADDING = 1;
     UniqueGPUTransferBuffer atlas_transfer;
     UniqueGPUTexture atlas_texture;
+
     int measured_width = 0, measured_height = 0;
+    struct MeasuredClusterElement {
+      std::uint32_t cluster;
+      std::optional<CodepointInfo> codepoint_info;
+      const hb_glyph_position_t *position;
+    };
+    std::vector<MeasuredClusterElement> measured_cluster_elements;
 
     UniqueGPUBuffer instance_buffer;
     UniqueGPUTransferBuffer instance_transfer;
@@ -1295,12 +1302,7 @@ void AppState::GlyphSequencer::measure_text() {
   std::vector<CodepointInfo> codepointInfos{
       std::from_range, emitCodepointInfo(app->caption_string)};
 
-  struct ClusterElement {
-    const hb_glyph_position_t *position;
-    std::optional<CodepointInfo> codepoint_info;
-    std::uint32_t cluster;
-  };
-  std::vector<ClusterElement> clusterElements{};
+  measured_cluster_elements.clear();
   for (const auto &[spanA, spanB] : clusterSpans | std::views::pairwise) {
     auto codepointA = std::ranges::lower_bound(
         codepointInfos, spanA.front().cluster, std::ranges::less{},
@@ -1323,17 +1325,14 @@ void AppState::GlyphSequencer::measure_text() {
         std::ranges::repeat_view{nullptr}};
     std::size_t elementCount = std::max(spanA.size(), codepointsA.size());
     std::ranges::zip_view elementTuples{
-        clusterPositions, codepointOptionals,
-        std::ranges::repeat_view{spanA.front().cluster}};
+        std::ranges::repeat_view{spanA.front().cluster}, codepointOptionals,
+        clusterPositions};
     auto elementProject = [](const auto &elementTuple) {
-      return std::make_from_tuple<ClusterElement>(elementTuple);
+      return std::make_from_tuple<MeasuredClusterElement>(elementTuple);
     };
-    clusterElements.append_range(elementTuples |
-                                 std::views::transform(elementProject) |
-                                 std::views::take(elementCount));
-  }
-
-  for (const ClusterElement &clusterElement : clusterElements) {
+    measured_cluster_elements.append_range(
+        elementTuples | std::views::transform(elementProject) |
+        std::views::take(elementCount));
   }
 }
 
