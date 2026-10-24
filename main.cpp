@@ -624,14 +624,14 @@ struct CodepointInfo {
   UChar32 codepoint;
 };
 std::generator<CodepointInfo> emitCodepointInfo(std::string_view strView) {
-  UniqueUText utextCtx = utextOpenUTF8(strView);
+  UniqueUText u8Text = utextOpenUTF8(strView);
   while (true) {
-    std::int64_t nativeOffset = utext_getNativeIndex(utextCtx.get());
-    CodepointInfo codepointInfo{};
-    codepointInfo.byte_offset = static_cast<std::uint32_t>(nativeOffset);
-    codepointInfo.codepoint = utext_next32(utextCtx.get());
-    if (codepointInfo.codepoint == U_SENTINEL)
-      break;
+    std::int64_t byteOffset = utext_getNativeIndex(u8Text.get());
+    UChar32 codepoint = utext_next32(u8Text.get());
+    if (codepoint == U_SENTINEL)
+      co_return;
+    CodepointInfo codepointInfo{static_cast<std::uint32_t>(byteOffset),
+                                codepoint};
     co_yield codepointInfo;
   }
 }
