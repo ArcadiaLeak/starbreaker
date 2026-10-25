@@ -810,20 +810,19 @@ void GPUCommandSequencer::initiate() {
 }
 
 void GPUCommandSequencer::issue_copy_pass() {
-  std::inplace_vector<CopypassTask, 8> taskQueue{};
-
   constexpr std::meta::info tableType = ^^CopypassTable;
   constexpr std::meta::access_context tableAccess =
       std::meta::access_context::unprivileged();
   static constexpr auto tableMembers = std::define_static_array(
       std::meta::nonstatic_data_members_of(tableType, tableAccess));
+
+  std::inplace_vector<CopypassTask, tableMembers.size()> taskQueue{};
   template for (constexpr std::meta::info tableMember : tableMembers) {
     if (not app->copypass_tasks.[:tableMember:])
       continue;
     taskQueue.push_back(*app->copypass_tasks.[:tableMember:]);
     app->copypass_tasks.[:tableMember:].reset();
   }
-
   if (taskQueue.empty())
     return;
   UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
