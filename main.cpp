@@ -704,55 +704,47 @@ struct GlyphSequencer {
   std::generator<ClusterElement> match_cluster_elements();
 };
 
-struct CopypassTask {
-  CopypassTask(const CopypassTask &) = delete;
-  CopypassTask &operator=(const CopypassTask &) = delete;
-  CopypassTask(CopypassTask &&) = delete;
-  CopypassTask &operator=(CopypassTask &&) = delete;
-
-  CopypassTask() = default;
-  virtual ~CopypassTask() = default;
-  virtual void execute(SDL_GPUCopyPass *copypass) const = 0;
-};
-
-struct GlyphAtlasCopypassTask : CopypassTask {
+struct CopyGlyphAtlas {
   GlyphSequencer *sequencer;
-  void execute(SDL_GPUCopyPass *copypass) const;
 };
-
-struct GlyphVertexCopypassTask : CopypassTask {
+struct CopyGlyphVertices {
   GlyphSequencer *sequencer;
-  void execute(SDL_GPUCopyPass *copypass) const;
 };
-
-struct SelectionCopypassTask : CopypassTask {
+struct CopySelectionAreas {
   AppState *app;
-  void execute(SDL_GPUCopyPass *copypass) const;
+};
+using CopypassTask =
+    std::variant<CopyGlyphAtlas, CopyGlyphVertices, CopySelectionAreas>;
+struct CopypassTaskVisitor {
+  void operator()(CopyGlyphAtlas task) const;
+  void operator()(CopyGlyphVertices task) const;
+  void operator()(CopySelectionAreas task) const;
+  SDL_GPUCopyPass *copypass;
+};
+
+struct GPUCommandSequencer {
+  AppState *app;
+  EngagedGPUCommandBuffer command_buffer;
+
+  void initiate();
+  void issue_copy_pass();
+  void issue_render_pass();
+};
+
+struct GPURenderSequencer {
+  AppState *app;
+  GPUCommandSequencer *command_sequencer;
+
+  std::uint32_t swapchain_w, swapchain_h;
+  SDL_GPUTexture *swapchain_texture;
+
+  void draw_scene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
+  void verify_storage_textures();
+  void blend_selected_areas();
+  void draw_processed_image();
 };
 
 struct AppState {
-  struct GPUCommandSequencer {
-    AppState *app;
-    EngagedGPUCommandBuffer command_buffer;
-
-    void initiate();
-    void issue_copy_pass();
-    void issue_render_pass();
-  };
-
-  struct GPURenderSequencer {
-    AppState *app;
-    GPUCommandSequencer *command_sequencer;
-
-    std::uint32_t swapchain_w, swapchain_h;
-    SDL_GPUTexture *swapchain_texture;
-
-    void draw_scene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
-    void verify_storage_textures();
-    void blend_selected_areas();
-    void draw_processed_image();
-  };
-
   UniqueHarfbuzzFont harfbuzz_font;
 
   UniqueGPUDevice device_ctx;
@@ -780,7 +772,7 @@ struct AppState {
   void verify_selection_capacity();
   void transfer_selection_areas();
 
-  std::vector<std::unique_ptr<CopypassTask>> copypass_tasks;
+  std::vector<CopypassTask> copypass_tasks;
 
   SDL_AppResult iterate() noexcept;
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
@@ -806,32 +798,32 @@ void AppState::instantiate(FT_Library library) {
   caption_sequencer.instantiate(main_window.get());
 }
 
-void AppState::GPUCommandSequencer::initiate() {
+void GPUCommandSequencer::initiate() {
   command_buffer = acquireGPUCommandBuffer(app->device_ctx.get());
 }
 
-void AppState::GPUCommandSequencer::issue_copy_pass() {
+void GPUCommandSequencer::issue_copy_pass() {
   if (app->copypass_tasks.empty())
     return;
   UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
-  for (const std::unique_ptr<CopypassTask> &task : app->copypass_tasks)
-    task->execute(copypass.get());
+  for (const CopypassTask &task : app->copypass_tasks)
+    task.visit(CopypassTaskVisitor{copypass.get()});
   app->copypass_tasks.clear();
 }
 
-void GlyphVertexCopypassTask::execute(SDL_GPUCopyPass *copypass) const {
+void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const {
   SDL_GPUTransferBufferLocation src{
-      .transfer_buffer = sequencer->instance_transfer.get(), .offset = 0};
+      .transfer_buffer = task.sequencer->instance_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      hb_buffer_get_length(sequencer->harfbuzz_buffer.get()) *
+      hb_buffer_get_length(task.sequencer->harfbuzz_buffer.get()) *
       sizeof(GlyphVertexInstance))};
-  SDL_GPUBufferRegion dst{.buffer = sequencer->instance_buffer.get(),
+  SDL_GPUBufferRegion dst{.buffer = task.sequencer->instance_buffer.get(),
                           .offset = 0,
                           .size = bufferSize};
   SDL_UploadToGPUBuffer(copypass, &src, &dst, false);
 }
 
-void AppState::GPUCommandSequencer::issue_render_pass() {
+void GPUCommandSequencer::issue_render_pass() {
   GPURenderSequencer render_sequencer{app, this};
   render_sequencer.swapchain_texture = waitAndAcquireGPUSwapchainTexture(
       command_buffer.get(), app->main_window.get(),
@@ -853,7 +845,7 @@ void AppState::GPUCommandSequencer::issue_render_pass() {
   }
 }
 
-void AppState::GPURenderSequencer::draw_processed_image() {
+void GPURenderSequencer::draw_processed_image() {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   SDL_GPUColorTargetInfo colorTarget{.texture = swapchain_texture,
                                      .load_op = SDL_GPU_LOADOP_DONT_CARE,
@@ -886,8 +878,8 @@ void AppState::GPURenderSequencer::draw_processed_image() {
   SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
 }
 
-void AppState::GPURenderSequencer::draw_scene(
-    SDL_GPUTexture *scene_texture, SDL_GPUGraphicsPipeline *pipeline) {
+void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
+                                    SDL_GPUGraphicsPipeline *pipeline) {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   SDL_GPUColorTargetInfo colorTarget{.texture = scene_texture,
                                      .clear_color = {0.08f, 0.08f, 0.10f, 1.0f},
@@ -936,7 +928,7 @@ void AppState::GPURenderSequencer::draw_scene(
   SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
 }
 
-void AppState::GPURenderSequencer::verify_storage_textures() {
+void GPURenderSequencer::verify_storage_textures() {
   bool isFineW = app->offscreen_w >= swapchain_w;
   bool isFineH = app->offscreen_h >= swapchain_h;
   if (isFineW && isFineH)
@@ -965,7 +957,7 @@ void AppState::GPURenderSequencer::verify_storage_textures() {
       createGPUTexture(app->device_ctx.get(), processedInfo);
 }
 
-void AppState::GPURenderSequencer::blend_selected_areas() {
+void GPURenderSequencer::blend_selected_areas() {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
 
   SDL_GPUStorageTextureReadWriteBinding textureRW{
@@ -1091,9 +1083,7 @@ void GlyphSequencer::verify_glyph_cache() {
   }
   if (everInserted) {
     pack_atlas();
-    std::unique_ptr atlasCopypass = std::make_unique<GlyphAtlasCopypassTask>();
-    atlasCopypass->sequencer = this;
-    app->copypass_tasks.push_back(std::move(atlasCopypass));
+    app->copypass_tasks.push_back(CopyGlyphAtlas{this});
   }
 }
 
@@ -1267,10 +1257,7 @@ void GlyphSequencer::transfer_vertex_instances() {
 void GlyphSequencer::queue_vertex_copypass() {
   verify_instance_capacity();
   transfer_vertex_instances();
-  std::unique_ptr instanceCopypass =
-      std::make_unique<GlyphVertexCopypassTask>();
-  instanceCopypass->sequencer = this;
-  app->copypass_tasks.push_back(std::move(instanceCopypass));
+  app->copypass_tasks.push_back(CopyGlyphVertices{this});
 }
 
 void GlyphSequencer::measure_text() {
@@ -1366,16 +1353,17 @@ GlyphSequencer::match_cluster_elements() {
   }
 }
 
-void GlyphAtlasCopypassTask::execute(SDL_GPUCopyPass *copypass) const {
+void CopypassTaskVisitor::operator()(CopyGlyphAtlas task) const {
   SDL_GPUTextureTransferInfo source{
-      .transfer_buffer = sequencer->atlas_transfer.get(),
+      .transfer_buffer = task.sequencer->atlas_transfer.get(),
       .offset = 0,
       .pixels_per_row = GlyphSequencer::ATLAS_SIDE,
       .rows_per_layer = GlyphSequencer::ATLAS_SIDE};
-  SDL_GPUTextureRegion destination{.texture = sequencer->atlas_texture.get(),
-                                   .w = GlyphSequencer::ATLAS_SIDE,
-                                   .h = GlyphSequencer::ATLAS_SIDE,
-                                   .d = 1};
+  SDL_GPUTextureRegion destination{};
+  destination.texture = task.sequencer->atlas_texture.get();
+  destination.w = GlyphSequencer::ATLAS_SIDE;
+  destination.h = GlyphSequencer::ATLAS_SIDE;
+  destination.d = 1;
   SDL_UploadToGPUTexture(copypass, &source, &destination, false);
 }
 
@@ -1409,13 +1397,14 @@ void AppState::caption_reflow() {
   caption_sequencer.queue_vertex_copypass();
 }
 
-void SelectionCopypassTask::execute(SDL_GPUCopyPass *copypass) const {
+void CopypassTaskVisitor::operator()(CopySelectionAreas task) const {
   SDL_GPUTransferBufferLocation source{
-      .transfer_buffer = app->selection_transfer.get(), .offset = 0};
+      .transfer_buffer = task.app->selection_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      app->selection_areas.size() * sizeof(DifferenceBlendArea))};
-  SDL_GPUBufferRegion destination{
-      .buffer = app->selection_buffer.get(), .offset = 0, .size = bufferSize};
+      task.app->selection_areas.size() * sizeof(DifferenceBlendArea))};
+  SDL_GPUBufferRegion destination{.buffer = task.app->selection_buffer.get(),
+                                  .offset = 0,
+                                  .size = bufferSize};
   SDL_UploadToGPUBuffer(copypass, &source, &destination, false);
 }
 
@@ -1424,9 +1413,7 @@ void AppState::selection_reflow() {
     return;
   verify_selection_capacity();
   transfer_selection_areas();
-  std::unique_ptr selectionCopypass = std::make_unique<SelectionCopypassTask>();
-  selectionCopypass->app = this;
-  copypass_tasks.push_back(std::move(selectionCopypass));
+  copypass_tasks.push_back(CopySelectionAreas{this});
 }
 
 void AppState::verify_selection_capacity() {
