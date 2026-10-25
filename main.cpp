@@ -7,8 +7,10 @@
 #include <cstring>
 #include <format>
 #include <generator>
+#include <inplace_vector>
 #include <map>
 #include <memory>
+#include <meta>
 #include <ranges>
 #include <stdexcept>
 #include <string>
@@ -715,6 +717,11 @@ struct CopySelectionAreas {
 };
 using CopypassTask =
     std::variant<CopyGlyphAtlas, CopyGlyphVertices, CopySelectionAreas>;
+struct CopypassTable {
+  std::optional<CopyGlyphAtlas> glyph_atlas;
+  std::optional<CopyGlyphVertices> glyph_vertices;
+  std::optional<CopySelectionAreas> selection_areas;
+};
 struct CopypassTaskVisitor {
   void operator()(CopyGlyphAtlas task) const;
   void operator()(CopyGlyphVertices task) const;
@@ -772,7 +779,7 @@ struct AppState {
   void verify_selection_capacity();
   void transfer_selection_areas();
 
-  std::vector<CopypassTask> copypass_tasks;
+  CopypassTable copypass_tasks;
 
   SDL_AppResult iterate() noexcept;
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
@@ -803,12 +810,25 @@ void GPUCommandSequencer::initiate() {
 }
 
 void GPUCommandSequencer::issue_copy_pass() {
-  if (app->copypass_tasks.empty())
+  std::inplace_vector<CopypassTask, 8> taskQueue{};
+
+  constexpr std::meta::info tableType = ^^CopypassTable;
+  constexpr std::meta::access_context tableAccess =
+      std::meta::access_context::unprivileged();
+  static constexpr auto tableMembers = std::define_static_array(
+      std::meta::nonstatic_data_members_of(tableType, tableAccess));
+  template for (constexpr std::meta::info tableMember : tableMembers) {
+    if (not app->copypass_tasks.[:tableMember:])
+      continue;
+    taskQueue.push_back(*app->copypass_tasks.[:tableMember:]);
+    app->copypass_tasks.[:tableMember:].reset();
+  }
+
+  if (taskQueue.empty())
     return;
   UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
-  for (const CopypassTask &task : app->copypass_tasks)
+  for (const CopypassTask &task : taskQueue)
     task.visit(CopypassTaskVisitor{copypass.get()});
-  app->copypass_tasks.clear();
 }
 
 void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const {
@@ -1083,7 +1103,7 @@ void GlyphSequencer::verify_glyph_cache() {
   }
   if (everInserted) {
     pack_atlas();
-    app->copypass_tasks.push_back(CopyGlyphAtlas{this});
+    app->copypass_tasks.glyph_atlas.emplace(this);
   }
 }
 
@@ -1257,7 +1277,7 @@ void GlyphSequencer::transfer_vertex_instances() {
 void GlyphSequencer::queue_vertex_copypass() {
   verify_instance_capacity();
   transfer_vertex_instances();
-  app->copypass_tasks.push_back(CopyGlyphVertices{this});
+  app->copypass_tasks.glyph_vertices.emplace(this);
 }
 
 void GlyphSequencer::measure_text() {
@@ -1413,7 +1433,7 @@ void AppState::selection_reflow() {
     return;
   verify_selection_capacity();
   transfer_selection_areas();
-  copypass_tasks.push_back(CopySelectionAreas{this});
+  copypass_tasks.selection_areas.emplace(this);
 }
 
 void AppState::verify_selection_capacity() {
