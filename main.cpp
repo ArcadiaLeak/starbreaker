@@ -450,7 +450,7 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
 }
 
 UniqueGPUGraphicsPipeline
-createImageblitGPUGraphicsPipeline(SDL_GPUDevice *device,
+createRectSolidGPUGraphicsPipeline(SDL_GPUDevice *device,
                                    SDL_GPUTextureFormat targetFormat) {
   GPUShaderCreateInfo vertexInfo{.filepath = "rect_image.spv",
                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
@@ -458,10 +458,10 @@ createImageblitGPUGraphicsPipeline(SDL_GPUDevice *device,
                                  .num_uniform_buffers = 1};
   UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
 
-  GPUShaderCreateInfo fragmentInfo{.filepath = "blit.spv",
+  GPUShaderCreateInfo fragmentInfo{.filepath = "solid.spv",
                                    .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                   .num_samplers = 1,
-                                   .num_uniform_buffers = 0};
+                                   .num_samplers = 0,
+                                   .num_uniform_buffers = 1};
   UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
 
   SDL_GPUColorTargetDescription colorTarget{};
@@ -764,8 +764,8 @@ struct AppState {
 
   UniqueFreetypeGlyph load_freetype_glyph(hb_codepoint_t codepoint);
 
-  UniqueGPUGraphicsPipeline imageblit_pipeline;
-  UniqueGPUSampler imageblit_sampler;
+  UniqueGPUGraphicsPipeline rect_solid_pipeline;
+
   UniqueGPUTexture offscreen_texture;
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
@@ -797,10 +797,8 @@ void AppState::instantiate(FT_Library library) {
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
-  imageblit_pipeline = createImageblitGPUGraphicsPipeline(
-      device_ctx.get(),
-      SDL_GetGPUSwapchainTextureFormat(device_ctx.get(), main_window.get()));
-  imageblit_sampler = createCommonGPUSampler(device_ctx.get());
+  rect_solid_pipeline = createRectSolidGPUGraphicsPipeline(
+      device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
   selection_pipeline = createDifferenceBlendGPUPipeline(device_ctx.get());
   caption_sequencer.instantiate(main_window.get());
 }
@@ -865,36 +863,15 @@ void GPUCommandSequencer::issue_render_pass() {
 }
 
 void GPURenderSequencer::draw_processed_image() {
-  SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
-  SDL_GPUColorTargetInfo colorTarget{.texture = swapchain_texture,
-                                     .load_op = SDL_GPU_LOADOP_DONT_CARE,
-                                     .store_op = SDL_GPU_STOREOP_STORE};
-  UniqueGPURenderPass renderPass = beginGPURenderPass(cmd, &colorTarget);
-
-  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->imageblit_pipeline.get());
-  SDL_GPUTextureSamplerBinding samplerBinding{};
-  samplerBinding.texture = app->processed_texture.get();
-  samplerBinding.sampler = app->imageblit_sampler.get();
-  SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
-
-  struct alignas(16) RectUniform {
-    float uv_rect[4];
-    float rect_size[2];
-    float rect_pos[2];
-    float viewport[2];
-  };
-  RectUniform rectUni{};
-  rectUni.uv_rect[2] = 1.0f;
-  rectUni.uv_rect[3] = 1.0f;
-  rectUni.rect_size[0] = static_cast<float>(app->offscreen_w);
-  rectUni.rect_size[1] = static_cast<float>(app->offscreen_h);
-  rectUni.rect_pos[1] = -1.0f * static_cast<float>(app->offscreen_h) +
-                        static_cast<float>(swapchain_h);
-  rectUni.viewport[0] = static_cast<float>(swapchain_w);
-  rectUni.viewport[1] = static_cast<float>(swapchain_h);
-  SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
-
-  SDL_DrawGPUPrimitives(renderPass.get(), 4, 1, 0, 0);
+  SDL_GPUBlitInfo blitInfo{};
+  blitInfo.load_op = SDL_GPU_LOADOP_DONT_CARE;
+  blitInfo.source.texture = app->processed_texture.get();
+  blitInfo.source.w = swapchain_w;
+  blitInfo.source.h = swapchain_h;
+  blitInfo.destination.texture = swapchain_texture;
+  blitInfo.destination.w = swapchain_w;
+  blitInfo.destination.h = swapchain_h;
+  SDL_BlitGPUTexture(command_sequencer->command_buffer.get(), &blitInfo);
 }
 
 void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
@@ -1022,13 +999,14 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     SDL_Point clickPoint{};
     clickPoint.x = static_cast<int>(event->button.x);
     clickPoint.y = static_cast<int>(event->button.y);
-    constexpr int PADDING = 1;
+    constexpr int PADDING_X = 1;
+    constexpr int PADDING_Y = 4;
     int horzOffset = static_cast<int>(caption_sequencer.horz_least / 64);
     int vertOffset = static_cast<int>(caption_sequencer.vert_most / 64);
-    SDL_Rect captionRect{caption_x + horzOffset - PADDING,
-                         caption_y + vertOffset - PADDING,
-                         caption_sequencer.measured_w() + PADDING * 2,
-                         caption_sequencer.measured_h() + PADDING * 2};
+    SDL_Rect captionRect{caption_x + horzOffset - PADDING_X,
+                         caption_y + vertOffset - PADDING_Y,
+                         caption_sequencer.measured_w() + PADDING_X * 2,
+                         caption_sequencer.measured_h() + PADDING_Y * 2};
     bool captionHit = SDL_PointInRect(&clickPoint, &captionRect);
     selection_areas.clear();
     if (captionHit) {
