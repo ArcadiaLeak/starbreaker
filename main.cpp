@@ -456,7 +456,7 @@ createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device) {
                                  .num_uniform_buffers = 1};
   UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
 
-  GPUShaderCreateInfo fragmentInfo{.filepath = "solid.spv",
+  GPUShaderCreateInfo fragmentInfo{.filepath = "rounded_box.spv",
                                    .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                    .num_samplers = 0,
                                    .num_uniform_buffers = 1};
@@ -1035,11 +1035,14 @@ void GPURenderSequencer::selected_areas_draw() {
   std::array<float, 2> tx{0, static_cast<float>(swapchain_h)};
   std::memcpy(&rectUni.translate, tx.data(), sizeof(RectUniform::translate));
   SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
-  struct alignas(16) SolidUniform {
-    float color[4];
+
+  struct alignas(16) BoxUniform {
+    float blend_color[4];
+    float radius;
   };
-  SolidUniform blit{.color = {1.0f, 1.0f, 1.0f, 1.0f}};
-  SDL_PushGPUFragmentUniformData(cmd, 0, &blit, sizeof(SolidUniform));
+  BoxUniform boxUniform{.blend_color = {1.0f, 1.0f, 1.0f, 1.0f},
+                        .radius = 1.0f};
+  SDL_PushGPUFragmentUniformData(cmd, 0, &boxUniform, sizeof(BoxUniform));
 
   std::uint32_t instanceCount{
       static_cast<std::uint32_t>(app->selection_areas.size())};
