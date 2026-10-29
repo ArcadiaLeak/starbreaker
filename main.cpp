@@ -28,7 +28,7 @@
 #include <unicode/utext.h>
 #include <vulkan/vulkan.h>
 
-struct GlyphVertexInstance {
+struct RectVertexInstance {
   float rect_pos[2];
   float rect_size[2];
   float uv_rect[4];
@@ -415,21 +415,20 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
   std::get<0>(vertexAttributes).location = 0;
   std::get<0>(vertexAttributes).buffer_slot = 0;
   std::get<0>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<0>(vertexAttributes).offset =
-      offsetof(GlyphVertexInstance, rect_pos);
+  std::get<0>(vertexAttributes).offset = offsetof(RectVertexInstance, rect_pos);
   std::get<1>(vertexAttributes).location = 1;
   std::get<1>(vertexAttributes).buffer_slot = 0;
   std::get<1>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
   std::get<1>(vertexAttributes).offset =
-      offsetof(GlyphVertexInstance, rect_size);
+      offsetof(RectVertexInstance, rect_size);
   std::get<2>(vertexAttributes).location = 2;
   std::get<2>(vertexAttributes).buffer_slot = 0;
   std::get<2>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-  std::get<2>(vertexAttributes).offset = offsetof(GlyphVertexInstance, uv_rect);
+  std::get<2>(vertexAttributes).offset = offsetof(RectVertexInstance, uv_rect);
 
   SDL_GPUVertexBufferDescription vertexBufferDescriptions{};
   vertexBufferDescriptions.slot = 0;
-  vertexBufferDescriptions.pitch = sizeof(GlyphVertexInstance);
+  vertexBufferDescriptions.pitch = sizeof(RectVertexInstance);
   vertexBufferDescriptions.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
   vertexBufferDescriptions.instance_step_rate = 0;
 
@@ -450,9 +449,8 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
 }
 
 UniqueGPUGraphicsPipeline
-createRectSolidGPUGraphicsPipeline(SDL_GPUDevice *device,
-                                   SDL_GPUTextureFormat targetFormat) {
-  GPUShaderCreateInfo vertexInfo{.filepath = "rect_image.spv",
+createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device) {
+  GPUShaderCreateInfo vertexInfo{.filepath = "rect_instance.spv",
                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                  .num_samplers = 0,
                                  .num_uniform_buffers = 1};
@@ -465,14 +463,55 @@ createRectSolidGPUGraphicsPipeline(SDL_GPUDevice *device,
   UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
 
   SDL_GPUColorTargetDescription colorTarget{};
-  colorTarget.format = targetFormat;
+  colorTarget.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+  colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+  colorTarget.blend_state.dst_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  colorTarget.blend_state.dst_alpha_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  colorTarget.blend_state.color_write_mask =
+      SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
+      SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
+  colorTarget.blend_state.enable_blend = true;
+
   SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
   targetInfo.color_target_descriptions = &colorTarget;
   targetInfo.num_color_targets = 1;
 
+  std::array<SDL_GPUVertexAttribute, 3> vertexAttributes{};
+  std::get<0>(vertexAttributes).location = 0;
+  std::get<0>(vertexAttributes).buffer_slot = 0;
+  std::get<0>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  std::get<0>(vertexAttributes).offset = offsetof(RectVertexInstance, rect_pos);
+  std::get<1>(vertexAttributes).location = 1;
+  std::get<1>(vertexAttributes).buffer_slot = 0;
+  std::get<1>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  std::get<1>(vertexAttributes).offset =
+      offsetof(RectVertexInstance, rect_size);
+  std::get<2>(vertexAttributes).location = 2;
+  std::get<2>(vertexAttributes).buffer_slot = 0;
+  std::get<2>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+  std::get<2>(vertexAttributes).offset = offsetof(RectVertexInstance, uv_rect);
+
+  SDL_GPUVertexBufferDescription vertexBufferDescriptions{};
+  vertexBufferDescriptions.slot = 0;
+  vertexBufferDescriptions.pitch = sizeof(RectVertexInstance);
+  vertexBufferDescriptions.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
+  vertexBufferDescriptions.instance_step_rate = 0;
+
+  SDL_GPUVertexInputState vertexInputState{};
+  vertexInputState.vertex_buffer_descriptions = &vertexBufferDescriptions;
+  vertexInputState.num_vertex_buffers = 1;
+  vertexInputState.vertex_attributes = vertexAttributes.data();
+  vertexInputState.num_vertex_attributes = vertexAttributes.size();
+
   SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
   pipelineInfo.vertex_shader = vertexShader.get();
   pipelineInfo.fragment_shader = fragmentShader.get();
+  pipelineInfo.vertex_input_state = vertexInputState;
   pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
   pipelineInfo.target_info = targetInfo;
 
@@ -686,9 +725,9 @@ struct GlyphSequencer {
   UniqueGPUTransferBuffer instance_transfer;
   std::uint32_t instance_capacity = 0;
 
-  std::optional<GlyphVertexInstance>
+  std::optional<RectVertexInstance>
   create_vertex_instance(unsigned int glyphIndex, hb_position_t penX);
-  std::generator<GlyphVertexInstance> emit_vertex_instances();
+  std::generator<RectVertexInstance> emit_vertex_instances();
 
   void verify_instance_capacity();
   void transfer_vertex_instances();
@@ -747,7 +786,8 @@ struct GPURenderSequencer {
 
   void draw_scene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
   void verify_storage_textures();
-  void blend_selected_areas();
+  void selected_areas_draw();
+  void selected_areas_blend();
   void draw_processed_image();
 };
 
@@ -764,17 +804,22 @@ struct AppState {
 
   UniqueFreetypeGlyph load_freetype_glyph(hb_codepoint_t codepoint);
 
-  UniqueGPUGraphicsPipeline rect_solid_pipeline;
-
   UniqueGPUTexture offscreen_texture;
+  UniqueGPUTexture selection_texture;
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
 
-  UniqueGPUComputePipeline selection_pipeline;
-  UniqueGPUBuffer selection_buffer;
-  UniqueGPUTransferBuffer selection_transfer;
-  std::uint32_t selection_capacity = 0;
   std::vector<std::array<std::uint32_t, 4>> selection_areas;
+
+  UniqueGPUGraphicsPipeline selection_graphics_pipeline;
+  UniqueGPUBuffer selection_instances;
+  UniqueGPUTransferBuffer selection_instances_transfer;
+  std::uint32_t selection_instances_capacity = 0;
+
+  UniqueGPUComputePipeline selection_compute_pipeline;
+  UniqueGPUBuffer selection_buffer;
+  UniqueGPUTransferBuffer selection_buffer_transfer;
+  std::uint32_t selection_buffer_capacity = 0;
 
   void verify_selection_capacity();
   void transfer_selection_areas();
@@ -797,9 +842,10 @@ void AppState::instantiate(FT_Library library) {
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
-  rect_solid_pipeline = createRectSolidGPUGraphicsPipeline(
-      device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
-  selection_pipeline = createDifferenceBlendGPUPipeline(device_ctx.get());
+  selection_graphics_pipeline =
+      createSelectionGPUGraphicsPipeline(device_ctx.get());
+  selection_compute_pipeline =
+      createDifferenceBlendGPUPipeline(device_ctx.get());
   caption_sequencer.instantiate(main_window.get());
 }
 
@@ -833,7 +879,7 @@ void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const {
       .transfer_buffer = task.sequencer->instance_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
       hb_buffer_get_length(task.sequencer->harfbuzz_buffer.get()) *
-      sizeof(GlyphVertexInstance))};
+      sizeof(RectVertexInstance))};
   SDL_GPUBufferRegion dst{.buffer = task.sequencer->instance_buffer.get(),
                           .offset = 0,
                           .size = bufferSize};
@@ -857,7 +903,8 @@ void GPUCommandSequencer::issue_render_pass() {
     SDL_GPUGraphicsPipeline *scenePipeline =
         app->caption_sequencer.offscreen_pipeline.get();
     render_sequencer.draw_scene(app->offscreen_texture.get(), scenePipeline);
-    render_sequencer.blend_selected_areas();
+    render_sequencer.selected_areas_draw();
+    render_sequencer.selected_areas_blend();
     render_sequencer.draw_processed_image();
   }
 }
@@ -943,6 +990,14 @@ void GPURenderSequencer::verify_storage_textures() {
                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
   app->offscreen_texture =
       createGPUTexture(app->device_ctx.get(), offscreenInfo);
+  GPUTextureCreateInfo selectionInfo{};
+  selectionInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+  selectionInfo.texture_w = app->offscreen_w;
+  selectionInfo.texture_h = app->offscreen_h;
+  selectionInfo.usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
+                        SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+  app->selection_texture =
+      createGPUTexture(app->device_ctx.get(), selectionInfo);
   GPUTextureCreateInfo processedInfo{};
   processedInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
   processedInfo.texture_w = app->offscreen_w;
@@ -953,14 +1008,58 @@ void GPURenderSequencer::verify_storage_textures() {
       createGPUTexture(app->device_ctx.get(), processedInfo);
 }
 
-void GPURenderSequencer::blend_selected_areas() {
+void GPURenderSequencer::selected_areas_draw() {
+  SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
+  SDL_GPUColorTargetInfo colorTarget{.texture = app->selection_texture.get(),
+                                     .clear_color = {0.0f, 0.0f, 0.0f, 0.0f},
+                                     .load_op = SDL_GPU_LOADOP_CLEAR,
+                                     .store_op = SDL_GPU_STOREOP_STORE};
+  UniqueGPURenderPass renderPass = beginGPURenderPass(cmd, &colorTarget);
+
+  SDL_GPUViewport viewport{.x = 0,
+                           .y = 0,
+                           .w = static_cast<float>(swapchain_w),
+                           .h = static_cast<float>(swapchain_h),
+                           .min_depth = 0.0f,
+                           .max_depth = 1.0f};
+  SDL_SetGPUViewport(renderPass.get(), &viewport);
+  SDL_Rect scissor{0, 0, static_cast<int>(swapchain_w),
+                   static_cast<int>(swapchain_h)};
+  SDL_SetGPUScissor(renderPass.get(), &scissor);
+
+  SDL_BindGPUGraphicsPipeline(renderPass.get(),
+                              app->selection_graphics_pipeline.get());
+  SDL_GPUBufferBinding instanceBinding{app->selection_instances.get(), 0};
+  SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
+
+  struct alignas(16) RectUniform {
+    float viewport[2];
+    float translate[2];
+  };
+  RectUniform rectUni{};
+  rectUni.viewport[0] = static_cast<float>(swapchain_w);
+  rectUni.viewport[1] = static_cast<float>(swapchain_h);
+  SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
+  struct alignas(16) SolidUniform {
+    float color[4];
+  };
+  SolidUniform blit{.color = {1.0f, 1.0f, 1.0f, 1.0f}};
+  SDL_PushGPUFragmentUniformData(cmd, 0, &blit, sizeof(SolidUniform));
+
+  std::uint32_t instanceCount{
+      static_cast<std::uint32_t>(app->selection_areas.size())};
+  SDL_DrawGPUPrimitives(renderPass.get(), 4, instanceCount, 0, 0);
+}
+
+void GPURenderSequencer::selected_areas_blend() {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
 
   SDL_GPUStorageTextureReadWriteBinding textureRW{
       .texture = app->processed_texture.get()};
   UniqueGPUComputePass computePass = beginGPUComputePass(cmd, &textureRW);
 
-  SDL_BindGPUComputePipeline(computePass.get(), app->selection_pipeline.get());
+  SDL_BindGPUComputePipeline(computePass.get(),
+                             app->selection_compute_pipeline.get());
   SDL_GPUBuffer *areaBuf = app->selection_buffer.get();
   SDL_BindGPUComputeStorageBuffers(computePass.get(), 0, &areaBuf, 1);
   SDL_GPUTexture *baseTexture = app->offscreen_texture.get();
@@ -1177,9 +1276,8 @@ void GlyphSequencer::AtlasCopier::copy_bitmap_row(std::uint32_t row) {
 }
 
 void GlyphSequencer::verify_instance_capacity() {
-  std::uint32_t bufferSize =
-      static_cast<std::uint32_t>(hb_buffer_get_length(harfbuzz_buffer.get()) *
-                                 sizeof(GlyphVertexInstance));
+  std::uint32_t bufferSize = static_cast<std::uint32_t>(
+      hb_buffer_get_length(harfbuzz_buffer.get()) * sizeof(RectVertexInstance));
   if (instance_capacity >= bufferSize)
     return;
   instance_capacity =
@@ -1191,7 +1289,7 @@ void GlyphSequencer::verify_instance_capacity() {
       createGPUTransferBuffer(app->device_ctx.get(), instance_capacity);
 }
 
-std::optional<GlyphVertexInstance>
+std::optional<RectVertexInstance>
 GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
                                        hb_position_t penX) {
   hb_glyph_info_t *glyphInfos =
@@ -1204,7 +1302,7 @@ GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
     return std::nullopt;
   FT_BitmapGlyph bitmapGlyph =
       asBitmapGlyph(cacheIt->second.freetype_glyph.get());
-  GlyphVertexInstance vertexInstance{};
+  RectVertexInstance vertexInstance{};
   vertexInstance.rect_pos[0] =
       static_cast<float>(penX + positions[glyphIndex].x_offset +
                          bitmapGlyph->left * 64) /
@@ -1228,13 +1326,13 @@ GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
   return vertexInstance;
 }
 
-std::generator<GlyphVertexInstance> GlyphSequencer::emit_vertex_instances() {
+std::generator<RectVertexInstance> GlyphSequencer::emit_vertex_instances() {
   unsigned int glyphIndex{}, bufferLength{};
   hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), &bufferLength);
   hb_position_t penX{};
   while (glyphIndex < bufferLength) {
-    std::optional<GlyphVertexInstance> vertexInstance{
+    std::optional<RectVertexInstance> vertexInstance{
         create_vertex_instance(glyphIndex, penX)};
     if (vertexInstance)
       co_yield vertexInstance.value();
@@ -1247,8 +1345,8 @@ void GlyphSequencer::transfer_vertex_instances() {
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true);
   for (auto [idx, data] : emit_vertex_instances() | std::views::enumerate)
-    std::memcpy(static_cast<GlyphVertexInstance *>(mappedBuffer.get()) + idx,
-                &data, sizeof(GlyphVertexInstance));
+    std::memcpy(static_cast<RectVertexInstance *>(mappedBuffer.get()) + idx,
+                &data, sizeof(RectVertexInstance));
 }
 
 void GlyphSequencer::queue_vertex_copypass() {
@@ -1395,14 +1493,23 @@ void AppState::caption_reflow() {
 }
 
 void CopypassTaskVisitor::operator()(CopySelectionAreas task) const {
-  SDL_GPUTransferBufferLocation source{
-      .transfer_buffer = task.app->selection_transfer.get(), .offset = 0};
-  std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      task.app->selection_areas.size() * sizeof(DifferenceBlendArea))};
-  SDL_GPUBufferRegion destination{.buffer = task.app->selection_buffer.get(),
-                                  .offset = 0,
-                                  .size = bufferSize};
-  SDL_UploadToGPUBuffer(copypass, &source, &destination, false);
+  SDL_GPUTransferBufferLocation bufferSource{
+      .transfer_buffer = task.app->selection_buffer_transfer.get(),
+      .offset = 0};
+  SDL_GPUBufferRegion bufferDest{};
+  bufferDest.buffer = task.app->selection_buffer.get();
+  bufferDest.size = static_cast<std::uint32_t>(
+      task.app->selection_areas.size() * sizeof(DifferenceBlendArea));
+  SDL_UploadToGPUBuffer(copypass, &bufferSource, &bufferDest, false);
+
+  SDL_GPUTransferBufferLocation instancesSource{
+      .transfer_buffer = task.app->selection_instances_transfer.get(),
+      .offset = 0};
+  SDL_GPUBufferRegion instancesDest{};
+  instancesDest.buffer = task.app->selection_instances.get();
+  instancesDest.size = static_cast<std::uint32_t>(
+      task.app->selection_areas.size() * sizeof(RectVertexInstance));
+  SDL_UploadToGPUBuffer(copypass, &instancesSource, &instancesDest, false);
 }
 
 void AppState::selection_reflow() {
@@ -1416,27 +1523,51 @@ void AppState::selection_reflow() {
 void AppState::verify_selection_capacity() {
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
       selection_areas.size() * sizeof(DifferenceBlendArea))};
-  if (bufferSize <= selection_capacity)
+  if (bufferSize <= selection_buffer_capacity)
     return;
-  selection_capacity =
-      std::max(1u << std::bit_width(bufferSize), selection_capacity * 2u);
+  selection_buffer_capacity = std::max(1u << std::bit_width(bufferSize),
+                                       selection_buffer_capacity * 2u);
   SDL_GPUBufferCreateInfo bufferInfo{
       .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
-      .size = selection_capacity};
+      .size = selection_buffer_capacity};
   selection_buffer = createGPUBuffer(device_ctx.get(), &bufferInfo);
-  selection_transfer =
-      createGPUTransferBuffer(device_ctx.get(), selection_capacity);
+  selection_buffer_transfer =
+      createGPUTransferBuffer(device_ctx.get(), selection_buffer_capacity);
+
+  std::uint32_t instancesSize{static_cast<std::uint32_t>(
+      selection_areas.size() * sizeof(RectVertexInstance))};
+  if (instancesSize <= selection_instances_capacity)
+    return;
+  selection_instances_capacity = std::max(1u << std::bit_width(instancesSize),
+                                          selection_instances_capacity * 2u);
+  SDL_GPUBufferCreateInfo instancesInfo{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+                                        .size = selection_instances_capacity};
+  selection_instances = createGPUBuffer(device_ctx.get(), &instancesInfo);
+  selection_instances_transfer =
+      createGPUTransferBuffer(device_ctx.get(), selection_instances_capacity);
 }
 
 void AppState::transfer_selection_areas() {
-  UniqueGPUMappedBuffer mappedBuffer =
-      mapGPUTransferBuffer(device_ctx.get(), selection_transfer.get(), true);
+  UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
+      device_ctx.get(), selection_buffer_transfer.get(), true);
   for (auto [idx, rect] : selection_areas | std::views::enumerate) {
     DifferenceBlendArea area{.rect = {std::get<0>(rect), std::get<1>(rect),
                                       std::get<2>(rect), std::get<3>(rect)},
                              .color = {1.0f, 1.0f, 1.0f, 1.0f}};
     std::memcpy(static_cast<DifferenceBlendArea *>(mappedBuffer.get()) + idx,
                 &area, sizeof(DifferenceBlendArea));
+  }
+
+  UniqueGPUMappedBuffer mappedInstances = mapGPUTransferBuffer(
+      device_ctx.get(), selection_instances_transfer.get(), true);
+  for (auto [idx, rect] : selection_areas | std::views::enumerate) {
+    RectVertexInstance rectInstance{};
+    rectInstance.rect_pos[0] = static_cast<float>(std::get<0>(rect));
+    rectInstance.rect_pos[1] = static_cast<float>(std::get<1>(rect));
+    rectInstance.rect_size[0] = static_cast<float>(std::get<2>(rect));
+    rectInstance.rect_size[1] = static_cast<float>(std::get<3>(rect));
+    std::memcpy(static_cast<RectVertexInstance *>(mappedInstances.get()) + idx,
+                &rectInstance, sizeof(RectVertexInstance));
   }
 }
 
