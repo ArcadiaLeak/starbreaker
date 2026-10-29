@@ -1041,7 +1041,7 @@ void GPURenderSequencer::selected_areas_draw() {
     float radius;
   };
   BoxUniform boxUniform{.blend_color = {1.0f, 1.0f, 1.0f, 1.0f},
-                        .radius = 1.0f};
+                        .radius = 3.0f};
   SDL_PushGPUFragmentUniformData(cmd, 0, &boxUniform, sizeof(BoxUniform));
 
   std::uint32_t instanceCount{
@@ -1525,6 +1525,8 @@ void AppState::transfer_selection_areas() {
         -1.0f * static_cast<float>(std::get<1>(rect) + std::get<3>(rect));
     rectInstance.rect_size[0] = static_cast<float>(std::get<2>(rect));
     rectInstance.rect_size[1] = static_cast<float>(std::get<3>(rect));
+    rectInstance.uv_rect[2] = 1.0f;
+    rectInstance.uv_rect[3] = 1.0f;
     std::memcpy(static_cast<RectVertexInstance *>(selectionMapped.get()) + idx,
                 &rectInstance, sizeof(RectVertexInstance));
   }

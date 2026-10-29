@@ -1,6 +1,7 @@
 struct VSOutput {
     float4 position : SV_Position;
-    float2 uv       : TEXCOORD0;
+    float2 uv : TEXCOORD0;
+    nointerpolation float2 half_size : TEXCOORD1;
 };
 
 struct RectUniform {
@@ -28,5 +29,6 @@ VSOutput main(uint vertexID : SV_VulkanVertexID, InstanceIn inst) {
     VSOutput o;
     o.position = float4(deviceCoords, 0.0, 1.0);
     o.uv = lerp(inst.uv_rect.xw, inst.uv_rect.zy, corner);
+    o.half_size = inst.rect_size / 2;
     return o;
 }
