@@ -549,10 +549,8 @@ createDifferenceBlendGPUPipeline(SDL_GPUDevice *device) {
   pipelineInfo.code = static_cast<const Uint8 *>(shaderCode.get());
   pipelineInfo.entrypoint = "main";
   pipelineInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  pipelineInfo.num_readonly_storage_textures = 1;
-  pipelineInfo.num_readonly_storage_buffers = 1;
+  pipelineInfo.num_readonly_storage_textures = 2;
   pipelineInfo.num_readwrite_storage_textures = 1;
-  pipelineInfo.num_uniform_buffers = 1;
   pipelineInfo.threadcount_x = 8;
   pipelineInfo.threadcount_y = 8;
   pipelineInfo.threadcount_z = 1;
@@ -811,15 +809,12 @@ struct AppState {
 
   std::vector<std::array<std::uint32_t, 4>> selection_areas;
 
-  UniqueGPUGraphicsPipeline selection_graphics_pipeline;
-  UniqueGPUBuffer selection_instances;
-  UniqueGPUTransferBuffer selection_instances_transfer;
-  std::uint32_t selection_instances_capacity = 0;
+  UniqueGPUGraphicsPipeline selection_pipeline;
+  UniqueGPUComputePipeline difference_blend_pipeline;
 
-  UniqueGPUComputePipeline selection_compute_pipeline;
-  UniqueGPUBuffer selection_buffer;
-  UniqueGPUTransferBuffer selection_buffer_transfer;
-  std::uint32_t selection_buffer_capacity = 0;
+  UniqueGPUBuffer selection_instances;
+  UniqueGPUTransferBuffer selection_transfer;
+  std::uint32_t selection_instances_capacity = 0;
 
   void verify_selection_capacity();
   void transfer_selection_areas();
@@ -842,9 +837,8 @@ void AppState::instantiate(FT_Library library) {
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
-  selection_graphics_pipeline =
-      createSelectionGPUGraphicsPipeline(device_ctx.get());
-  selection_compute_pipeline =
+  selection_pipeline = createSelectionGPUGraphicsPipeline(device_ctx.get());
+  difference_blend_pipeline =
       createDifferenceBlendGPUPipeline(device_ctx.get());
   caption_sequencer.instantiate(main_window.get());
 }
@@ -1027,8 +1021,7 @@ void GPURenderSequencer::selected_areas_draw() {
                    static_cast<int>(swapchain_h)};
   SDL_SetGPUScissor(renderPass.get(), &scissor);
 
-  SDL_BindGPUGraphicsPipeline(renderPass.get(),
-                              app->selection_graphics_pipeline.get());
+  SDL_BindGPUGraphicsPipeline(renderPass.get(), app->selection_pipeline.get());
   SDL_GPUBufferBinding instanceBinding{app->selection_instances.get(), 0};
   SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
 
@@ -1039,6 +1032,8 @@ void GPURenderSequencer::selected_areas_draw() {
   RectUniform rectUni{};
   rectUni.viewport[0] = static_cast<float>(swapchain_w);
   rectUni.viewport[1] = static_cast<float>(swapchain_h);
+  std::array<float, 2> tx{0, static_cast<float>(swapchain_h)};
+  std::memcpy(&rectUni.translate, tx.data(), sizeof(RectUniform::translate));
   SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
   struct alignas(16) SolidUniform {
     float color[4];
@@ -1059,18 +1054,11 @@ void GPURenderSequencer::selected_areas_blend() {
   UniqueGPUComputePass computePass = beginGPUComputePass(cmd, &textureRW);
 
   SDL_BindGPUComputePipeline(computePass.get(),
-                             app->selection_compute_pipeline.get());
-  SDL_GPUBuffer *areaBuf = app->selection_buffer.get();
-  SDL_BindGPUComputeStorageBuffers(computePass.get(), 0, &areaBuf, 1);
-  SDL_GPUTexture *baseTexture = app->offscreen_texture.get();
-  SDL_BindGPUComputeStorageTextures(computePass.get(), 0, &baseTexture, 1);
-
-  struct DifferenceBlendUniform {
-    uint length;
-  };
-  DifferenceBlendUniform diffUni{.length = 1};
-  SDL_PushGPUComputeUniformData(cmd, 0, &diffUni,
-                                sizeof(DifferenceBlendUniform));
+                             app->difference_blend_pipeline.get());
+  std::array<SDL_GPUTexture *, 2> storageTextures{app->offscreen_texture.get(),
+                                                  app->selection_texture.get()};
+  SDL_BindGPUComputeStorageTextures(
+      computePass.get(), 0, storageTextures.data(), storageTextures.size());
 
   std::uint32_t ceiledX{(swapchain_w + 7) / 8};
   std::uint32_t ceiledY{(swapchain_h + 7) / 8};
@@ -1308,9 +1296,9 @@ GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
                          bitmapGlyph->left * 64) /
       64.0f;
   vertexInstance.rect_pos[1] =
-      -1.0f * static_cast<float>(positions[glyphIndex].y_offset) / 64.0f +
       static_cast<float>(bitmapGlyph->top -
-                         static_cast<int>(bitmapGlyph->bitmap.rows));
+                         static_cast<int>(bitmapGlyph->bitmap.rows)) -
+      static_cast<float>(positions[glyphIndex].y_offset) / 64.0f;
   float bitmapW = static_cast<float>(bitmapGlyph->bitmap.width);
   float bitmapH = static_cast<float>(bitmapGlyph->bitmap.rows);
   vertexInstance.rect_size[0] = bitmapW;
@@ -1493,18 +1481,8 @@ void AppState::caption_reflow() {
 }
 
 void CopypassTaskVisitor::operator()(CopySelectionAreas task) const {
-  SDL_GPUTransferBufferLocation bufferSource{
-      .transfer_buffer = task.app->selection_buffer_transfer.get(),
-      .offset = 0};
-  SDL_GPUBufferRegion bufferDest{};
-  bufferDest.buffer = task.app->selection_buffer.get();
-  bufferDest.size = static_cast<std::uint32_t>(
-      task.app->selection_areas.size() * sizeof(DifferenceBlendArea));
-  SDL_UploadToGPUBuffer(copypass, &bufferSource, &bufferDest, false);
-
   SDL_GPUTransferBufferLocation instancesSource{
-      .transfer_buffer = task.app->selection_instances_transfer.get(),
-      .offset = 0};
+      .transfer_buffer = task.app->selection_transfer.get(), .offset = 0};
   SDL_GPUBufferRegion instancesDest{};
   instancesDest.buffer = task.app->selection_instances.get();
   instancesDest.size = static_cast<std::uint32_t>(
@@ -1521,19 +1499,6 @@ void AppState::selection_reflow() {
 }
 
 void AppState::verify_selection_capacity() {
-  std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      selection_areas.size() * sizeof(DifferenceBlendArea))};
-  if (bufferSize <= selection_buffer_capacity)
-    return;
-  selection_buffer_capacity = std::max(1u << std::bit_width(bufferSize),
-                                       selection_buffer_capacity * 2u);
-  SDL_GPUBufferCreateInfo bufferInfo{
-      .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
-      .size = selection_buffer_capacity};
-  selection_buffer = createGPUBuffer(device_ctx.get(), &bufferInfo);
-  selection_buffer_transfer =
-      createGPUTransferBuffer(device_ctx.get(), selection_buffer_capacity);
-
   std::uint32_t instancesSize{static_cast<std::uint32_t>(
       selection_areas.size() * sizeof(RectVertexInstance))};
   if (instancesSize <= selection_instances_capacity)
@@ -1543,30 +1508,21 @@ void AppState::verify_selection_capacity() {
   SDL_GPUBufferCreateInfo instancesInfo{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
                                         .size = selection_instances_capacity};
   selection_instances = createGPUBuffer(device_ctx.get(), &instancesInfo);
-  selection_instances_transfer =
+  selection_transfer =
       createGPUTransferBuffer(device_ctx.get(), selection_instances_capacity);
 }
 
 void AppState::transfer_selection_areas() {
-  UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
-      device_ctx.get(), selection_buffer_transfer.get(), true);
-  for (auto [idx, rect] : selection_areas | std::views::enumerate) {
-    DifferenceBlendArea area{.rect = {std::get<0>(rect), std::get<1>(rect),
-                                      std::get<2>(rect), std::get<3>(rect)},
-                             .color = {1.0f, 1.0f, 1.0f, 1.0f}};
-    std::memcpy(static_cast<DifferenceBlendArea *>(mappedBuffer.get()) + idx,
-                &area, sizeof(DifferenceBlendArea));
-  }
-
-  UniqueGPUMappedBuffer mappedInstances = mapGPUTransferBuffer(
-      device_ctx.get(), selection_instances_transfer.get(), true);
+  UniqueGPUMappedBuffer selectionMapped =
+      mapGPUTransferBuffer(device_ctx.get(), selection_transfer.get(), true);
   for (auto [idx, rect] : selection_areas | std::views::enumerate) {
     RectVertexInstance rectInstance{};
     rectInstance.rect_pos[0] = static_cast<float>(std::get<0>(rect));
-    rectInstance.rect_pos[1] = static_cast<float>(std::get<1>(rect));
+    rectInstance.rect_pos[1] =
+        -1.0f * static_cast<float>(std::get<1>(rect) + std::get<3>(rect));
     rectInstance.rect_size[0] = static_cast<float>(std::get<2>(rect));
     rectInstance.rect_size[1] = static_cast<float>(std::get<3>(rect));
-    std::memcpy(static_cast<RectVertexInstance *>(mappedInstances.get()) + idx,
+    std::memcpy(static_cast<RectVertexInstance *>(selectionMapped.get()) + idx,
                 &rectInstance, sizeof(RectVertexInstance));
   }
 }
