@@ -86,7 +86,7 @@ UniqueHarfbuzzFont createHarfbuzzFont(FT_Library library, const char *filepath,
   face.reset(facePtr);
   FT_UInt fontDPI = static_cast<FT_UInt>(96.0f * displayScale);
   if (FT_Set_Char_Size(face.get(), 0, fontsize, fontDPI, fontDPI))
-    throw std::runtime_error{"FT_Set_Pixel_Sizes failed!"};
+    throw std::runtime_error{"FT_Set_Char_Size failed!"};
   return UniqueHarfbuzzFont{hb_ft_font_create_referenced(face.get())};
 }
 
@@ -703,14 +703,10 @@ struct GlyphSequencer {
   UniqueGPUTransferBuffer atlas_transfer;
   UniqueGPUTexture atlas_texture;
 
-  hb_position_t horz_least = 0, horz_most = 0;
-  hb_position_t vert_least = 0, vert_most = 0;
-  int measured_w() {
-    return static_cast<int>(horz_most - horz_least + 63) / 64;
-  }
-  int measured_h() {
-    return static_cast<int>(vert_most - vert_least + 63) / 64;
-  }
+  hb_position_t horz_min = 0, horz_max = 0;
+  hb_position_t vert_min = 0, vert_max = 0;
+  int measured_w() { return static_cast<int>(horz_max - horz_min + 63) / 64; }
+  int measured_h() { return static_cast<int>(vert_max - vert_min + 63) / 64; }
 
   struct ClusterElement {
     std::uint32_t cluster;
@@ -807,6 +803,7 @@ struct AppState {
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
 
+  std::optional<std::array<std::uint32_t, 4>> current_selection;
   std::vector<std::array<std::uint32_t, 4>> selection_areas;
 
   UniqueGPUGraphicsPipeline selection_pipeline;
@@ -818,6 +815,7 @@ struct AppState {
 
   void verify_selection_capacity();
   void transfer_selection_areas();
+  void selection_reflow();
 
   CopypassTable copypass_tasks;
 
@@ -825,8 +823,9 @@ struct AppState {
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
 
   void instantiate(FT_Library library);
+
+  void caption_measure(SDL_Rect &captionRect) noexcept;
   void caption_reflow();
-  void selection_reflow();
 };
 
 void AppState::instantiate(FT_Library library) {
@@ -835,7 +834,7 @@ void AppState::instantiate(FT_Library library) {
   setWindowMinimumSize(main_window.get(), INITIAL_WINDOW_W, INITIAL_WINDOW_H);
   main_window_for_gpu_device =
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
-  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
+  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 24 * 64,
                                      getWindowDisplayScale(main_window.get()));
   selection_pipeline = createSelectionGPUGraphicsPipeline(device_ctx.get());
   difference_blend_pipeline =
@@ -1081,6 +1080,17 @@ SDL_AppResult AppState::iterate() noexcept {
   }
 }
 
+void AppState::caption_measure(SDL_Rect &captionRect) noexcept {
+  static constexpr int PADDING_X = 1;
+  static constexpr int PADDING_Y = 4;
+  int horzOffset = static_cast<int>(caption_sequencer.horz_min / 64);
+  int vertOffset = static_cast<int>(caption_sequencer.vert_max / 64);
+  captionRect.x = caption_x + horzOffset - PADDING_X;
+  captionRect.y = caption_y + vertOffset - PADDING_Y;
+  captionRect.w = caption_sequencer.measured_w() + PADDING_X * 2;
+  captionRect.h = caption_sequencer.measured_h() + PADDING_Y * 2;
+}
+
 SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
   if (event->type == SDL_EVENT_QUIT)
     return SDL_APP_SUCCESS;
@@ -1089,24 +1099,19 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     SDL_Point clickPoint{};
     clickPoint.x = static_cast<int>(event->button.x);
     clickPoint.y = static_cast<int>(event->button.y);
-    constexpr int PADDING_X = 1;
-    constexpr int PADDING_Y = 4;
-    int horzOffset = static_cast<int>(caption_sequencer.horz_least / 64);
-    int vertOffset = static_cast<int>(caption_sequencer.vert_most / 64);
-    SDL_Rect captionRect{caption_x + horzOffset - PADDING_X,
-                         caption_y + vertOffset - PADDING_Y,
-                         caption_sequencer.measured_w() + PADDING_X * 2,
-                         caption_sequencer.measured_h() + PADDING_Y * 2};
+    SDL_Rect captionRect{};
+    caption_measure(captionRect);
     bool captionHit = SDL_PointInRect(&clickPoint, &captionRect);
-    selection_areas.clear();
+    current_selection.reset();
     if (captionHit) {
       std::array<std::uint32_t, 4> clickedArea{};
-      clickedArea[0] = static_cast<std::uint32_t>(captionRect.x);
-      clickedArea[1] = static_cast<std::uint32_t>(captionRect.y);
-      clickedArea[2] = static_cast<std::uint32_t>(captionRect.w);
-      clickedArea[3] = static_cast<std::uint32_t>(captionRect.h);
-      selection_areas.push_back(clickedArea);
+      std::get<0>(clickedArea) = static_cast<std::uint32_t>(captionRect.x);
+      std::get<1>(clickedArea) = static_cast<std::uint32_t>(captionRect.y);
+      std::get<2>(clickedArea) = static_cast<std::uint32_t>(captionRect.w);
+      std::get<3>(clickedArea) = static_cast<std::uint32_t>(captionRect.h);
+      current_selection = clickedArea;
     }
+    selection_areas.clear();
     selection_reflow();
     return SDL_APP_CONTINUE;
   }
@@ -1347,10 +1352,10 @@ void GlyphSequencer::queue_vertex_copypass() {
 }
 
 void GlyphSequencer::measure_text() {
-  horz_least = std::numeric_limits<hb_position_t>::max();
-  horz_most = std::numeric_limits<hb_position_t>::min();
-  vert_least = std::numeric_limits<hb_position_t>::max();
-  vert_most = std::numeric_limits<hb_position_t>::min();
+  horz_min = std::numeric_limits<hb_position_t>::max();
+  horz_max = std::numeric_limits<hb_position_t>::min();
+  vert_min = std::numeric_limits<hb_position_t>::max();
+  vert_max = std::numeric_limits<hb_position_t>::min();
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   const hb_glyph_position_t *positions =
@@ -1377,10 +1382,10 @@ void GlyphSequencer::measure_text() {
         -positions[c.glyph_index].y_offset - bitmapGlyph->top * 64;
     hb_position_t bottom = top + bitmapGlyph->bitmap.rows * 64;
 
-    horz_least = std::min(horz_least, left);
-    horz_most = std::max(horz_most, right);
-    vert_least = std::min(vert_least, top);
-    vert_most = std::max(vert_most, bottom);
+    horz_min = std::min(horz_min, left);
+    horz_max = std::max(horz_max, right);
+    vert_min = std::min(vert_min, top);
+    vert_max = std::max(vert_max, bottom);
   }
 }
 
