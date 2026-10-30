@@ -803,7 +803,7 @@ struct AppState {
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
 
-  std::optional<std::array<std::uint32_t, 4>> current_selection;
+  std::optional<std::array<float, 2>> selection_hold;
   std::vector<std::array<std::uint32_t, 4>> selection_areas;
 
   UniqueGPUGraphicsPipeline selection_pipeline;
@@ -1102,40 +1102,28 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     SDL_Rect captionBox{};
     caption_measure(captionBox);
     if (SDL_PointInRect(&clickPoint, &captionBox)) {
-      std::array<std::uint32_t, 4> clickedArea{};
-      std::get<0>(clickedArea) = static_cast<std::uint32_t>(clickPoint.x);
-      std::get<1>(clickedArea) = static_cast<std::uint32_t>(captionBox.y);
-      std::get<2>(clickedArea) = static_cast<std::uint32_t>(0);
-      std::get<3>(clickedArea) = static_cast<std::uint32_t>(captionBox.h);
-      current_selection = clickedArea;
+      std::array<float, 2> initialSelection{};
+      std::get<0>(initialSelection) = static_cast<float>(clickPoint.x);
+      std::get<1>(initialSelection) = static_cast<float>(clickPoint.x);
+      selection_hold = initialSelection;
     }
     selection_areas.clear();
     selection_reflow();
     return SDL_APP_CONTINUE;
   }
 
-  if (event->type == SDL_EVENT_MOUSE_MOTION && current_selection) {
+  if (event->type == SDL_EVENT_MOUSE_MOTION && selection_hold) {
     SDL_Rect captionBox{};
     caption_measure(captionBox);
     float captionMin = static_cast<float>(captionBox.x);
     float captionMax = static_cast<float>(captionBox.x + captionBox.w);
-    float currentX = static_cast<float>(std::get<0>(*current_selection));
-    float updatedX = std::clamp(event->motion.x, captionMin, captionMax);
-    std::array<std::uint32_t, 4> updatedSelection{*current_selection};
-    std::get<0>(updatedSelection) =
-        static_cast<std::uint32_t>(std::min(updatedX, currentX));
-    std::get<2>(updatedSelection) =
-        static_cast<std::uint32_t>(std::abs(updatedX - currentX));
-    current_selection = updatedSelection;
-    SDL_Log("x: %d, y: %d", std::get<0>(updatedSelection),
-            std::get<1>(updatedSelection));
-    SDL_Log("w: %d, h: %d", std::get<2>(updatedSelection),
-            std::get<3>(updatedSelection));
+    std::get<1>(*selection_hold) =
+        std::clamp(event->motion.x, captionMin, captionMax);
     return SDL_APP_CONTINUE;
   }
 
   if (event->type == SDL_EVENT_MOUSE_BUTTON_UP) {
-    current_selection.reset();
+    selection_hold.reset();
     SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
     return SDL_APP_CONTINUE;
   }
