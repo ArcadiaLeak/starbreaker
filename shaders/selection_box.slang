@@ -19,13 +19,13 @@ float sd_round_box(float2 point, float2 box, float r) {
 
 [shader("fragment")]
 float4 main(VSOutput input) : SV_Target {
-    float2 point = (input.uv * 2.0 - 1.0) * input.half_size;
-    float smallerSide = min(input.half_size.x, input.half_size.y);
-    float distance = sd_round_box(
-        point, input.half_size, smallerSide * u.radius);
-    float aaWidth = fwidth(distance) * 0.5;
-    aaWidth = isnan(aaWidth) ? 1e-5 : max(aaWidth, 1e-5);
-    float coverage = 1.0 - smoothstep(-aaWidth, aaWidth, distance);
+    float2 pLocal = (input.uv * 2.0 - 1.0) * input.half_size;
+    float smaller = min(input.half_size.x, input.half_size.y);
+    float nearest = sd_round_box(
+        pLocal, input.half_size, smaller * u.radius);
+    float aaFactor = fwidth(nearest) * 0.5;
+    aaFactor = isnan(aaFactor) ? 1e-5 : max(aaFactor, 1e-5);
+    float coverage = 1.0 - smoothstep(-aaFactor, aaFactor, nearest);
     if (coverage == 0.0)
         discard;
     return float4(u.blend_color.rgb, coverage);
