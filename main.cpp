@@ -824,7 +824,7 @@ struct AppState {
 
   void instantiate(FT_Library library);
 
-  void caption_measure(SDL_Rect &captionRect) noexcept;
+  void caption_measure(SDL_Rect &captionBox) noexcept;
   void caption_reflow();
 };
 
@@ -1080,15 +1080,15 @@ SDL_AppResult AppState::iterate() noexcept {
   }
 }
 
-void AppState::caption_measure(SDL_Rect &captionRect) noexcept {
+void AppState::caption_measure(SDL_Rect &captionBox) noexcept {
   static constexpr int PADDING_X = 1;
   static constexpr int PADDING_Y = 4;
   int horzOffset = static_cast<int>(caption_sequencer.horz_min / 64);
   int vertOffset = static_cast<int>(caption_sequencer.vert_max / 64);
-  captionRect.x = caption_x + horzOffset - PADDING_X;
-  captionRect.y = caption_y + vertOffset - PADDING_Y;
-  captionRect.w = caption_sequencer.measured_w() + PADDING_X * 2;
-  captionRect.h = caption_sequencer.measured_h() + PADDING_Y * 2;
+  captionBox.x = caption_x + horzOffset - PADDING_X;
+  captionBox.y = caption_y + vertOffset - PADDING_Y;
+  captionBox.w = caption_sequencer.measured_w() + PADDING_X * 2;
+  captionBox.h = caption_sequencer.measured_h() + PADDING_Y * 2;
 }
 
 SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
@@ -1099,16 +1099,14 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     SDL_Point clickPoint{};
     clickPoint.x = static_cast<int>(event->button.x);
     clickPoint.y = static_cast<int>(event->button.y);
-    SDL_Rect captionRect{};
-    caption_measure(captionRect);
-    bool captionHit = SDL_PointInRect(&clickPoint, &captionRect);
-    current_selection.reset();
-    if (captionHit) {
+    SDL_Rect captionBox{};
+    caption_measure(captionBox);
+    if (SDL_PointInRect(&clickPoint, &captionBox)) {
       std::array<std::uint32_t, 4> clickedArea{};
-      std::get<0>(clickedArea) = static_cast<std::uint32_t>(captionRect.x);
-      std::get<1>(clickedArea) = static_cast<std::uint32_t>(captionRect.y);
-      std::get<2>(clickedArea) = static_cast<std::uint32_t>(captionRect.w);
-      std::get<3>(clickedArea) = static_cast<std::uint32_t>(captionRect.h);
+      std::get<0>(clickedArea) = static_cast<std::uint32_t>(clickPoint.x);
+      std::get<1>(clickedArea) = static_cast<std::uint32_t>(captionBox.y);
+      std::get<2>(clickedArea) = static_cast<std::uint32_t>(0);
+      std::get<3>(clickedArea) = static_cast<std::uint32_t>(captionBox.h);
       current_selection = clickedArea;
     }
     selection_areas.clear();
@@ -1116,7 +1114,28 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     return SDL_APP_CONTINUE;
   }
 
+  if (event->type == SDL_EVENT_MOUSE_MOTION && current_selection) {
+    SDL_Rect captionBox{};
+    caption_measure(captionBox);
+    float captionMin = static_cast<float>(captionBox.x);
+    float captionMax = static_cast<float>(captionBox.x + captionBox.w);
+    float currentX = static_cast<float>(std::get<0>(*current_selection));
+    float updatedX = std::clamp(event->motion.x, captionMin, captionMax);
+    std::array<std::uint32_t, 4> updatedSelection{*current_selection};
+    std::get<0>(updatedSelection) =
+        static_cast<std::uint32_t>(std::min(updatedX, currentX));
+    std::get<2>(updatedSelection) =
+        static_cast<std::uint32_t>(std::abs(updatedX - currentX));
+    current_selection = updatedSelection;
+    SDL_Log("x: %d, y: %d", std::get<0>(updatedSelection),
+            std::get<1>(updatedSelection));
+    SDL_Log("w: %d, h: %d", std::get<2>(updatedSelection),
+            std::get<3>(updatedSelection));
+    return SDL_APP_CONTINUE;
+  }
+
   if (event->type == SDL_EVENT_MOUSE_BUTTON_UP) {
+    current_selection.reset();
     SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
     return SDL_APP_CONTINUE;
   }
