@@ -456,7 +456,7 @@ createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device) {
                                  .num_uniform_buffers = 1};
   UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
 
-  GPUShaderCreateInfo fragmentInfo{.filepath = "rounded_box.spv",
+  GPUShaderCreateInfo fragmentInfo{.filepath = "selection_box.spv",
                                    .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                    .num_samplers = 0,
                                    .num_uniform_buffers = 1};
@@ -1041,7 +1041,7 @@ void GPURenderSequencer::selected_areas_draw() {
     float radius;
   };
   BoxUniform boxUniform{.blend_color = {1.0f, 1.0f, 1.0f, 1.0f},
-                        .radius = 3.0f};
+                        .radius = 0.2f};
   SDL_PushGPUFragmentUniformData(cmd, 0, &boxUniform, sizeof(BoxUniform));
 
   std::uint32_t instanceCount{
