@@ -698,7 +698,7 @@ struct GlyphAtlasCopier {
 
 struct GlyphClusterSection {
   std::uint32_t cluster;
-  std::span<const CodepointInfo> codepoints;
+  std::span<const CodepointInfo> codepoint_infos;
   std::span<const hb_glyph_position_t> positions;
 };
 
@@ -722,8 +722,9 @@ struct GlyphSequencer {
     return static_cast<int>(vert_max - vert_min + 63) / 64;
   }
 
-  std::vector<GlyphClusterSection> cluster_elements;
-  std::generator<GlyphClusterSection> match_cluster_elements();
+  std::vector<CodepointInfo> codepoint_infos;
+  std::vector<GlyphClusterSection> cluster_sections;
+  std::generator<GlyphClusterSection> emit_cluster_sections();
 
   UniqueGPUBuffer instance_buffer;
   UniqueGPUTransferBuffer instance_transfer;
@@ -1159,8 +1160,10 @@ void SelectionEventHandler::handle_mouse_button_down(
 
 void SelectionEventHandler::handle_mouse_button_up(
     const SDL_MouseButtonEvent &event) {
+  for (const GlyphClusterSection &clusterSection :
+       app->caption_sequencer.cluster_sections) {
+  }
   drag_state.reset();
-  SDL_Log("x: %f, y: %f", event.x, event.y);
 }
 
 void SelectionEventHandler::handle_mouse_motion(
@@ -1172,8 +1175,6 @@ void SelectionEventHandler::handle_mouse_motion(
     std::get<1>(drag_state->horz_segment) =
         std::clamp(event.x, captionMin, captionMax);
     copy_drag_state();
-    SDL_Log("start: %f, end: %f", std::get<0>(drag_state->horz_segment),
-            std::get<1>(drag_state->horz_segment));
   }
 }
 
@@ -1464,7 +1465,7 @@ void GlyphSequencer::measure_text() {
   }
 }
 
-std::generator<GlyphClusterSection> GlyphSequencer::match_cluster_elements() {
+std::generator<GlyphClusterSection> GlyphSequencer::emit_cluster_sections() {
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   const hb_glyph_position_t *positions =
@@ -1481,40 +1482,21 @@ std::generator<GlyphClusterSection> GlyphSequencer::match_cluster_elements() {
   for (const auto &clusterChunk :
        bufferPairs | std::views::chunk_by(clusterPredicate))
     clusterSpans.emplace_back(clusterChunk);
-  std::vector<CodepointInfo> codepointInfos{
-      std::from_range, emitCodepointInfo(app->caption_string)};
 
   for (const auto &[spanA, spanB] : clusterSpans | std::views::pairwise) {
     std::uint32_t clusterA = spanA.front().first;
     std::uint32_t clusterB = spanB.front().first;
     auto codepointA =
-        std::ranges::lower_bound(codepointInfos, clusterA, std::ranges::less{},
+        std::ranges::lower_bound(codepoint_infos, clusterA, std::ranges::less{},
                                  &CodepointInfo::byte_offset);
     auto codepointB =
-        std::ranges::lower_bound(codepointInfos, clusterB, std::ranges::less{},
+        std::ranges::lower_bound(codepoint_infos, clusterB, std::ranges::less{},
                                  &CodepointInfo::byte_offset);
-    std::ranges::subrange codepointsA{codepointA, codepointB};
-    auto codepointProject = [](const CodepointInfo &codepointInfo) {
-      return std::make_optional(codepointInfo);
-    };
-    std::ranges::concat_view codepointOptionals{
-        codepointsA | std::views::transform(codepointProject),
-        std::ranges::repeat_view{std::nullopt}};
-    auto clusterProject = [](const BufferPair &bufferPair) {
-      return bufferPair.second;
-    };
-    std::ranges::concat_view clusterPositions{
-        spanA | std::views::transform(clusterProject),
-        std::ranges::repeat_view{nullptr}};
-    std::size_t elementCount = std::max(spanA.size(), codepointsA.size());
-    std::ranges::zip_view elementTuples{std::ranges::repeat_view{clusterA},
-                                        codepointOptionals, clusterPositions};
-    auto elementProject = [](const auto &elementTuple) {
-      return std::make_from_tuple<GlyphClusterSection>(elementTuple);
-    };
-    auto elementBatch = elementTuples | std::views::transform(elementProject) |
-                        std::views::take(elementCount);
-    co_yield std::ranges::elements_of(elementBatch);
+    GlyphClusterSection clusterSection{};
+    clusterSection.cluster = clusterA;
+    clusterSection.codepoint_infos = {codepointA, codepointB};
+    clusterSection.positions = {spanA.front().second, spanA.size()};
+    co_yield clusterSection;
   }
 }
 
@@ -1554,10 +1536,12 @@ void AppState::caption_reflow() {
   caption_sequencer.glyphs_shape(caption_string);
   caption_sequencer.verify_glyph_cache();
   caption_sequencer.measure_text();
-  caption_sequencer.cluster_elements.clear();
-  std::generator<GlyphClusterSection> elementGenerator{
-      caption_sequencer.match_cluster_elements()};
-  caption_sequencer.cluster_elements.append_range(elementGenerator);
+  caption_sequencer.codepoint_infos.clear();
+  caption_sequencer.codepoint_infos.append_range(
+      emitCodepointInfo(caption_string));
+  caption_sequencer.cluster_sections.clear();
+  caption_sequencer.cluster_sections.append_range(
+      caption_sequencer.emit_cluster_sections());
   caption_x = (INITIAL_WINDOW_W - caption_sequencer.measured_w()) / 2;
   caption_y = (INITIAL_WINDOW_H - caption_sequencer.measured_h()) / 2;
   caption_sequencer.queue_vertex_copypass();
