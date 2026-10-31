@@ -1127,6 +1127,16 @@ std::uint32_t SelectionEventHandler::find_unoccupied_id() {
 void SelectionEventHandler::copy_selection_drag() {
   auto &[selectionX, selectionY, selectionW, selectionH] =
       app->selection_areas[selection_drag->selection_id];
+  float segmentMin = std::ranges::min(selection_drag->segment);
+  float segmentMax = std::ranges::max(selection_drag->segment);
+  selectionX = static_cast<std::uint32_t>(segmentMin);
+  selectionW = static_cast<std::uint32_t>(segmentMax - segmentMin);
+  static constexpr std::uint32_t MIN_SELECTION_W = 2u;
+  selectionW = std::max(selectionW, MIN_SELECTION_W);
+  auto [captionX, captionY, captionW, captionH] = app->caption_measure();
+  selectionY = captionY;
+  selectionH = captionH;
+  app->selection_areas_flag = true;
 }
 
 void SelectionEventHandler::handle_mouse_button_down(
