@@ -792,15 +792,16 @@ struct GPURenderSequencer {
   void draw_processed_image();
 };
 
+struct SelectionDragState {
+  std::uint32_t selection_id;
+  std::array<float, 2> horz_segment;
+};
+
 struct SelectionEventHandler {
-  struct SelectionDrag {
-    std::uint32_t selection_id;
-    std::array<float, 2> segment;
-  };
   AppState *app;
-  std::optional<SelectionDrag> selection_drag;
+  std::optional<SelectionDragState> drag_state;
   std::uint32_t find_unoccupied_id();
-  void copy_selection_drag();
+  void copy_drag_state();
   void handle_mouse_button_down(const SDL_MouseButtonEvent &event);
   void handle_mouse_button_up(const SDL_MouseButtonEvent &event);
   void handle_mouse_motion(const SDL_MouseMotionEvent &event);
@@ -1126,11 +1127,11 @@ std::uint32_t SelectionEventHandler::find_unoccupied_id() {
              : std::get<0>(*zippedIt);
 }
 
-void SelectionEventHandler::copy_selection_drag() {
+void SelectionEventHandler::copy_drag_state() {
   auto &[selectionX, selectionY, selectionW, selectionH] =
-      app->selection_areas[selection_drag->selection_id];
-  float segmentMin = std::ranges::min(selection_drag->segment);
-  float segmentMax = std::ranges::max(selection_drag->segment);
+      app->selection_areas[drag_state->selection_id];
+  float segmentMin = std::ranges::min(drag_state->horz_segment);
+  float segmentMax = std::ranges::max(drag_state->horz_segment);
   selectionX = static_cast<std::uint32_t>(segmentMin);
   selectionW = static_cast<std::uint32_t>(segmentMax - segmentMin);
   static constexpr std::uint32_t MIN_SELECTION_W = 2u;
@@ -1149,32 +1150,31 @@ void SelectionEventHandler::handle_mouse_button_down(
   app->selection_areas.clear();
   if (not SDL_PointInRect(&clickPoint, &captionBox))
     return;
-  SelectionDrag initialSelection{};
-  initialSelection.selection_id = find_unoccupied_id();
-  initialSelection.segment = {static_cast<float>(clickPoint.x),
-                              static_cast<float>(clickPoint.x)};
-  selection_drag = initialSelection;
-  copy_selection_drag();
+  drag_state.emplace();
+  drag_state->selection_id = find_unoccupied_id();
+  std::get<0>(drag_state->horz_segment) = static_cast<float>(clickPoint.x);
+  std::get<1>(drag_state->horz_segment) = static_cast<float>(clickPoint.x);
+  copy_drag_state();
 }
 
 void SelectionEventHandler::handle_mouse_button_up(
     const SDL_MouseButtonEvent &event) {
-  selection_drag.reset();
+  drag_state.reset();
   SDL_Log("x: %f, y: %f", event.x, event.y);
 }
 
 void SelectionEventHandler::handle_mouse_motion(
     const SDL_MouseMotionEvent &event) {
-  if (not selection_drag)
-    return;
-  auto [captionX, captionY, captionW, captionH] = app->caption_measure();
-  float captionMin = static_cast<float>(captionX);
-  float captionMax = static_cast<float>(captionX + captionW);
-  std::get<1>(selection_drag->segment) =
-      std::clamp(event.x, captionMin, captionMax);
-  copy_selection_drag();
-  SDL_Log("start: %f, end: %f", std::get<0>(selection_drag->segment),
-          std::get<1>(selection_drag->segment));
+  if (drag_state.has_value()) {
+    auto [captionX, captionY, captionW, captionH] = app->caption_measure();
+    float captionMin = static_cast<float>(captionX);
+    float captionMax = static_cast<float>(captionX + captionW);
+    std::get<1>(drag_state->horz_segment) =
+        std::clamp(event.x, captionMin, captionMax);
+    copy_drag_state();
+    SDL_Log("start: %f, end: %f", std::get<0>(drag_state->horz_segment),
+            std::get<1>(drag_state->horz_segment));
+  }
 }
 
 SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
