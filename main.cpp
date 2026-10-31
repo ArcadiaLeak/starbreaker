@@ -696,10 +696,10 @@ struct GlyphAtlasCopier {
   void copy_bitmap_row(std::uint32_t row);
 };
 
-struct GlyphClusterElement {
+struct GlyphClusterSection {
   std::uint32_t cluster;
-  std::optional<CodepointInfo> codepoint_info;
-  const hb_glyph_position_t *position;
+  std::span<const CodepointInfo> codepoints;
+  std::span<const hb_glyph_position_t> positions;
 };
 
 struct AppState;
@@ -722,8 +722,8 @@ struct GlyphSequencer {
     return static_cast<int>(vert_max - vert_min + 63) / 64;
   }
 
-  std::vector<GlyphClusterElement> cluster_elements;
-  std::generator<GlyphClusterElement> match_cluster_elements();
+  std::vector<GlyphClusterSection> cluster_elements;
+  std::generator<GlyphClusterSection> match_cluster_elements();
 
   UniqueGPUBuffer instance_buffer;
   UniqueGPUTransferBuffer instance_transfer;
@@ -1464,7 +1464,7 @@ void GlyphSequencer::measure_text() {
   }
 }
 
-std::generator<GlyphClusterElement> GlyphSequencer::match_cluster_elements() {
+std::generator<GlyphClusterSection> GlyphSequencer::match_cluster_elements() {
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   const hb_glyph_position_t *positions =
@@ -1510,7 +1510,7 @@ std::generator<GlyphClusterElement> GlyphSequencer::match_cluster_elements() {
     std::ranges::zip_view elementTuples{std::ranges::repeat_view{clusterA},
                                         codepointOptionals, clusterPositions};
     auto elementProject = [](const auto &elementTuple) {
-      return std::make_from_tuple<GlyphClusterElement>(elementTuple);
+      return std::make_from_tuple<GlyphClusterSection>(elementTuple);
     };
     auto elementBatch = elementTuples | std::views::transform(elementProject) |
                         std::views::take(elementCount);
@@ -1555,7 +1555,7 @@ void AppState::caption_reflow() {
   caption_sequencer.verify_glyph_cache();
   caption_sequencer.measure_text();
   caption_sequencer.cluster_elements.clear();
-  std::generator<GlyphClusterElement> elementGenerator{
+  std::generator<GlyphClusterSection> elementGenerator{
       caption_sequencer.match_cluster_elements()};
   caption_sequencer.cluster_elements.append_range(elementGenerator);
   caption_x = (INITIAL_WINDOW_W - caption_sequencer.measured_w()) / 2;
