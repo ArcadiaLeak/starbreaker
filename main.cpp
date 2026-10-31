@@ -651,14 +651,14 @@ struct UTextDeleter {
 using UniqueUText = std::unique_ptr<UText, UTextDeleter>;
 
 UniqueUText utextOpenUTF8(std::string_view strView) {
+  std::int64_t textLen = static_cast<std::int64_t>(strView.size());
   UErrorCode status{U_ZERO_ERROR};
-  UText *utextPtr =
-      utext_openUTF8(nullptr, strView.data(),
-                     static_cast<std::int64_t>(strView.size()), &status);
-  if (U_FAILURE(status))
-    throw std::runtime_error{std::string{"utext_openUTF8 failed: "} +
-                             u_errorName(status)};
-  return UniqueUText{utextPtr};
+  UText *textPtr = utext_openUTF8(nullptr, strView.data(), textLen, &status);
+  if (U_FAILURE(status)) {
+    std::string errorMsg{"utext_openUTF8 failed: "};
+    throw std::runtime_error{errorMsg + u_errorName(status)};
+  }
+  return UniqueUText{textPtr};
 }
 
 struct CodepointInfo {
@@ -666,41 +666,48 @@ struct CodepointInfo {
   UChar32 codepoint;
 };
 std::generator<CodepointInfo> emitCodepointInfo(std::string_view strView) {
-  UniqueUText u8Text = utextOpenUTF8(strView);
-  while (true) {
-    std::int64_t byteOffset = utext_getNativeIndex(u8Text.get());
-    UChar32 codepoint = utext_next32(u8Text.get());
-    if (codepoint == U_SENTINEL)
-      co_return;
-    CodepointInfo codepointInfo{static_cast<std::uint32_t>(byteOffset),
-                                codepoint};
-    co_yield codepointInfo;
-  }
+  UniqueUText uText = utextOpenUTF8(strView);
+uTextLoop:
+  std::int64_t byteOffset = utext_getNativeIndex(uText.get());
+  UChar32 codepoint = utext_next32(uText.get());
+  if (codepoint == U_SENTINEL)
+    co_return;
+  CodepointInfo codepointInfo{};
+  codepointInfo.byte_offset = static_cast<std::uint32_t>(byteOffset);
+  codepointInfo.codepoint = codepoint;
+  co_yield codepointInfo;
+  goto uTextLoop;
 }
 
-struct AppState;
+struct GlyphAtlasInfo {
+  std::uint32_t x, y, page;
+};
+struct GlyphCacheItem {
+  UniqueFreetypeGlyph freetype_glyph;
+  std::unique_ptr<GlyphAtlasInfo> atlas;
+};
+using GlyphCache = std::map<hb_codepoint_t, GlyphCacheItem>;
 
+struct GlyphAtlasCopier {
+  UniqueGPUMappedBuffer mapped_atlas;
+  const GlyphAtlasInfo *atlas_info;
+  const FT_Bitmap *bitmap;
+  void copy_bitmap(const GlyphCacheItem &cacheItem);
+  void copy_bitmap_row(std::uint32_t row);
+};
+
+struct GlyphClusterElement {
+  std::uint32_t cluster;
+  std::optional<CodepointInfo> codepoint_info;
+  const hb_glyph_position_t *position;
+};
+
+struct AppState;
 struct GlyphSequencer {
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
-
-  struct GlyphAtlasInfo {
-    std::uint32_t x, y, page;
-  };
-  struct GlyphCacheItem {
-    UniqueFreetypeGlyph freetype_glyph;
-    std::unique_ptr<GlyphAtlasInfo> atlas;
-  };
-  using GlyphCache = std::map<hb_codepoint_t, GlyphCacheItem>;
   GlyphCache glyph_cache;
 
-  struct AtlasCopier {
-    UniqueGPUMappedBuffer mapped_atlas;
-    const GlyphAtlasInfo *atlas_info;
-    const FT_Bitmap *bitmap;
-    void copy_bitmap(const GlyphCacheItem &cacheItem);
-    void copy_bitmap_row(std::uint32_t row);
-  };
   static constexpr std::uint32_t ATLAS_SIDE = 1024;
   static constexpr std::uint32_t ATLAS_PADDING = 1;
   UniqueGPUTransferBuffer atlas_transfer;
@@ -715,12 +722,8 @@ struct GlyphSequencer {
     return static_cast<int>(vert_max - vert_min + 63) / 64;
   }
 
-  struct ClusterElement {
-    std::uint32_t cluster;
-    std::optional<CodepointInfo> codepoint_info;
-    const hb_glyph_position_t *position;
-  };
-  std::vector<ClusterElement> cluster_elements;
+  std::vector<GlyphClusterElement> cluster_elements;
+  std::generator<GlyphClusterElement> match_cluster_elements();
 
   UniqueGPUBuffer instance_buffer;
   UniqueGPUTransferBuffer instance_transfer;
@@ -743,7 +746,6 @@ struct GlyphSequencer {
   void verify_glyph_cache();
   void pack_atlas();
   void measure_text();
-  std::generator<ClusterElement> match_cluster_elements();
 };
 
 struct CopyGlyphAtlas {
@@ -1319,7 +1321,7 @@ void GlyphSequencer::pack_atlas() {
         entryView.atlas->y = shelfView.accumulated_y;
         entryView.atlas->x = entryView.accumulated_x;
       }
-  AtlasCopier atlasCopier{};
+  GlyphAtlasCopier atlasCopier{};
   atlasCopier.mapped_atlas =
       mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true);
   std::memset(atlasCopier.mapped_atlas.get(), 0, ATLAS_SIDE * ATLAS_SIDE);
@@ -1327,17 +1329,18 @@ void GlyphSequencer::pack_atlas() {
     atlasCopier.copy_bitmap(cacheItem);
 }
 
-void GlyphSequencer::AtlasCopier::copy_bitmap(const GlyphCacheItem &cacheItem) {
+void GlyphAtlasCopier::copy_bitmap(const GlyphCacheItem &cacheItem) {
   atlas_info = cacheItem.atlas.get();
   bitmap = &asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
   for (std::uint32_t row = 0; row < bitmap->rows; ++row)
     copy_bitmap_row(row);
 }
 
-void GlyphSequencer::AtlasCopier::copy_bitmap_row(std::uint32_t row) {
+void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row) {
   unsigned char *source = bitmap->buffer + row * bitmap->pitch;
   std::uint32_t atlasVertOffset = atlas_info->y + row;
-  std::uint32_t atlasFullOffset = atlasVertOffset * ATLAS_SIDE + atlas_info->x;
+  std::uint32_t atlasFullOffset =
+      atlasVertOffset * GlyphSequencer::ATLAS_SIDE + atlas_info->x;
   unsigned char *transferStart =
       static_cast<unsigned char *>(mapped_atlas.get());
   std::memcpy(transferStart + atlasFullOffset, source, bitmap->width);
@@ -1461,8 +1464,7 @@ void GlyphSequencer::measure_text() {
   }
 }
 
-std::generator<GlyphSequencer::ClusterElement>
-GlyphSequencer::match_cluster_elements() {
+std::generator<GlyphClusterElement> GlyphSequencer::match_cluster_elements() {
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   const hb_glyph_position_t *positions =
@@ -1508,7 +1510,7 @@ GlyphSequencer::match_cluster_elements() {
     std::ranges::zip_view elementTuples{std::ranges::repeat_view{clusterA},
                                         codepointOptionals, clusterPositions};
     auto elementProject = [](const auto &elementTuple) {
-      return std::make_from_tuple<ClusterElement>(elementTuple);
+      return std::make_from_tuple<GlyphClusterElement>(elementTuple);
     };
     auto elementBatch = elementTuples | std::views::transform(elementProject) |
                         std::views::take(elementCount);
@@ -1553,8 +1555,9 @@ void AppState::caption_reflow() {
   caption_sequencer.verify_glyph_cache();
   caption_sequencer.measure_text();
   caption_sequencer.cluster_elements.clear();
-  caption_sequencer.cluster_elements.append_range(
-      caption_sequencer.match_cluster_elements());
+  std::generator<GlyphClusterElement> elementGenerator{
+      caption_sequencer.match_cluster_elements()};
+  caption_sequencer.cluster_elements.append_range(elementGenerator);
   caption_x = (INITIAL_WINDOW_W - caption_sequencer.measured_w()) / 2;
   caption_y = (INITIAL_WINDOW_H - caption_sequencer.measured_h()) / 2;
   caption_sequencer.queue_vertex_copypass();
