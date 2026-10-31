@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <flat_map>
 #include <format>
 #include <generator>
 #include <inplace_vector>
@@ -29,7 +30,7 @@
 #include <vulkan/vulkan.h>
 
 struct RectVertexInstance {
-  float rect_pos[2];
+  float rect_position[2];
   float rect_size[2];
   float uv_rect[4];
 };
@@ -415,7 +416,8 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
   std::get<0>(vertexAttributes).location = 0;
   std::get<0>(vertexAttributes).buffer_slot = 0;
   std::get<0>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<0>(vertexAttributes).offset = offsetof(RectVertexInstance, rect_pos);
+  std::get<0>(vertexAttributes).offset =
+      offsetof(RectVertexInstance, rect_position);
   std::get<1>(vertexAttributes).location = 1;
   std::get<1>(vertexAttributes).buffer_slot = 0;
   std::get<1>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
@@ -485,7 +487,8 @@ createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device) {
   std::get<0>(vertexAttributes).location = 0;
   std::get<0>(vertexAttributes).buffer_slot = 0;
   std::get<0>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<0>(vertexAttributes).offset = offsetof(RectVertexInstance, rect_pos);
+  std::get<0>(vertexAttributes).offset =
+      offsetof(RectVertexInstance, rect_position);
   std::get<1>(vertexAttributes).location = 1;
   std::get<1>(vertexAttributes).buffer_slot = 0;
   std::get<1>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
@@ -705,8 +708,12 @@ struct GlyphSequencer {
 
   hb_position_t horz_min = 0, horz_max = 0;
   hb_position_t vert_min = 0, vert_max = 0;
-  int measured_w() { return static_cast<int>(horz_max - horz_min + 63) / 64; }
-  int measured_h() { return static_cast<int>(vert_max - vert_min + 63) / 64; }
+  int measured_w() noexcept {
+    return static_cast<int>(horz_max - horz_min + 63) / 64;
+  }
+  int measured_h() noexcept {
+    return static_cast<int>(vert_max - vert_min + 63) / 64;
+  }
 
   struct ClusterElement {
     std::uint32_t cluster;
@@ -803,8 +810,12 @@ struct AppState {
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
 
-  std::optional<std::array<float, 2>> selection_hold;
-  std::vector<std::array<std::uint32_t, 4>> selection_areas;
+  struct SelectionHold {
+    std::uint32_t selection_id;
+    std::array<float, 2> segment;
+  };
+  std::optional<SelectionHold> selection_hold;
+  std::flat_map<std::uint32_t, std::array<std::uint32_t, 4>> selection_areas;
 
   UniqueGPUGraphicsPipeline selection_pipeline;
   UniqueGPUComputePipeline difference_blend_pipeline;
@@ -824,7 +835,7 @@ struct AppState {
 
   void instantiate(FT_Library library);
 
-  void caption_measure(SDL_Rect &captionBox) noexcept;
+  std::array<int, 4> caption_measure() noexcept;
   void caption_reflow();
 };
 
@@ -1080,15 +1091,17 @@ SDL_AppResult AppState::iterate() noexcept {
   }
 }
 
-void AppState::caption_measure(SDL_Rect &captionBox) noexcept {
+std::array<int, 4> AppState::caption_measure() noexcept {
   static constexpr int PADDING_X = 1;
   static constexpr int PADDING_Y = 4;
   int horzOffset = static_cast<int>(caption_sequencer.horz_min / 64);
   int vertOffset = static_cast<int>(caption_sequencer.vert_max / 64);
-  captionBox.x = caption_x + horzOffset - PADDING_X;
-  captionBox.y = caption_y + vertOffset - PADDING_Y;
-  captionBox.w = caption_sequencer.measured_w() + PADDING_X * 2;
-  captionBox.h = caption_sequencer.measured_h() + PADDING_Y * 2;
+  std::array<int, 4> captionBox{};
+  std::get<0>(captionBox) = caption_x + horzOffset - PADDING_X;
+  std::get<1>(captionBox) = caption_y + vertOffset - PADDING_Y;
+  std::get<2>(captionBox) = caption_sequencer.measured_w() + PADDING_X * 2;
+  std::get<3>(captionBox) = caption_sequencer.measured_h() + PADDING_Y * 2;
+  return captionBox;
 }
 
 SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
@@ -1096,29 +1109,40 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
     return SDL_APP_SUCCESS;
 
   if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+    auto findUnoccupiedID = [this]() -> std::uint32_t {
+      auto zippedPairs = std::ranges::zip_view{
+          std::ranges::iota_view<std::uint32_t>{}, selection_areas.keys()};
+      auto zippedPred = [](auto p) { return std::get<0>(p) != std::get<1>(p); };
+      auto zippedIt = std::ranges::find_if(zippedPairs, zippedPred);
+      return zippedIt == zippedPairs.end()
+                 ? static_cast<uint32_t>(selection_areas.size())
+                 : std::get<0>(*zippedIt);
+    };
     SDL_Point clickPoint{};
     clickPoint.x = static_cast<int>(event->button.x);
     clickPoint.y = static_cast<int>(event->button.y);
-    SDL_Rect captionBox{};
-    caption_measure(captionBox);
+    auto [captionX, captionY, captionW, captionH] = caption_measure();
+    SDL_Rect captionBox{captionX, captionY, captionW, captionH};
+    selection_areas.clear();
     if (SDL_PointInRect(&clickPoint, &captionBox)) {
-      std::array<float, 2> initialSelection{};
-      std::get<0>(initialSelection) = static_cast<float>(clickPoint.x);
-      std::get<1>(initialSelection) = static_cast<float>(clickPoint.x);
+      SelectionHold initialSelection{};
+      initialSelection.selection_id = findUnoccupiedID();
+      initialSelection.segment = {static_cast<float>(clickPoint.x),
+                                  static_cast<float>(clickPoint.x)};
       selection_hold = initialSelection;
     }
-    selection_areas.clear();
     selection_reflow();
     return SDL_APP_CONTINUE;
   }
 
   if (event->type == SDL_EVENT_MOUSE_MOTION && selection_hold) {
-    SDL_Rect captionBox{};
-    caption_measure(captionBox);
-    float captionMin = static_cast<float>(captionBox.x);
-    float captionMax = static_cast<float>(captionBox.x + captionBox.w);
-    std::get<1>(*selection_hold) =
+    auto [captionX, captionY, captionW, captionH] = caption_measure();
+    float captionMin = static_cast<float>(captionX);
+    float captionMax = static_cast<float>(captionX + captionW);
+    std::get<1>(selection_hold->segment) =
         std::clamp(event->motion.x, captionMin, captionMax);
+    SDL_Log("start: %f, end: %f", std::get<0>(selection_hold->segment),
+            std::get<1>(selection_hold->segment));
     return SDL_APP_CONTINUE;
   }
 
@@ -1306,11 +1330,11 @@ GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
   FT_BitmapGlyph bitmapGlyph =
       asBitmapGlyph(cacheIt->second.freetype_glyph.get());
   RectVertexInstance vertexInstance{};
-  vertexInstance.rect_pos[0] =
+  vertexInstance.rect_position[0] =
       static_cast<float>(penX + positions[glyphIndex].x_offset +
                          bitmapGlyph->left * 64) /
       64.0f;
-  vertexInstance.rect_pos[1] =
+  vertexInstance.rect_position[1] =
       static_cast<float>(bitmapGlyph->top -
                          static_cast<int>(bitmapGlyph->bitmap.rows)) -
       static_cast<float>(positions[glyphIndex].y_offset) / 64.0f;
@@ -1530,13 +1554,13 @@ void AppState::verify_selection_capacity() {
 void AppState::transfer_selection_areas() {
   UniqueGPUMappedBuffer selectionMapped =
       mapGPUTransferBuffer(device_ctx.get(), selection_transfer.get(), true);
-  for (auto [idx, rect] : selection_areas | std::views::enumerate) {
+  for (auto [idx, entry] : selection_areas | std::views::enumerate) {
+    auto [rectX, rectY, rectW, rectH] = entry.second;
     RectVertexInstance rectInstance{};
-    rectInstance.rect_pos[0] = static_cast<float>(std::get<0>(rect));
-    rectInstance.rect_pos[1] =
-        -1.0f * static_cast<float>(std::get<1>(rect) + std::get<3>(rect));
-    rectInstance.rect_size[0] = static_cast<float>(std::get<2>(rect));
-    rectInstance.rect_size[1] = static_cast<float>(std::get<3>(rect));
+    rectInstance.rect_position[0] = static_cast<float>(rectX);
+    rectInstance.rect_position[1] = static_cast<float>(rectY + rectH) * -1.0f;
+    rectInstance.rect_size[0] = static_cast<float>(rectW);
+    rectInstance.rect_size[1] = static_cast<float>(rectH);
     rectInstance.uv_rect[2] = 1.0f;
     rectInstance.uv_rect[3] = 1.0f;
     std::memcpy(static_cast<RectVertexInstance *>(selectionMapped.get()) + idx,

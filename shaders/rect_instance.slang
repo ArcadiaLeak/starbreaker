@@ -13,7 +13,7 @@ struct RectUniform {
 ConstantBuffer<RectUniform> rectUni;
 
 struct InstanceIn {
-    [[vk::location(0)]] float2 rect_pos  : TEXCOORD0;
+    [[vk::location(0)]] float2 rect_position  : TEXCOORD0;
     [[vk::location(1)]] float2 rect_size : TEXCOORD1;
     [[vk::location(2)]] float4 uv_rect   : TEXCOORD2;
 };
@@ -23,7 +23,7 @@ VSOutput main(uint vertexID : SV_VulkanVertexID, InstanceIn inst) {
     uint i = vertexID & 3u;
     float2 corner = float2(float(i & 1u), float(i >> 1u));
     float2 pixelCoords =
-        rectUni.translate + inst.rect_pos + corner * inst.rect_size;
+        rectUni.translate + inst.rect_position + corner * inst.rect_size;
     float2 deviceCoords = pixelCoords * (2.0 / rectUni.viewport) - 1.0;
 
     VSOutput o;
