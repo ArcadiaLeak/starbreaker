@@ -772,8 +772,6 @@ struct CopypassTaskVisitor {
 struct GPUCommandSequencer {
   AppState *app;
   EngagedGPUCommandBuffer command_buffer;
-
-  void initiate();
   void issue_copy_pass();
   void issue_render_pass();
 };
@@ -790,6 +788,20 @@ struct GPURenderSequencer {
   void selected_areas_draw();
   void selected_areas_blend();
   void draw_processed_image();
+};
+
+struct SelectionEventHandler {
+  struct SelectionDrag {
+    std::uint32_t selection_id;
+    std::array<float, 2> segment;
+  };
+  AppState *app;
+  std::optional<SelectionDrag> selection_drag;
+  std::uint32_t find_unoccupied_id();
+  void copy_selection_drag();
+  void handle_mouse_button_down(const SDL_MouseButtonEvent &event);
+  void handle_mouse_button_up(const SDL_MouseButtonEvent &event);
+  void handle_mouse_motion(const SDL_MouseMotionEvent &event);
 };
 
 struct AppState {
@@ -810,12 +822,9 @@ struct AppState {
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
 
-  struct SelectionHold {
-    std::uint32_t selection_id;
-    std::array<float, 2> segment;
-  };
-  std::optional<SelectionHold> selection_hold;
+  SelectionEventHandler selection_handler{this};
   std::flat_map<std::uint32_t, std::array<std::uint32_t, 4>> selection_areas;
+  bool selection_areas_flag = false;
 
   UniqueGPUGraphicsPipeline selection_pipeline;
   UniqueGPUComputePipeline difference_blend_pipeline;
@@ -851,10 +860,6 @@ void AppState::instantiate(FT_Library library) {
   difference_blend_pipeline =
       createDifferenceBlendGPUPipeline(device_ctx.get());
   caption_sequencer.instantiate(main_window.get());
-}
-
-void GPUCommandSequencer::initiate() {
-  command_buffer = acquireGPUCommandBuffer(app->device_ctx.get());
 }
 
 void GPUCommandSequencer::issue_copy_pass() {
@@ -1080,8 +1085,13 @@ void GPURenderSequencer::selected_areas_blend() {
 
 SDL_AppResult AppState::iterate() noexcept {
   try {
+    if (selection_areas_flag && not selection_areas.empty()) {
+      selection_reflow();
+      selection_areas_flag = false;
+    }
     GPUCommandSequencer command_sequencer{this};
-    command_sequencer.initiate();
+    command_sequencer.command_buffer =
+        acquireGPUCommandBuffer(device_ctx.get());
     command_sequencer.issue_copy_pass();
     command_sequencer.issue_render_pass();
     return SDL_APP_CONTINUE;
@@ -1104,61 +1114,82 @@ std::array<int, 4> AppState::caption_measure() noexcept {
   return captionBox;
 }
 
+std::uint32_t SelectionEventHandler::find_unoccupied_id() {
+  auto zippedPairs = std::ranges::zip_view{
+      std::ranges::iota_view<std::uint32_t>{}, app->selection_areas.keys()};
+  auto zippedPred = [](auto p) { return std::get<0>(p) != std::get<1>(p); };
+  auto zippedIt = std::ranges::find_if(zippedPairs, zippedPred);
+  return zippedIt == zippedPairs.end()
+             ? static_cast<uint32_t>(app->selection_areas.size())
+             : std::get<0>(*zippedIt);
+}
+
+void SelectionEventHandler::copy_selection_drag() {
+  auto &[selectionX, selectionY, selectionW, selectionH] =
+      app->selection_areas[selection_drag->selection_id];
+}
+
+void SelectionEventHandler::handle_mouse_button_down(
+    const SDL_MouseButtonEvent &event) {
+  SDL_Point clickPoint{static_cast<int>(event.x), static_cast<int>(event.y)};
+  auto [captionX, captionY, captionW, captionH] = app->caption_measure();
+  SDL_Rect captionBox{captionX, captionY, captionW, captionH};
+  app->selection_areas.clear();
+  if (not SDL_PointInRect(&clickPoint, &captionBox))
+    return;
+  SelectionDrag initialSelection{};
+  initialSelection.selection_id = find_unoccupied_id();
+  initialSelection.segment = {static_cast<float>(clickPoint.x),
+                              static_cast<float>(clickPoint.x)};
+  selection_drag = initialSelection;
+  copy_selection_drag();
+}
+
+void SelectionEventHandler::handle_mouse_button_up(
+    const SDL_MouseButtonEvent &event) {
+  selection_drag.reset();
+  SDL_Log("x: %f, y: %f", event.x, event.y);
+}
+
+void SelectionEventHandler::handle_mouse_motion(
+    const SDL_MouseMotionEvent &event) {
+  if (not selection_drag)
+    return;
+  auto [captionX, captionY, captionW, captionH] = app->caption_measure();
+  float captionMin = static_cast<float>(captionX);
+  float captionMax = static_cast<float>(captionX + captionW);
+  std::get<1>(selection_drag->segment) =
+      std::clamp(event.x, captionMin, captionMax);
+  copy_selection_drag();
+  SDL_Log("start: %f, end: %f", std::get<0>(selection_drag->segment),
+          std::get<1>(selection_drag->segment));
+}
+
 SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
-  if (event->type == SDL_EVENT_QUIT)
-    return SDL_APP_SUCCESS;
-
-  if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-    auto findUnoccupiedID = [this]() -> std::uint32_t {
-      auto zippedPairs = std::ranges::zip_view{
-          std::ranges::iota_view<std::uint32_t>{}, selection_areas.keys()};
-      auto zippedPred = [](auto p) { return std::get<0>(p) != std::get<1>(p); };
-      auto zippedIt = std::ranges::find_if(zippedPairs, zippedPred);
-      return zippedIt == zippedPairs.end()
-                 ? static_cast<uint32_t>(selection_areas.size())
-                 : std::get<0>(*zippedIt);
-    };
-    SDL_Point clickPoint{};
-    clickPoint.x = static_cast<int>(event->button.x);
-    clickPoint.y = static_cast<int>(event->button.y);
-    auto [captionX, captionY, captionW, captionH] = caption_measure();
-    SDL_Rect captionBox{captionX, captionY, captionW, captionH};
-    selection_areas.clear();
-    if (SDL_PointInRect(&clickPoint, &captionBox)) {
-      SelectionHold initialSelection{};
-      initialSelection.selection_id = findUnoccupiedID();
-      initialSelection.segment = {static_cast<float>(clickPoint.x),
-                                  static_cast<float>(clickPoint.x)};
-      selection_hold = initialSelection;
-    }
-    selection_reflow();
+  switch (event->type) {
+  case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    selection_handler.handle_mouse_button_down(event->button);
     return SDL_APP_CONTINUE;
-  }
 
-  if (event->type == SDL_EVENT_MOUSE_MOTION && selection_hold) {
-    auto [captionX, captionY, captionW, captionH] = caption_measure();
-    float captionMin = static_cast<float>(captionX);
-    float captionMax = static_cast<float>(captionX + captionW);
-    std::get<1>(selection_hold->segment) =
-        std::clamp(event->motion.x, captionMin, captionMax);
-    SDL_Log("start: %f, end: %f", std::get<0>(selection_hold->segment),
-            std::get<1>(selection_hold->segment));
+  case SDL_EVENT_MOUSE_MOTION:
+    selection_handler.handle_mouse_motion(event->motion);
     return SDL_APP_CONTINUE;
-  }
 
-  if (event->type == SDL_EVENT_MOUSE_BUTTON_UP) {
-    selection_hold.reset();
-    SDL_Log("x: %f, y: %f", event->button.x, event->button.y);
+  case SDL_EVENT_MOUSE_BUTTON_UP:
+    selection_handler.handle_mouse_button_up(event->button);
     return SDL_APP_CONTINUE;
-  }
 
-  if (event->type == SDL_EVENT_WINDOW_RESIZED) {
+  case SDL_EVENT_WINDOW_RESIZED:
     caption_x = (event->window.data1 - caption_sequencer.measured_w()) / 2;
     caption_y = (event->window.data2 - caption_sequencer.measured_h()) / 2;
     return SDL_APP_CONTINUE;
-  }
 
-  return SDL_APP_CONTINUE;
+  case SDL_EVENT_QUIT:
+    return SDL_APP_SUCCESS;
+
+  default:
+    return SDL_APP_CONTINUE;
+  }
 }
 
 void GlyphSequencer::instantiate(SDL_Window *window) {
@@ -1530,8 +1561,6 @@ void CopypassTaskVisitor::operator()(CopySelectionAreas task) const {
 }
 
 void AppState::selection_reflow() {
-  if (selection_areas.empty())
-    return;
   verify_selection_capacity();
   transfer_selection_areas();
   copypass_tasks.selection_areas.emplace(this);
@@ -1582,7 +1611,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     *appstate = app;
     app->instantiate(globalFTLibrary);
     app->caption_reflow();
-    app->selection_reflow();
     return SDL_APP_CONTINUE;
   } catch (const std::runtime_error &e) {
     SDL_Log("[AppInit] %s", e.what());
