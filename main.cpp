@@ -795,7 +795,7 @@ struct GPURenderSequencer {
 
 struct SelectionDragState {
   std::uint32_t selection_id;
-  std::array<float, 2> horz_segment;
+  std::array<float, 2> mouse_segment;
 };
 
 struct SelectionEventHandler {
@@ -1131,8 +1131,8 @@ std::uint32_t SelectionEventHandler::find_unoccupied_id() {
 void SelectionEventHandler::copy_drag_state() {
   auto &[selectionX, selectionY, selectionW, selectionH] =
       app->selection_areas[drag_state->selection_id];
-  float segmentMin = std::ranges::min(drag_state->horz_segment);
-  float segmentMax = std::ranges::max(drag_state->horz_segment);
+  float segmentMin = std::ranges::min(drag_state->mouse_segment);
+  float segmentMax = std::ranges::max(drag_state->mouse_segment);
   selectionX = static_cast<std::uint32_t>(segmentMin);
   selectionW = static_cast<std::uint32_t>(segmentMax - segmentMin);
   static constexpr std::uint32_t MIN_SELECTION_W = 2u;
@@ -1153,29 +1153,59 @@ void SelectionEventHandler::handle_mouse_button_down(
     return;
   drag_state.emplace();
   drag_state->selection_id = find_unoccupied_id();
-  std::get<0>(drag_state->horz_segment) = static_cast<float>(clickPoint.x);
-  std::get<1>(drag_state->horz_segment) = static_cast<float>(clickPoint.x);
+  std::get<0>(drag_state->mouse_segment) = static_cast<float>(clickPoint.x);
+  std::get<1>(drag_state->mouse_segment) = static_cast<float>(clickPoint.x);
   copy_drag_state();
 }
 
 void SelectionEventHandler::handle_mouse_button_up(
     const SDL_MouseButtonEvent &event) {
-  for (const GlyphClusterSection &clusterSection :
-       app->caption_sequencer.cluster_sections) {
+  if (not drag_state.has_value())
+    return;
+  std::uint32_t textSegmentBegin{}, textSegmentEnd{};
+  auto [captionX, captionY, captionW, captionH] = app->caption_measure();
+  for (float pastX{}; const GlyphClusterSection &clusterSection :
+                      app->caption_sequencer.cluster_sections) {
+    float mousePointX =
+        std::get<0>(drag_state->mouse_segment) - static_cast<float>(captionX);
+    auto advanceDiscrete =
+        clusterSection.positions |
+        std::views::transform(&hb_glyph_position_t::x_advance);
+    hb_position_t advanceCluster = std::ranges::fold_left(
+        advanceDiscrete, hb_position_t{}, std::plus<hb_position_t>{});
+    float advanceClusterX = static_cast<float>(advanceCluster) / 64.0f;
+    float codepointCount =
+        static_cast<float>(clusterSection.codepoint_infos.size());
+    float mouseClusterX = std::max(mousePointX, pastX) - pastX;
+    float mouseFraction =
+        std::round(mouseClusterX / advanceClusterX * codepointCount);
+    pastX += advanceClusterX;
+    if (mouseFraction >= codepointCount)
+      continue;
+    std::uint32_t codepointIdx = static_cast<std::uint32_t>(mouseFraction);
+    const CodepointInfo &codepointInfo =
+        clusterSection.codepoint_infos.at(codepointIdx);
+    textSegmentBegin = codepointInfo.byte_offset;
+    break;
+  }
+  for (hb_position_t penX{}; const GlyphClusterSection &clusterSection :
+                             app->caption_sequencer.cluster_sections) {
+    textSegmentEnd = clusterSection.cluster;
+    break;
   }
   drag_state.reset();
 }
 
 void SelectionEventHandler::handle_mouse_motion(
     const SDL_MouseMotionEvent &event) {
-  if (drag_state.has_value()) {
-    auto [captionX, captionY, captionW, captionH] = app->caption_measure();
-    float captionMin = static_cast<float>(captionX);
-    float captionMax = static_cast<float>(captionX + captionW);
-    std::get<1>(drag_state->horz_segment) =
-        std::clamp(event.x, captionMin, captionMax);
-    copy_drag_state();
-  }
+  if (not drag_state.has_value())
+    return;
+  auto [captionX, captionY, captionW, captionH] = app->caption_measure();
+  float captionMin = static_cast<float>(captionX);
+  float captionMax = static_cast<float>(captionX + captionW);
+  std::get<1>(drag_state->mouse_segment) =
+      std::clamp(event.x, captionMin, captionMax);
+  copy_drag_state();
 }
 
 SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
@@ -1342,9 +1372,9 @@ void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row) {
   std::uint32_t atlasVertOffset = atlas_info->y + row;
   std::uint32_t atlasFullOffset =
       atlasVertOffset * GlyphSequencer::ATLAS_SIDE + atlas_info->x;
-  unsigned char *transferStart =
+  unsigned char *transferBegin =
       static_cast<unsigned char *>(mapped_atlas.get());
-  std::memcpy(transferStart + atlasFullOffset, source, bitmap->width);
+  std::memcpy(transferBegin + atlasFullOffset, source, bitmap->width);
 }
 
 void GlyphSequencer::verify_instance_capacity() {
@@ -1416,9 +1446,11 @@ std::generator<RectVertexInstance> GlyphSequencer::emit_vertex_instances() {
 void GlyphSequencer::transfer_vertex_instances() {
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true);
-  for (auto [idx, data] : emit_vertex_instances() | std::views::enumerate)
-    std::memcpy(static_cast<RectVertexInstance *>(mappedBuffer.get()) + idx,
-                &data, sizeof(RectVertexInstance));
+  for (const auto &[idx, data] :
+       emit_vertex_instances() | std::views::enumerate) {
+    auto *bufferBegin = static_cast<RectVertexInstance *>(mappedBuffer.get());
+    std::memcpy(bufferBegin + idx, &data, sizeof(RectVertexInstance));
+  }
 }
 
 void GlyphSequencer::queue_vertex_copypass() {
@@ -1484,18 +1516,27 @@ std::generator<GlyphClusterSection> GlyphSequencer::emit_cluster_sections() {
     clusterSpans.emplace_back(clusterChunk);
 
   for (const auto &[spanA, spanB] : clusterSpans | std::views::pairwise) {
-    std::uint32_t clusterA = spanA.front().first;
-    std::uint32_t clusterB = spanB.front().first;
-    auto codepointA =
-        std::ranges::lower_bound(codepoint_infos, clusterA, std::ranges::less{},
-                                 &CodepointInfo::byte_offset);
-    auto codepointB =
-        std::ranges::lower_bound(codepoint_infos, clusterB, std::ranges::less{},
-                                 &CodepointInfo::byte_offset);
+    auto codepointItA = std::ranges::lower_bound(
+        codepoint_infos, spanA.front().first, std::ranges::less{},
+        &CodepointInfo::byte_offset);
+    auto codepointItB = std::ranges::lower_bound(
+        codepoint_infos, spanB.front().first, std::ranges::less{},
+        &CodepointInfo::byte_offset);
     GlyphClusterSection clusterSection{};
-    clusterSection.cluster = clusterA;
-    clusterSection.codepoint_infos = {codepointA, codepointB};
+    clusterSection.cluster = spanA.front().first;
+    clusterSection.codepoint_infos = {codepointItA, codepointItB};
     clusterSection.positions = {spanA.front().second, spanA.size()};
+    co_yield clusterSection;
+  }
+  for (const std::span<BufferPair> &clusterSpan :
+       clusterSpans | std::views::reverse | std::views::take(1)) {
+    auto codepointIt = std::ranges::lower_bound(
+        codepoint_infos, clusterSpan.front().first, std::ranges::less{},
+        &CodepointInfo::byte_offset);
+    GlyphClusterSection clusterSection{};
+    clusterSection.cluster = clusterSpan.front().first;
+    clusterSection.codepoint_infos = {codepointIt, codepoint_infos.end()};
+    clusterSection.positions = {clusterSpan.front().second, clusterSpan.size()};
     co_yield clusterSection;
   }
 }
@@ -1580,7 +1621,7 @@ void AppState::verify_selection_capacity() {
 void AppState::transfer_selection_areas() {
   UniqueGPUMappedBuffer selectionMapped =
       mapGPUTransferBuffer(device_ctx.get(), selection_transfer.get(), true);
-  for (auto [idx, entry] : selection_areas | std::views::enumerate) {
+  for (const auto &[idx, entry] : selection_areas | std::views::enumerate) {
     auto [rectX, rectY, rectW, rectH] = entry.second;
     RectVertexInstance rectInstance{};
     rectInstance.rect_position[0] = static_cast<float>(rectX);
