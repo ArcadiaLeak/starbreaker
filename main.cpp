@@ -801,8 +801,11 @@ struct SelectionDragState {
 struct SelectionEventHandler {
   AppState *app;
   std::optional<SelectionDragState> drag_state;
+
+  std::uint32_t find_caption_offset(float mousePointX);
   std::uint32_t find_unoccupied_id();
   void copy_drag_state();
+
   void handle_mouse_button_down(const SDL_MouseButtonEvent &event);
   void handle_mouse_button_up(const SDL_MouseButtonEvent &event);
   void handle_mouse_motion(const SDL_MouseMotionEvent &event);
@@ -1158,16 +1161,11 @@ void SelectionEventHandler::handle_mouse_button_down(
   copy_drag_state();
 }
 
-void SelectionEventHandler::handle_mouse_button_up(
-    const SDL_MouseButtonEvent &event) {
-  if (not drag_state.has_value())
-    return;
-  std::uint32_t textSegmentBegin{}, textSegmentEnd{};
-  auto [captionX, captionY, captionW, captionH] = app->caption_measure();
-  for (float pastX{}; const GlyphClusterSection &clusterSection :
-                      app->caption_sequencer.cluster_sections) {
-    float mousePointX =
-        std::get<0>(drag_state->mouse_segment) - static_cast<float>(captionX);
+std::uint32_t SelectionEventHandler::find_caption_offset(float mousePointX) {
+  std::uint32_t captionOffset{};
+  float pastX{};
+  for (const GlyphClusterSection &clusterSection :
+       app->caption_sequencer.cluster_sections) {
     auto advanceDiscrete =
         clusterSection.positions |
         std::views::transform(&hb_glyph_position_t::x_advance);
@@ -1185,14 +1183,21 @@ void SelectionEventHandler::handle_mouse_button_up(
     std::uint32_t codepointIdx = static_cast<std::uint32_t>(mouseFraction);
     const CodepointInfo &codepointInfo =
         clusterSection.codepoint_infos.at(codepointIdx);
-    textSegmentBegin = codepointInfo.byte_offset;
+    captionOffset = codepointInfo.byte_offset;
     break;
   }
-  for (hb_position_t penX{}; const GlyphClusterSection &clusterSection :
-                             app->caption_sequencer.cluster_sections) {
-    textSegmentEnd = clusterSection.cluster;
-    break;
-  }
+  return captionOffset;
+}
+
+void SelectionEventHandler::handle_mouse_button_up(
+    const SDL_MouseButtonEvent &event) {
+  if (not drag_state.has_value())
+    return;
+  auto [captionX, captionY, captionW, captionH] = app->caption_measure();
+  std::uint32_t captionOffsetBegin = find_caption_offset(
+      std::get<0>(drag_state->mouse_segment) - static_cast<float>(captionX));
+  std::uint32_t captionOffsetEnd = find_caption_offset(
+      std::get<1>(drag_state->mouse_segment) - static_cast<float>(captionX));
   drag_state.reset();
 }
 
