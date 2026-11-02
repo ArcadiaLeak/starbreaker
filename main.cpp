@@ -1165,7 +1165,7 @@ void SelectionEventHandler::handle_mouse_button_down(
 }
 
 std::uint32_t SelectionEventHandler::find_text_offset(float mousePointX) {
-  std::uint32_t captionOffset{};
+  std::size_t captionOffset{app->caption_string.size()};
   float pastX{};
   for (const GlyphClusterSection &clusterSection :
        app->caption_sequencer.cluster_sections) {
@@ -1189,14 +1189,16 @@ std::uint32_t SelectionEventHandler::find_text_offset(float mousePointX) {
     captionOffset = codepointInfo.byte_offset;
     break;
   }
-  return captionOffset;
+  return static_cast<std::uint32_t>(captionOffset);
 }
 
 std::uint32_t
 SelectionEventHandler::find_glyph_boundary(std::uint32_t textOffset) {
   const hb_glyph_position_t *positionsBegin = hb_buffer_get_glyph_positions(
       app->caption_sequencer.harfbuzz_buffer.get(), nullptr);
-  std::uint32_t boundary{};
+  const unsigned int bufferLen =
+      hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get());
+  std::ptrdiff_t boundary{static_cast<std::ptrdiff_t>(bufferLen) * 64};
   for (const GlyphClusterSection &clusterSection :
        app->caption_sequencer.cluster_sections) {
     auto findPred = [textOffset](std::uint32_t offset) {
@@ -1206,17 +1208,17 @@ SelectionEventHandler::find_glyph_boundary(std::uint32_t textOffset) {
         clusterSection.codepoint_infos, findPred, &CodepointInfo::byte_offset);
     if (codepointIt == clusterSection.codepoint_infos.end())
       continue;
-    std::uint32_t positionDistance = static_cast<std::uint32_t>(
-        clusterSection.positions.data() - positionsBegin);
-    std::uint32_t codepointDistance = static_cast<std::uint32_t>(
-        codepointIt - clusterSection.codepoint_infos.begin());
-    std::uint32_t codepointFraction =
-        codepointDistance * 64 /
-        static_cast<std::uint32_t>(clusterSection.codepoint_infos.size());
-    boundary = positionDistance * 64 + codepointFraction;
+    std::ptrdiff_t ptrdiffGlyph =
+        clusterSection.positions.data() - positionsBegin;
+    std::ptrdiff_t ptrdiffCodepoint =
+        codepointIt - clusterSection.codepoint_infos.begin();
+    std::ptrdiff_t codepointF = ptrdiffCodepoint * 64 *
+                                clusterSection.positions.size() /
+                                clusterSection.codepoint_infos.size();
+    boundary = ptrdiffGlyph * 64 + codepointF;
     break;
   }
-  return boundary;
+  return static_cast<std::uint32_t>(boundary);
 }
 
 void SelectionEventHandler::handle_mouse_button_up(
@@ -1515,9 +1517,9 @@ GlyphSequencer::measure_text(unsigned int lbound,
   };
   unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
   unsigned int rbound = rboundOpt.value_or(bufferLen * 64);
-  for (GlyphCarry c{}; c.glyph_index < (rbound + 63) / 64;
+  for (GlyphCarry c{}; c.glyph_index * 64 < ((rbound + 63) & ~63);
        c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
-    if (lbound / 64 > c.glyph_index)
+    if ((lbound & ~63) > c.glyph_index * 64)
       continue;
 
     GlyphCache::iterator cacheIt =
