@@ -838,9 +838,13 @@ struct GlyphSequencer
   void pack_atlas();
 
   void text_reflow(std::string_view textView);
-  using TextMetrics = std::array<hb_position_t, 4>;
-  TextMetrics text_measure(std::uint32_t markFrom,
-                           std::optional<std::uint32_t> markTo);
+
+  struct TextMeasureQuery
+  {
+    std::array<std::uint32_t, 2> clusterStart;
+    std::optional<std::array<std::uint32_t, 2>> clusterEnd;
+  };
+  std::array<hb_position_t, 4> text_measure(TextMeasureQuery query);
 };
 
 struct CopyGlyphAtlas
@@ -908,7 +912,7 @@ struct SelectionEventHandler
   std::uint32_t find_unoccupied_id();
   void copy_drag_state();
   std::uint32_t find_text_offset(float mousePointX);
-  std::uint32_t find_line_mark(std::uint32_t textOffset);
+  std::array<std::uint32_t, 2> find_cluster_offset(std::uint32_t textOffset);
 
   void handle_mouse_button_down(const SDL_MouseButtonEvent &event);
   void handle_mouse_button_up(const SDL_MouseButtonEvent &event);
@@ -1322,32 +1326,26 @@ std::uint32_t SelectionEventHandler::find_text_offset(float mousePointX)
   return static_cast<std::uint32_t>(captionOffset);
 }
 
-std::uint32_t SelectionEventHandler::find_line_mark(std::uint32_t textOffset)
+std::array<std::uint32_t, 2>
+SelectionEventHandler::find_cluster_offset(std::uint32_t textOffset)
 {
-  const hb_glyph_position_t *positions = hb_buffer_get_glyph_positions(
-      app->caption_sequencer.harfbuzz_buffer.get(), nullptr);
-  const unsigned int bufferLen =
-      hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get());
-  std::ptrdiff_t boundary{static_cast<std::ptrdiff_t>(bufferLen) * 64};
-  for (const GlyphClusterSection &clusterSection :
-       app->caption_sequencer.cluster_sections)
+  const std::vector<GlyphClusterSection> &clusterSections =
+      app->caption_sequencer.cluster_sections;
+  std::array<std::uint32_t, 2> clusterOffset{};
+  for (const GlyphClusterSection &clusterSection : clusterSections)
   {
+    std::get<0>(clusterOffset) = static_cast<std::uint32_t>(
+        std::distance(clusterSections.data(), &clusterSection));
     auto findPred = [textOffset](std::uint32_t offset)
     { return offset == textOffset; };
     auto codepointIt = std::ranges::find_if(
         clusterSection.codepoint_infos, findPred, &CodepointInfo::byte_offset);
-    if (codepointIt == clusterSection.codepoint_infos.end())
-      continue;
-    std::ptrdiff_t ptrdiffGlyph = clusterSection.positions.data() - positions;
-    std::ptrdiff_t ptrdiffCodepoint =
-        codepointIt - clusterSection.codepoint_infos.begin();
-    std::ptrdiff_t codepointF = ptrdiffCodepoint * 64 *
-                                clusterSection.positions.size() /
-                                clusterSection.codepoint_infos.size();
-    boundary = ptrdiffGlyph * 64 + codepointF;
-    break;
+    std::get<1>(clusterOffset) = static_cast<std::uint32_t>(
+        std::distance(clusterSection.codepoint_infos.begin(), codepointIt));
+    if (codepointIt != clusterSection.codepoint_infos.end())
+      break;
   }
-  return static_cast<std::uint32_t>(boundary);
+  return clusterOffset;
 }
 
 void SelectionEventHandler::handle_mouse_button_up(
@@ -1359,12 +1357,14 @@ void SelectionEventHandler::handle_mouse_button_up(
   auto [screenFromX, screenToX] = drag_state->mouse_segment;
 
   float captionFromX = screenFromX - static_cast<float>(captionX);
-  std::uint32_t captionFromOffset = find_text_offset(captionFromX);
-  std::uint32_t captionFromMark = find_line_mark(captionFromOffset);
+  std::uint32_t captionTextA = find_text_offset(captionFromX);
+  std::array<std::uint32_t, 2> captionClusterA =
+      find_cluster_offset(captionTextA);
 
   float captionToX = screenToX - static_cast<float>(captionX);
-  std::uint32_t captionToOffset = find_text_offset(captionToX);
-  std::uint32_t captionToMark = find_line_mark(captionToOffset);
+  std::uint32_t captionTextB = find_text_offset(captionToX);
+  std::array<std::uint32_t, 2> captionClusterB =
+      find_cluster_offset(captionTextB);
 
   drag_state.reset();
 }
@@ -1642,11 +1642,10 @@ void GlyphSequencer::queue_vertex_copypass()
   app->copypass_tasks.glyph_vertices.emplace(this);
 }
 
-GlyphSequencer::TextMetrics
-GlyphSequencer::text_measure(std::uint32_t markFrom,
-                             std::optional<std::uint32_t> markTo)
+std::array<hb_position_t, 4>
+GlyphSequencer::text_measure(TextMeasureQuery query)
 {
-  TextMetrics metrics{};
+  std::array<hb_position_t, 4> metrics{};
   std::get<0>(metrics) = std::numeric_limits<hb_position_t>::max();
   std::get<1>(metrics) = std::numeric_limits<hb_position_t>::min();
   std::get<2>(metrics) = std::numeric_limits<hb_position_t>::max();
@@ -1658,7 +1657,7 @@ GlyphSequencer::text_measure(std::uint32_t markFrom,
 
   std::size_t pastMark{};
   hb_position_t pastX{};
-  auto iterateGlyph = [&](const hb_glyph_position_t &curPosition) -> void
+  auto glyphMeasure = [&](const hb_glyph_position_t &curPosition) -> void
   {
     if (markFrom > pastMark)
       return;
@@ -1687,7 +1686,7 @@ GlyphSequencer::text_measure(std::uint32_t markFrom,
     std::size_t markAdvance = clusterSection.positions.size() * 64;
     for (const hb_glyph_position_t &position : clusterSection.positions)
     {
-      iterateGlyph(position);
+      glyphMeasure(position);
       pastX += position.x_advance;
     }
     pastMark += markAdvance;
@@ -1793,7 +1792,7 @@ void GlyphSequencer::text_reflow(std::string_view textView)
   verify_glyph_cache();
   cluster_sections = {std::from_range, emit_cluster_sections()};
   std::tie(horz_min, horz_max, vert_min, vert_max) =
-      text_measure(0, std::nullopt);
+      text_measure(TextMeasureQuery{{0, 0}, std::nullopt});
   queue_vertex_copypass();
 }
 
