@@ -1560,16 +1560,15 @@ void GlyphSequencer::verify_instance_capacity()
 
 void GlyphSequencer::transfer_instance_data()
 {
-  unsigned int glyphIdx{}, bufferIdx{}, glyphCount{};
+  unsigned int bufferIdx{}, glyphCount{};
   auto *const positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), &glyphCount);
-  auto *const glyphInfos =
-      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true);
   auto *const bufferBegin = static_cast<RectInstanceData *>(mappedBuffer.get());
   hb_position_t penX{};
-  auto copyVertexInstance = [&](GlyphCache::iterator cacheIt) -> void
+  auto copyVertexInstance = [&](GlyphCache::iterator cacheIt,
+                                unsigned int glyphIdx) -> void
   {
     FT_BitmapGlyph bitmapGlyph =
         asBitmapGlyph(cacheIt->second.freetype_glyph.get());
@@ -1600,13 +1599,19 @@ void GlyphSequencer::transfer_instance_data()
                 sizeof(RectInstanceData));
     ++bufferIdx;
   };
-  while (glyphIdx < glyphCount)
+  auto *const glyphInfos =
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
+  for (unsigned int glyphIdx{}; glyphIdx < glyphCount; ++glyphIdx)
   {
-    hb_codepoint_t codepoint = glyphInfos[glyphIdx].codepoint;
-    GlyphCache::iterator cacheIt = glyph_cache.find(codepoint);
-    if (cacheIt != glyph_cache.end())
-      copyVertexInstance(cacheIt);
-    penX += positions[glyphIdx].x_advance, ++glyphIdx;
+    hb_codepoint_t key{glyphInfos[glyphIdx].codepoint};
+    GlyphCache::iterator cacheIt = glyph_cache.find(key);
+    if (cacheIt == glyph_cache.end())
+      penX += positions[glyphIdx].x_advance;
+    else
+    {
+      copyVertexInstance(cacheIt, glyphIdx);
+      penX += positions[glyphIdx].x_advance;
+    }
   }
 }
 
