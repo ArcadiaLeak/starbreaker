@@ -29,57 +29,68 @@
 #include <unicode/utext.h>
 #include <vulkan/vulkan.h>
 
-struct RectVertexInstance {
+struct RectVertexInstance
+{
   float rect_position[2];
   float rect_size[2];
   float uv_rect[4];
 };
 
-struct DifferenceBlendArea {
+struct DifferenceBlendArea
+{
   std::uint32_t rect[4];
   float color[4];
 };
 
 static FT_Library globalFTLibrary = nullptr;
 
-struct FreetypeFaceDeleter {
+struct FreetypeFaceDeleter
+{
   void operator()(FT_Face freetypeFace) const { FT_Done_Face(freetypeFace); }
 };
 using UniqueFreetypeFace = std::unique_ptr<FT_FaceRec, FreetypeFaceDeleter>;
 
-struct FreetypeGlyphDeleter {
+struct FreetypeGlyphDeleter
+{
   void operator()(FT_Glyph freetypeGlyph) const;
 };
 using UniqueFreetypeGlyph = std::unique_ptr<FT_GlyphRec, FreetypeGlyphDeleter>;
-void FreetypeGlyphDeleter::operator()(FT_Glyph freetypeGlyph) const {
+void FreetypeGlyphDeleter::operator()(FT_Glyph freetypeGlyph) const
+{
   FT_Done_Glyph(freetypeGlyph);
 }
 
-FT_BitmapGlyph asBitmapGlyph(FT_Glyph freetypeGlyph) {
+FT_BitmapGlyph asBitmapGlyph(FT_Glyph freetypeGlyph)
+{
   if (freetypeGlyph->format != FT_GLYPH_FORMAT_BITMAP)
     throw std::runtime_error{"Unexpected FT_Glyph format!"};
   return reinterpret_cast<FT_BitmapGlyph>(freetypeGlyph);
 }
 
-struct HarfbuzzFontDeleter {
+struct HarfbuzzFontDeleter
+{
   void operator()(hb_font_t *harfbuzzFont) const;
 };
 using UniqueHarfbuzzFont = std::unique_ptr<hb_font_t, HarfbuzzFontDeleter>;
-void HarfbuzzFontDeleter::operator()(hb_font_t *harfbuzzFont) const {
+void HarfbuzzFontDeleter::operator()(hb_font_t *harfbuzzFont) const
+{
   hb_font_destroy(harfbuzzFont);
 }
 
-struct HarfbuzzBufferDeleter {
+struct HarfbuzzBufferDeleter
+{
   void operator()(hb_buffer_t *harfbuzzBuffer) const;
 };
 using UniqueHarfbuzzBuffer =
     std::unique_ptr<hb_buffer_t, HarfbuzzBufferDeleter>;
-void HarfbuzzBufferDeleter::operator()(hb_buffer_t *harfbuzzBuffer) const {
+void HarfbuzzBufferDeleter::operator()(hb_buffer_t *harfbuzzBuffer) const
+{
   hb_buffer_destroy(harfbuzzBuffer);
 }
 
 UniqueHarfbuzzFont createHarfbuzzFont(FT_Library library, const char *filepath,
-                                      FT_F26Dot6 fontsize, float displayScale) {
+                                      FT_F26Dot6 fontsize, float displayScale)
+{
   UniqueFreetypeFace face{};
   FT_Face facePtr{};
   if (FT_New_Face(library, filepath, 0, &facePtr))
@@ -91,17 +102,20 @@ UniqueHarfbuzzFont createHarfbuzzFont(FT_Library library, const char *filepath,
   return UniqueHarfbuzzFont{hb_ft_font_create_referenced(face.get())};
 }
 
-struct GPUDeviceDeleter {
+struct GPUDeviceDeleter
+{
   void operator()(SDL_GPUDevice *device) const;
 };
 using UniqueGPUDevice = std::unique_ptr<SDL_GPUDevice, GPUDeviceDeleter>;
-void GPUDeviceDeleter::operator()(SDL_GPUDevice *device) const {
+void GPUDeviceDeleter::operator()(SDL_GPUDevice *device) const
+{
   if (not SDL_WaitForGPUIdle(device))
     SDL_Log("SDL_WaitForGPUIdle failed: %s", SDL_GetError());
   SDL_DestroyGPUDevice(device);
 }
 
-UniqueGPUDevice createGPUDevice() {
+UniqueGPUDevice createGPUDevice()
+{
   SDL_GPUVulkanOptions vulkan_options{};
   vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
 
@@ -126,65 +140,79 @@ UniqueGPUDevice createGPUDevice() {
 constexpr int INITIAL_WINDOW_W = 800;
 constexpr int INITIAL_WINDOW_H = 600;
 
-struct WindowDeleter {
+struct WindowDeleter
+{
   void operator()(SDL_Window *window) const;
 };
 using UniqueWindow = std::unique_ptr<SDL_Window, WindowDeleter>;
-void WindowDeleter::operator()(SDL_Window *window) const {
+void WindowDeleter::operator()(SDL_Window *window) const
+{
   SDL_DestroyWindow(window);
 }
 
-UniqueWindow createWindow(const char *title, int width, int height) {
+UniqueWindow createWindow(const char *title, int width, int height)
+{
   SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
   SDL_Window *window = SDL_CreateWindow(title, width, height, flags);
-  if (not window) {
+  if (not window)
+  {
     std::string errorMsg{"SDL_CreateWindow failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return UniqueWindow{window};
 }
 
-struct WindowForGPUDeviceDeleter {
+struct WindowForGPUDeviceDeleter
+{
   SDL_GPUDevice *device;
   void operator()(SDL_Window *window) const;
 };
 using UniqueWindowForGPUDevice =
     std::unique_ptr<SDL_Window, WindowForGPUDeviceDeleter>;
-void WindowForGPUDeviceDeleter::operator()(SDL_Window *window) const {
+void WindowForGPUDeviceDeleter::operator()(SDL_Window *window) const
+{
   SDL_ReleaseWindowFromGPUDevice(device, window);
 }
 
 UniqueWindowForGPUDevice claimWindowForGPUDevice(SDL_GPUDevice *device,
-                                                 SDL_Window *window) {
-  if (not SDL_ClaimWindowForGPUDevice(device, window)) {
+                                                 SDL_Window *window)
+{
+  if (not SDL_ClaimWindowForGPUDevice(device, window))
+  {
     std::string errorMsg{"SDL_ClaimWindowForGPUDevice failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return UniqueWindowForGPUDevice{window, WindowForGPUDeviceDeleter{device}};
 }
 
-float getWindowDisplayScale(SDL_Window *window) {
+float getWindowDisplayScale(SDL_Window *window)
+{
   float scale = SDL_GetWindowDisplayScale(window);
-  if (scale == 0.0f) {
+  if (scale == 0.0f)
+  {
     std::string errorMsg{"SDL_GetWindowDisplayScale failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return scale;
 }
 
-void setWindowMinimumSize(SDL_Window *window, int minW, int minH) {
-  if (not SDL_SetWindowMinimumSize(window, minW, minH)) {
+void setWindowMinimumSize(SDL_Window *window, int minW, int minH)
+{
+  if (not SDL_SetWindowMinimumSize(window, minW, minH))
+  {
     std::string errorMsg{"SDL_SetWindowMinimumSize failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
 }
 
-struct FileContentDeleter {
+struct FileContentDeleter
+{
   void operator()(void *fileContent) const { SDL_free(fileContent); }
 };
 using UniqueFileContent = std::unique_ptr<void, FileContentDeleter>;
 
-UniqueFileContent loadFile(const char *filepath, size_t *datasize) {
+UniqueFileContent loadFile(const char *filepath, size_t *datasize)
+{
   void *fileContent = SDL_LoadFile(filepath, datasize);
   if (fileContent)
     return UniqueFileContent{fileContent};
@@ -193,24 +221,28 @@ UniqueFileContent loadFile(const char *filepath, size_t *datasize) {
   throw std::runtime_error{std::move(errorMsg)};
 }
 
-struct GPUShaderCreateInfo {
+struct GPUShaderCreateInfo
+{
   const char *filepath;
   SDL_GPUShaderStage stage;
   Uint32 num_samplers;
   Uint32 num_uniform_buffers;
 };
 
-struct GPUShaderDeleter {
+struct GPUShaderDeleter
+{
   SDL_GPUDevice *device;
   void operator()(SDL_GPUShader *shader) const;
 };
 using UniqueGPUShader = std::unique_ptr<SDL_GPUShader, GPUShaderDeleter>;
-void GPUShaderDeleter::operator()(SDL_GPUShader *shader) const {
+void GPUShaderDeleter::operator()(SDL_GPUShader *shader) const
+{
   SDL_ReleaseGPUShader(device, shader);
 }
 
 UniqueGPUShader createGPUShader(SDL_GPUDevice *device,
-                                GPUShaderCreateInfo createInfo) {
+                                GPUShaderCreateInfo createInfo)
+{
   SDL_GPUShaderCreateInfo shaderInfo{};
   UniqueFileContent shaderCode =
       loadFile(createInfo.filepath, &shaderInfo.code_size);
@@ -220,23 +252,27 @@ UniqueGPUShader createGPUShader(SDL_GPUDevice *device,
   shaderInfo.num_samplers = createInfo.num_samplers;
   shaderInfo.num_uniform_buffers = createInfo.num_uniform_buffers;
   SDL_GPUShader *shader = SDL_CreateGPUShader(device, &shaderInfo);
-  if (not shader) {
+  if (not shader)
+  {
     std::string errorMsg{"SDL_CreateGPUShader failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return UniqueGPUShader{shader, GPUShaderDeleter{device}};
 }
 
-struct GPUSamplerDeleter {
+struct GPUSamplerDeleter
+{
   SDL_GPUDevice *device;
   void operator()(SDL_GPUSampler *sampler) const;
 };
 using UniqueGPUSampler = std::unique_ptr<SDL_GPUSampler, GPUSamplerDeleter>;
-void GPUSamplerDeleter::operator()(SDL_GPUSampler *sampler) const {
+void GPUSamplerDeleter::operator()(SDL_GPUSampler *sampler) const
+{
   SDL_ReleaseGPUSampler(device, sampler);
 }
 
-UniqueGPUSampler createCommonGPUSampler(SDL_GPUDevice *device) {
+UniqueGPUSampler createCommonGPUSampler(SDL_GPUDevice *device)
+{
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
   samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -246,30 +282,35 @@ UniqueGPUSampler createCommonGPUSampler(SDL_GPUDevice *device) {
   samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
 
   SDL_GPUSampler *sampler = SDL_CreateGPUSampler(device, &samplerInfo);
-  if (not sampler) {
+  if (not sampler)
+  {
     std::string errorMsg{"SDL_CreateGPUSampler failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return UniqueGPUSampler{sampler, GPUSamplerDeleter{device}};
 }
 
-struct GPUTextureDeleter {
+struct GPUTextureDeleter
+{
   SDL_GPUDevice *device = nullptr;
   void operator()(SDL_GPUTexture *texture) const;
 };
 using UniqueGPUTexture = std::unique_ptr<SDL_GPUTexture, GPUTextureDeleter>;
-void GPUTextureDeleter::operator()(SDL_GPUTexture *texture) const {
+void GPUTextureDeleter::operator()(SDL_GPUTexture *texture) const
+{
   SDL_ReleaseGPUTexture(device, texture);
 }
 
-struct GPUTextureCreateInfo {
+struct GPUTextureCreateInfo
+{
   SDL_GPUTextureFormat format;
   SDL_GPUTextureUsageFlags usage;
   std::uint32_t texture_w;
   std::uint32_t texture_h;
 };
 UniqueGPUTexture createGPUTexture(SDL_GPUDevice *device,
-                                  GPUTextureCreateInfo createInfo) {
+                                  GPUTextureCreateInfo createInfo)
+{
   SDL_GPUTextureCreateInfo textureInfo{};
   textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
   textureInfo.format = createInfo.format;
@@ -280,42 +321,49 @@ UniqueGPUTexture createGPUTexture(SDL_GPUDevice *device,
   textureInfo.num_levels = 1;
   textureInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
   SDL_GPUTexture *texture = SDL_CreateGPUTexture(device, &textureInfo);
-  if (not texture) {
+  if (not texture)
+  {
     std::string errorMsg{"SDL_CreateGPUTexture failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return {texture, GPUTextureDeleter{device}};
 }
 
-struct GPUTransferBufferDeleter {
+struct GPUTransferBufferDeleter
+{
   SDL_GPUDevice *device_ctx;
   void operator()(SDL_GPUTransferBuffer *transferBuffer) const;
 };
 using UniqueGPUTransferBuffer =
     std::unique_ptr<SDL_GPUTransferBuffer, GPUTransferBufferDeleter>;
 void GPUTransferBufferDeleter::operator()(
-    SDL_GPUTransferBuffer *transferBuffer) const {
+    SDL_GPUTransferBuffer *transferBuffer) const
+{
   SDL_ReleaseGPUTransferBuffer(device_ctx, transferBuffer);
 }
 
-struct GPUTransferBufferUnmapper {
+struct GPUTransferBufferUnmapper
+{
   SDL_GPUDevice *device_ctx;
   SDL_GPUTransferBuffer *transfer_buffer;
   void operator()(void *mappedBuffer) const;
 };
 using UniqueGPUMappedBuffer = std::unique_ptr<void, GPUTransferBufferUnmapper>;
-void GPUTransferBufferUnmapper::operator()(void *mappedBuffer) const {
+void GPUTransferBufferUnmapper::operator()(void *mappedBuffer) const
+{
   SDL_UnmapGPUTransferBuffer(device_ctx, transfer_buffer);
 }
 
 UniqueGPUTransferBuffer createGPUTransferBuffer(SDL_GPUDevice *device,
-                                                std::uint32_t bufferSize) {
+                                                std::uint32_t bufferSize)
+{
   SDL_GPUTransferBufferCreateInfo bufferInfo{};
   bufferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
   bufferInfo.size = bufferSize;
   SDL_GPUTransferBuffer *transferBuffer =
       SDL_CreateGPUTransferBuffer(device, &bufferInfo);
-  if (not transferBuffer) {
+  if (not transferBuffer)
+  {
     std::string errorMsg{"SDL_CreateGPUTransferBuffer failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
@@ -325,9 +373,11 @@ UniqueGPUTransferBuffer createGPUTransferBuffer(SDL_GPUDevice *device,
 
 UniqueGPUMappedBuffer
 mapGPUTransferBuffer(SDL_GPUDevice *device,
-                     SDL_GPUTransferBuffer *transferBuffer, bool cycle) {
+                     SDL_GPUTransferBuffer *transferBuffer, bool cycle)
+{
   void *mappedBuffer = SDL_MapGPUTransferBuffer(device, transferBuffer, cycle);
-  if (not mappedBuffer) {
+  if (not mappedBuffer)
+  {
     std::string errorMsg{"SDL_MapGPUTransferBuffer failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
@@ -335,42 +385,50 @@ mapGPUTransferBuffer(SDL_GPUDevice *device,
       mappedBuffer, GPUTransferBufferUnmapper{device, transferBuffer}};
 }
 
-struct GPUBufferDeleter {
+struct GPUBufferDeleter
+{
   SDL_GPUDevice *device_ctx;
   void operator()(SDL_GPUBuffer *buffer) const;
 };
 using UniqueGPUBuffer = std::unique_ptr<SDL_GPUBuffer, GPUBufferDeleter>;
-void GPUBufferDeleter::operator()(SDL_GPUBuffer *buffer) const {
+void GPUBufferDeleter::operator()(SDL_GPUBuffer *buffer) const
+{
   SDL_ReleaseGPUBuffer(device_ctx, buffer);
 }
 
 UniqueGPUBuffer createGPUBuffer(SDL_GPUDevice *device,
-                                const SDL_GPUBufferCreateInfo *createInfo) {
+                                const SDL_GPUBufferCreateInfo *createInfo)
+{
   SDL_GPUBuffer *buffer = SDL_CreateGPUBuffer(device, createInfo);
-  if (not buffer) {
+  if (not buffer)
+  {
     std::string errorMsg{"SDL_CreateGPUBuffer failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return UniqueGPUBuffer{buffer, GPUBufferDeleter{device}};
 }
 
-struct GPUGraphicsPipelineDeleter {
+struct GPUGraphicsPipelineDeleter
+{
   SDL_GPUDevice *device_ctx;
   void operator()(SDL_GPUGraphicsPipeline *pipeline) const;
 };
 using UniqueGPUGraphicsPipeline =
     std::unique_ptr<SDL_GPUGraphicsPipeline, GPUGraphicsPipelineDeleter>;
 void GPUGraphicsPipelineDeleter::operator()(
-    SDL_GPUGraphicsPipeline *pipeline) const {
+    SDL_GPUGraphicsPipeline *pipeline) const
+{
   SDL_ReleaseGPUGraphicsPipeline(device_ctx, pipeline);
 }
 
 UniqueGPUGraphicsPipeline
 createGPUGraphicsPipeline(SDL_GPUDevice *device,
-                          SDL_GPUGraphicsPipelineCreateInfo *pipelineInfo) {
+                          SDL_GPUGraphicsPipelineCreateInfo *pipelineInfo)
+{
   SDL_GPUGraphicsPipeline *pipeline =
       SDL_CreateGPUGraphicsPipeline(device, pipelineInfo);
-  if (not pipeline) {
+  if (not pipeline)
+  {
     std::string errorMsg{"SDL_CreateGPUGraphicsPipeline failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
@@ -380,7 +438,8 @@ createGPUGraphicsPipeline(SDL_GPUDevice *device,
 
 UniqueGPUGraphicsPipeline
 createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
-                               SDL_GPUTextureFormat targetFormat) {
+                               SDL_GPUTextureFormat targetFormat)
+{
   GPUShaderCreateInfo vertexInfo{.filepath = "rect_instance.spv",
                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                  .num_samplers = 0,
@@ -451,7 +510,8 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
 }
 
 UniqueGPUGraphicsPipeline
-createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device) {
+createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device)
+{
   GPUShaderCreateInfo vertexInfo{.filepath = "rect_instance.spv",
                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
                                  .num_samplers = 0,
@@ -521,31 +581,35 @@ createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device) {
   return createGPUGraphicsPipeline(device, &pipelineInfo);
 }
 
-struct GPUComputePipelineDeleter {
+struct GPUComputePipelineDeleter
+{
   SDL_GPUDevice *device_ctx;
   void operator()(SDL_GPUComputePipeline *pipeline) const;
 };
 using UniqueGPUComputePipeline =
     std::unique_ptr<SDL_GPUComputePipeline, GPUComputePipelineDeleter>;
 void GPUComputePipelineDeleter::operator()(
-    SDL_GPUComputePipeline *pipeline) const {
+    SDL_GPUComputePipeline *pipeline) const
+{
   SDL_ReleaseGPUComputePipeline(device_ctx, pipeline);
 }
 
 UniqueGPUComputePipeline
 createGPUComputePipeline(SDL_GPUDevice *device,
-                         SDL_GPUComputePipelineCreateInfo *pipelineInfo) {
+                         SDL_GPUComputePipelineCreateInfo *pipelineInfo)
+{
   SDL_GPUComputePipeline *pipeline =
       SDL_CreateGPUComputePipeline(device, pipelineInfo);
-  if (not pipeline) {
+  if (not pipeline)
+  {
     std::string errorMsg{"SDL_CreateGPUComputePipeline failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return UniqueGPUComputePipeline{pipeline, GPUComputePipelineDeleter{device}};
 }
 
-UniqueGPUComputePipeline
-createDifferenceBlendGPUPipeline(SDL_GPUDevice *device) {
+UniqueGPUComputePipeline createDifferenceBlendGPUPipeline(SDL_GPUDevice *device)
+{
   SDL_GPUComputePipelineCreateInfo pipelineInfo{};
   UniqueFileContent shaderCode =
       loadFile("difference_blend.spv", &pipelineInfo.code_size);
@@ -560,49 +624,57 @@ createDifferenceBlendGPUPipeline(SDL_GPUDevice *device) {
   return createGPUComputePipeline(device, &pipelineInfo);
 }
 
-struct GPUCommandBufferSubmitter {
+struct GPUCommandBufferSubmitter
+{
   void operator()(SDL_GPUCommandBuffer *commandBuffer) const;
 };
 using EngagedGPUCommandBuffer =
     std::unique_ptr<SDL_GPUCommandBuffer, GPUCommandBufferSubmitter>;
 void GPUCommandBufferSubmitter::operator()(
-    SDL_GPUCommandBuffer *commandBuffer) const {
+    SDL_GPUCommandBuffer *commandBuffer) const
+{
   if (not SDL_SubmitGPUCommandBuffer(commandBuffer))
     SDL_Log("SDL_SubmitGPUCommandBuffer failed: %s", SDL_GetError());
 }
 
-struct GPUCommandBufferCanceller {
+struct GPUCommandBufferCanceller
+{
   void operator()(SDL_GPUCommandBuffer *commandBuffer) const;
 };
 using DismissedGPUCommandBuffer =
     std::unique_ptr<SDL_GPUCommandBuffer, GPUCommandBufferCanceller>;
 void GPUCommandBufferCanceller::operator()(
-    SDL_GPUCommandBuffer *commandBuffer) const {
+    SDL_GPUCommandBuffer *commandBuffer) const
+{
   if (not SDL_CancelGPUCommandBuffer(commandBuffer))
     SDL_Log("SDL_CancelGPUCommandBuffer failed: %s", SDL_GetError());
 }
 
-EngagedGPUCommandBuffer acquireGPUCommandBuffer(SDL_GPUDevice *device) {
+EngagedGPUCommandBuffer acquireGPUCommandBuffer(SDL_GPUDevice *device)
+{
   SDL_GPUCommandBuffer *commandBuffer = SDL_AcquireGPUCommandBuffer(device);
-  if (not commandBuffer) {
+  if (not commandBuffer)
+  {
     std::string errorMsg{"SDL_AcquireGPUCommandBuffer failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return EngagedGPUCommandBuffer{commandBuffer};
 }
 
-struct GPURenderPassDeleter {
+struct GPURenderPassDeleter
+{
   void operator()(SDL_GPURenderPass *renderPass) const;
 };
 using UniqueGPURenderPass =
     std::unique_ptr<SDL_GPURenderPass, GPURenderPassDeleter>;
-void GPURenderPassDeleter::operator()(SDL_GPURenderPass *renderPass) const {
+void GPURenderPassDeleter::operator()(SDL_GPURenderPass *renderPass) const
+{
   SDL_EndGPURenderPass(renderPass);
 }
 
-UniqueGPURenderPass
-beginGPURenderPass(SDL_GPUCommandBuffer *commandBuffer,
-                   const SDL_GPUColorTargetInfo *targetInfo) {
+UniqueGPURenderPass beginGPURenderPass(SDL_GPUCommandBuffer *commandBuffer,
+                                       const SDL_GPUColorTargetInfo *targetInfo)
+{
   SDL_GPURenderPass *renderPass =
       SDL_BeginGPURenderPass(commandBuffer, targetInfo, 1, nullptr);
   return UniqueGPURenderPass{renderPass};
@@ -610,62 +682,74 @@ beginGPURenderPass(SDL_GPUCommandBuffer *commandBuffer,
 
 SDL_GPUTexture *waitAndAcquireGPUSwapchainTexture(
     SDL_GPUCommandBuffer *commandBuffer, SDL_Window *window,
-    std::uint32_t *texture_width, std::uint32_t *texture_height) {
+    std::uint32_t *texture_width, std::uint32_t *texture_height)
+{
   SDL_GPUTexture *texture{};
-  if (not SDL_WaitAndAcquireGPUSwapchainTexture(
-          commandBuffer, window, &texture, texture_width, texture_height)) {
+  if (not SDL_WaitAndAcquireGPUSwapchainTexture(commandBuffer, window, &texture,
+                                                texture_width, texture_height))
+  {
     std::string errorMsg{"SDL_WaitAndAcquireGPUSwapchainTexture failed: "};
     throw std::runtime_error{errorMsg + SDL_GetError()};
   }
   return texture;
 }
 
-struct GPUCopyPassDeleter {
+struct GPUCopyPassDeleter
+{
   void operator()(SDL_GPUCopyPass *copyPass) const;
 };
 using UniqueGPUCopyPass = std::unique_ptr<SDL_GPUCopyPass, GPUCopyPassDeleter>;
-void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const {
+void GPUCopyPassDeleter::operator()(SDL_GPUCopyPass *copyPass) const
+{
   SDL_EndGPUCopyPass(copyPass);
 }
 
-struct GPUComputePassDeleter {
+struct GPUComputePassDeleter
+{
   void operator()(SDL_GPUComputePass *computePass) const;
 };
 using UniqueGPUComputePass =
     std::unique_ptr<SDL_GPUComputePass, GPUComputePassDeleter>;
-void GPUComputePassDeleter::operator()(SDL_GPUComputePass *computePass) const {
+void GPUComputePassDeleter::operator()(SDL_GPUComputePass *computePass) const
+{
   SDL_EndGPUComputePass(computePass);
 }
 
-UniqueGPUComputePass beginGPUComputePass(
-    SDL_GPUCommandBuffer *commandBuffer,
-    const SDL_GPUStorageTextureReadWriteBinding *textureBinding) {
+UniqueGPUComputePass
+beginGPUComputePass(SDL_GPUCommandBuffer *commandBuffer,
+                    const SDL_GPUStorageTextureReadWriteBinding *textureBinding)
+{
   SDL_GPUComputePass *computePass =
       SDL_BeginGPUComputePass(commandBuffer, textureBinding, 1, nullptr, 0);
   return UniqueGPUComputePass{computePass};
 }
 
-struct UTextDeleter {
+struct UTextDeleter
+{
   void operator()(UText *utextPtr) const { utext_close(utextPtr); }
 };
 using UniqueUText = std::unique_ptr<UText, UTextDeleter>;
 
-UniqueUText utextOpenUTF8(std::string_view strView) {
+UniqueUText utextOpenUTF8(std::string_view strView)
+{
   std::int64_t textLen = static_cast<std::int64_t>(strView.size());
   UErrorCode status{U_ZERO_ERROR};
   UText *textPtr = utext_openUTF8(nullptr, strView.data(), textLen, &status);
-  if (U_FAILURE(status)) {
+  if (U_FAILURE(status))
+  {
     std::string errorMsg{"utext_openUTF8 failed: "};
     throw std::runtime_error{errorMsg + u_errorName(status)};
   }
   return UniqueUText{textPtr};
 }
 
-struct CodepointInfo {
+struct CodepointInfo
+{
   std::uint32_t byte_offset;
   UChar32 codepoint;
 };
-std::generator<CodepointInfo> emitCodepointInfo(std::string_view strView) {
+std::generator<CodepointInfo> emitCodepointInfo(std::string_view strView)
+{
   UniqueUText uText = utextOpenUTF8(strView);
 uTextLoop:
   std::int64_t byteOffset = utext_getNativeIndex(uText.get());
@@ -679,16 +763,19 @@ uTextLoop:
   goto uTextLoop;
 }
 
-struct GlyphAtlasInfo {
+struct GlyphAtlasInfo
+{
   std::uint32_t x, y, page;
 };
-struct GlyphCacheItem {
+struct GlyphCacheItem
+{
   UniqueFreetypeGlyph freetype_glyph;
   std::unique_ptr<GlyphAtlasInfo> atlas;
 };
 using GlyphCache = std::map<hb_codepoint_t, GlyphCacheItem>;
 
-struct GlyphAtlasCopier {
+struct GlyphAtlasCopier
+{
   UniqueGPUMappedBuffer mapped_atlas;
   const GlyphAtlasInfo *atlas_info;
   const FT_Bitmap *bitmap;
@@ -696,14 +783,16 @@ struct GlyphAtlasCopier {
   void copy_bitmap_row(std::uint32_t row);
 };
 
-struct GlyphClusterSection {
+struct GlyphClusterSection
+{
   std::uint32_t cluster;
   std::span<const CodepointInfo> codepoint_infos;
   std::span<const hb_glyph_position_t> positions;
 };
 
 struct AppState;
-struct GlyphSequencer {
+struct GlyphSequencer
+{
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
   GlyphCache glyph_cache;
@@ -715,10 +804,12 @@ struct GlyphSequencer {
 
   hb_position_t horz_min = 0, horz_max = 0;
   hb_position_t vert_min = 0, vert_max = 0;
-  int measured_w() noexcept {
+  int measured_w() const noexcept
+  {
     return static_cast<int>(horz_max - horz_min + 63) / 64;
   }
-  int measured_h() noexcept {
+  int measured_h() const noexcept
+  {
     return static_cast<int>(vert_max - vert_min + 63) / 64;
   }
 
@@ -743,44 +834,53 @@ struct GlyphSequencer {
   UniqueGPUGraphicsPipeline offscreen_pipeline;
 
   void instantiate(SDL_Window *window);
-  void glyphs_shape(std::string_view textView);
   void verify_glyph_cache();
   void pack_atlas();
-  std::array<hb_position_t, 4>
-  measure_text(unsigned int lbound, std::optional<unsigned int> rboundOpt);
+
+  void text_reflow(std::string_view textView);
+  using TextMetrics = std::array<hb_position_t, 4>;
+  TextMetrics text_measure(std::uint32_t markFrom,
+                           std::optional<std::uint32_t> markTo);
 };
 
-struct CopyGlyphAtlas {
+struct CopyGlyphAtlas
+{
   GlyphSequencer *sequencer;
 };
-struct CopyGlyphVertices {
+struct CopyGlyphVertices
+{
   GlyphSequencer *sequencer;
 };
-struct CopySelectionAreas {
+struct CopySelectionAreas
+{
   AppState *app;
 };
 using CopypassTask =
     std::variant<CopyGlyphAtlas, CopyGlyphVertices, CopySelectionAreas>;
-struct CopypassTable {
+struct CopypassTable
+{
   std::optional<CopyGlyphAtlas> glyph_atlas;
   std::optional<CopyGlyphVertices> glyph_vertices;
   std::optional<CopySelectionAreas> selection_areas;
 };
-struct CopypassTaskVisitor {
+struct CopypassTaskVisitor
+{
   void operator()(CopyGlyphAtlas task) const;
   void operator()(CopyGlyphVertices task) const;
   void operator()(CopySelectionAreas task) const;
   SDL_GPUCopyPass *copypass;
 };
 
-struct GPUCommandSequencer {
+struct GPUCommandSequencer
+{
   AppState *app;
   EngagedGPUCommandBuffer command_buffer;
   void issue_copy_pass();
   void issue_render_pass();
 };
 
-struct GPURenderSequencer {
+struct GPURenderSequencer
+{
   AppState *app;
   GPUCommandSequencer *command_sequencer;
 
@@ -794,26 +894,29 @@ struct GPURenderSequencer {
   void draw_processed_image();
 };
 
-struct SelectionDragState {
+struct SelectionDragState
+{
   std::uint32_t selection_id;
   std::array<float, 2> mouse_segment;
 };
 
-struct SelectionEventHandler {
+struct SelectionEventHandler
+{
   AppState *app;
   std::optional<SelectionDragState> drag_state;
 
   std::uint32_t find_unoccupied_id();
   void copy_drag_state();
   std::uint32_t find_text_offset(float mousePointX);
-  std::uint32_t find_glyph_boundary(std::uint32_t textOffset);
+  std::uint32_t find_line_mark(std::uint32_t textOffset);
 
   void handle_mouse_button_down(const SDL_MouseButtonEvent &event);
   void handle_mouse_button_up(const SDL_MouseButtonEvent &event);
   void handle_mouse_motion(const SDL_MouseMotionEvent &event);
 };
 
-struct AppState {
+struct AppState
+{
   UniqueHarfbuzzFont harfbuzz_font;
 
   UniqueGPUDevice device_ctx;
@@ -854,10 +957,10 @@ struct AppState {
   void instantiate(FT_Library library);
 
   std::array<int, 4> caption_bbox() noexcept;
-  void caption_reflow();
 };
 
-void AppState::instantiate(FT_Library library) {
+void AppState::instantiate(FT_Library library)
+{
   device_ctx = createGPUDevice();
   main_window = createWindow("Hello GPU", INITIAL_WINDOW_W, INITIAL_WINDOW_H);
   setWindowMinimumSize(main_window.get(), INITIAL_WINDOW_W, INITIAL_WINDOW_H);
@@ -871,7 +974,8 @@ void AppState::instantiate(FT_Library library) {
   caption_sequencer.instantiate(main_window.get());
 }
 
-void GPUCommandSequencer::issue_copy_pass() {
+void GPUCommandSequencer::issue_copy_pass()
+{
   constexpr std::meta::info tableType = ^^CopypassTable;
   constexpr std::meta::access_context tableAccess =
       std::meta::access_context::unprivileged();
@@ -879,7 +983,8 @@ void GPUCommandSequencer::issue_copy_pass() {
       std::meta::nonstatic_data_members_of(tableType, tableAccess));
 
   std::inplace_vector<CopypassTask, tableMembers.size()> taskQueue{};
-  template for (constexpr std::meta::info tableMember : tableMembers) {
+  template for (constexpr std::meta::info tableMember : tableMembers)
+  {
     if (not app->copypass_tasks.[:tableMember:])
       continue;
     taskQueue.push_back(*app->copypass_tasks.[:tableMember:]);
@@ -892,7 +997,8 @@ void GPUCommandSequencer::issue_copy_pass() {
     task.visit(CopypassTaskVisitor{copypass.get()});
 }
 
-void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const {
+void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const
+{
   SDL_GPUTransferBufferLocation src{
       .transfer_buffer = task.sequencer->instance_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
@@ -904,19 +1010,23 @@ void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const {
   SDL_UploadToGPUBuffer(copypass, &src, &dst, false);
 }
 
-void GPUCommandSequencer::issue_render_pass() {
+void GPUCommandSequencer::issue_render_pass()
+{
   GPURenderSequencer render_sequencer{app, this};
   render_sequencer.swapchain_texture = waitAndAcquireGPUSwapchainTexture(
       command_buffer.get(), app->main_window.get(),
       &render_sequencer.swapchain_w, &render_sequencer.swapchain_h);
   if (not render_sequencer.swapchain_texture)
     return;
-  if (app->selection_areas.empty()) {
+  if (app->selection_areas.empty())
+  {
     SDL_GPUGraphicsPipeline *scenePipeline =
         app->caption_sequencer.swapchain_pipeline.get();
     render_sequencer.draw_scene(render_sequencer.swapchain_texture,
                                 scenePipeline);
-  } else {
+  }
+  else
+  {
     render_sequencer.verify_storage_textures();
     SDL_GPUGraphicsPipeline *scenePipeline =
         app->caption_sequencer.offscreen_pipeline.get();
@@ -927,7 +1037,8 @@ void GPUCommandSequencer::issue_render_pass() {
   }
 }
 
-void GPURenderSequencer::draw_processed_image() {
+void GPURenderSequencer::draw_processed_image()
+{
   SDL_GPUBlitInfo blitInfo{};
   blitInfo.load_op = SDL_GPU_LOADOP_DONT_CARE;
   blitInfo.source.texture = app->processed_texture.get();
@@ -940,7 +1051,8 @@ void GPURenderSequencer::draw_processed_image() {
 }
 
 void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
-                                    SDL_GPUGraphicsPipeline *pipeline) {
+                                    SDL_GPUGraphicsPipeline *pipeline)
+{
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   SDL_GPUColorTargetInfo colorTarget{.texture = scene_texture,
                                      .clear_color = {0.08f, 0.08f, 0.10f, 1.0f},
@@ -968,7 +1080,8 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
   samplerBinding.sampler = app->caption_sequencer.sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
-  struct alignas(16) RectUniform {
+  struct alignas(16) RectUniform
+  {
     float viewport[2];
     float translate[2];
   };
@@ -978,7 +1091,8 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
   rectUni.translate[0] = static_cast<float>(app->caption_x);
   rectUni.translate[1] = static_cast<float>(app->caption_y);
   SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
-  struct BlitUniform {
+  struct BlitUniform
+  {
     float tint[4];
   };
   BlitUniform blit{.tint = {1.0f, 1.0f, 1.0f, 1.0f}};
@@ -989,7 +1103,8 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
   SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
 }
 
-void GPURenderSequencer::verify_storage_textures() {
+void GPURenderSequencer::verify_storage_textures()
+{
   bool isFineW = app->offscreen_w >= swapchain_w;
   bool isFineH = app->offscreen_h >= swapchain_h;
   if (isFineW && isFineH)
@@ -1026,7 +1141,8 @@ void GPURenderSequencer::verify_storage_textures() {
       createGPUTexture(app->device_ctx.get(), processedInfo);
 }
 
-void GPURenderSequencer::selected_areas_draw() {
+void GPURenderSequencer::selected_areas_draw()
+{
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   SDL_GPUColorTargetInfo colorTarget{.texture = app->selection_texture.get(),
                                      .clear_color = {0.0f, 0.0f, 0.0f, 0.0f},
@@ -1049,7 +1165,8 @@ void GPURenderSequencer::selected_areas_draw() {
   SDL_GPUBufferBinding instanceBinding{app->selection_instances.get(), 0};
   SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
 
-  struct alignas(16) RectUniform {
+  struct alignas(16) RectUniform
+  {
     float viewport[2];
     float translate[2];
   };
@@ -1060,7 +1177,8 @@ void GPURenderSequencer::selected_areas_draw() {
   std::memcpy(&rectUni.translate, tx.data(), sizeof(RectUniform::translate));
   SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
 
-  struct alignas(16) BoxUniform {
+  struct alignas(16) BoxUniform
+  {
     float blend_color[4];
     float radius;
   };
@@ -1073,7 +1191,8 @@ void GPURenderSequencer::selected_areas_draw() {
   SDL_DrawGPUPrimitives(renderPass.get(), 4, instanceCount, 0, 0);
 }
 
-void GPURenderSequencer::selected_areas_blend() {
+void GPURenderSequencer::selected_areas_blend()
+{
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
 
   SDL_GPUStorageTextureReadWriteBinding textureRW{
@@ -1092,9 +1211,12 @@ void GPURenderSequencer::selected_areas_blend() {
   SDL_DispatchGPUCompute(computePass.get(), ceiledX, ceiledY, 1);
 }
 
-SDL_AppResult AppState::iterate() noexcept {
-  try {
-    if (selection_areas_flag && not selection_areas.empty()) {
+SDL_AppResult AppState::iterate() noexcept
+{
+  try
+  {
+    if (selection_areas_flag && not selection_areas.empty())
+    {
       selection_reflow();
       selection_areas_flag = false;
     }
@@ -1104,13 +1226,16 @@ SDL_AppResult AppState::iterate() noexcept {
     command_sequencer.issue_copy_pass();
     command_sequencer.issue_render_pass();
     return SDL_APP_CONTINUE;
-  } catch (const std::runtime_error &e) {
+  }
+  catch (const std::runtime_error &e)
+  {
     SDL_Log("[AppIterate] %s", e.what());
     return SDL_APP_FAILURE;
   }
 }
 
-std::array<int, 4> AppState::caption_bbox() noexcept {
+std::array<int, 4> AppState::caption_bbox() noexcept
+{
   static constexpr int PADDING_X = 1;
   static constexpr int PADDING_Y = 4;
   int horzOffset = static_cast<int>(caption_sequencer.horz_min / 64);
@@ -1123,7 +1248,8 @@ std::array<int, 4> AppState::caption_bbox() noexcept {
   return captionBox;
 }
 
-std::uint32_t SelectionEventHandler::find_unoccupied_id() {
+std::uint32_t SelectionEventHandler::find_unoccupied_id()
+{
   auto zippedPairs = std::ranges::zip_view{
       std::ranges::iota_view<std::uint32_t>{}, app->selection_areas.keys()};
   auto zippedPred = [](auto p) { return std::get<0>(p) != std::get<1>(p); };
@@ -1133,7 +1259,8 @@ std::uint32_t SelectionEventHandler::find_unoccupied_id() {
              : std::get<0>(*zippedIt);
 }
 
-void SelectionEventHandler::copy_drag_state() {
+void SelectionEventHandler::copy_drag_state()
+{
   auto &[selectionX, selectionY, selectionW, selectionH] =
       app->selection_areas[drag_state->selection_id];
   float segmentMin = std::ranges::min(drag_state->mouse_segment);
@@ -1149,7 +1276,8 @@ void SelectionEventHandler::copy_drag_state() {
 }
 
 void SelectionEventHandler::handle_mouse_button_down(
-    const SDL_MouseButtonEvent &event) {
+    const SDL_MouseButtonEvent &event)
+{
   SDL_Point clickPoint{static_cast<int>(event.x), static_cast<int>(event.y)};
   SDL_Rect captionBox{};
   std::tie(captionBox.x, captionBox.y, captionBox.w, captionBox.h) =
@@ -1164,11 +1292,13 @@ void SelectionEventHandler::handle_mouse_button_down(
   copy_drag_state();
 }
 
-std::uint32_t SelectionEventHandler::find_text_offset(float mousePointX) {
+std::uint32_t SelectionEventHandler::find_text_offset(float mousePointX)
+{
   std::size_t captionOffset{app->caption_string.size()};
   float pastX{};
   for (const GlyphClusterSection &clusterSection :
-       app->caption_sequencer.cluster_sections) {
+       app->caption_sequencer.cluster_sections)
+  {
     auto advanceDiscrete =
         clusterSection.positions |
         std::views::transform(&hb_glyph_position_t::x_advance);
@@ -1192,24 +1322,23 @@ std::uint32_t SelectionEventHandler::find_text_offset(float mousePointX) {
   return static_cast<std::uint32_t>(captionOffset);
 }
 
-std::uint32_t
-SelectionEventHandler::find_glyph_boundary(std::uint32_t textOffset) {
-  const hb_glyph_position_t *positionsBegin = hb_buffer_get_glyph_positions(
+std::uint32_t SelectionEventHandler::find_line_mark(std::uint32_t textOffset)
+{
+  const hb_glyph_position_t *positions = hb_buffer_get_glyph_positions(
       app->caption_sequencer.harfbuzz_buffer.get(), nullptr);
   const unsigned int bufferLen =
       hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get());
   std::ptrdiff_t boundary{static_cast<std::ptrdiff_t>(bufferLen) * 64};
   for (const GlyphClusterSection &clusterSection :
-       app->caption_sequencer.cluster_sections) {
-    auto findPred = [textOffset](std::uint32_t offset) {
-      return offset == textOffset;
-    };
+       app->caption_sequencer.cluster_sections)
+  {
+    auto findPred = [textOffset](std::uint32_t offset)
+    { return offset == textOffset; };
     auto codepointIt = std::ranges::find_if(
         clusterSection.codepoint_infos, findPred, &CodepointInfo::byte_offset);
     if (codepointIt == clusterSection.codepoint_infos.end())
       continue;
-    std::ptrdiff_t ptrdiffGlyph =
-        clusterSection.positions.data() - positionsBegin;
+    std::ptrdiff_t ptrdiffGlyph = clusterSection.positions.data() - positions;
     std::ptrdiff_t ptrdiffCodepoint =
         codepointIt - clusterSection.codepoint_infos.begin();
     std::ptrdiff_t codepointF = ptrdiffCodepoint * 64 *
@@ -1222,21 +1351,27 @@ SelectionEventHandler::find_glyph_boundary(std::uint32_t textOffset) {
 }
 
 void SelectionEventHandler::handle_mouse_button_up(
-    const SDL_MouseButtonEvent &event) {
+    const SDL_MouseButtonEvent &event)
+{
   if (not drag_state.has_value())
     return;
   auto [captionX, captionY, captionW, captionH] = app->caption_bbox();
-  std::uint32_t captionBeginOffset = find_text_offset(
-      std::get<0>(drag_state->mouse_segment) - static_cast<float>(captionX));
-  std::uint32_t captionBeginBoundary = find_glyph_boundary(captionBeginOffset);
-  std::uint32_t captionEndOffset = find_text_offset(
-      std::get<1>(drag_state->mouse_segment) - static_cast<float>(captionX));
-  std::uint32_t captionEndBoundary = find_glyph_boundary(captionEndOffset);
+  auto [screenFromX, screenToX] = drag_state->mouse_segment;
+
+  float captionFromX = screenFromX - static_cast<float>(captionX);
+  std::uint32_t captionFromOffset = find_text_offset(captionFromX);
+  std::uint32_t captionFromMark = find_line_mark(captionFromOffset);
+
+  float captionToX = screenToX - static_cast<float>(captionX);
+  std::uint32_t captionToOffset = find_text_offset(captionToX);
+  std::uint32_t captionToMark = find_line_mark(captionToOffset);
+
   drag_state.reset();
 }
 
 void SelectionEventHandler::handle_mouse_motion(
-    const SDL_MouseMotionEvent &event) {
+    const SDL_MouseMotionEvent &event)
+{
   if (not drag_state.has_value())
     return;
   auto [captionX, captionY, captionW, captionH] = app->caption_bbox();
@@ -1247,8 +1382,10 @@ void SelectionEventHandler::handle_mouse_motion(
   copy_drag_state();
 }
 
-SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
-  switch (event->type) {
+SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
+{
+  switch (event->type)
+  {
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
     selection_handler.handle_mouse_button_down(event->button);
     return SDL_APP_CONTINUE;
@@ -1274,7 +1411,8 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept {
   }
 }
 
-void GlyphSequencer::instantiate(SDL_Window *window) {
+void GlyphSequencer::instantiate(SDL_Window *window)
+{
   GPUTextureCreateInfo textureInfo{.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
                                    .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                    .texture_w = ATLAS_SIDE,
@@ -1292,21 +1430,14 @@ void GlyphSequencer::instantiate(SDL_Window *window) {
       app->device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
 }
 
-void GlyphSequencer::glyphs_shape(std::string_view textView) {
-  hb_buffer_reset(harfbuzz_buffer.get());
-  hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
-                     static_cast<int>(textView.size()), 0,
-                     static_cast<int>(textView.size()));
-  hb_buffer_guess_segment_properties(harfbuzz_buffer.get());
-  hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
-}
-
-void GlyphSequencer::verify_glyph_cache() {
+void GlyphSequencer::verify_glyph_cache()
+{
   std::span<hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get())};
   bool everInserted{};
-  for (const hb_glyph_info_t &info : glyphInfos) {
+  for (const hb_glyph_info_t &info : glyphInfos)
+  {
     if (glyph_cache.contains(info.codepoint))
       continue;
     UniqueFreetypeGlyph glyph = app->load_freetype_glyph(info.codepoint);
@@ -1317,20 +1448,24 @@ void GlyphSequencer::verify_glyph_cache() {
         GlyphCacheItem{std::move(glyph), std::make_unique<GlyphAtlasInfo>()};
     everInserted = true;
   }
-  if (everInserted) {
+  if (everInserted)
+  {
     pack_atlas();
     app->copypass_tasks.glyph_atlas.emplace(this);
   }
 }
 
-void GlyphSequencer::pack_atlas() {
-  struct CacheEntryView {
+void GlyphSequencer::pack_atlas()
+{
+  struct CacheEntryView
+  {
     hb_codepoint_t codepoint;
     FT_Glyph freetype_glyph;
     GlyphAtlasInfo *atlas;
     std::uint32_t accumulated_x;
   };
-  auto entryProject = [](const auto &cacheEntry) {
+  auto entryProject = [](const auto &cacheEntry)
+  {
     const auto &[codepoint, cacheItem] = cacheEntry;
     return CacheEntryView{.codepoint = codepoint,
                           .freetype_glyph = cacheItem.freetype_glyph.get(),
@@ -1339,12 +1474,11 @@ void GlyphSequencer::pack_atlas() {
   };
   auto entriesView = glyph_cache | std::views::transform(entryProject);
   std::vector<CacheEntryView> entriesViewVec{std::from_range, entriesView};
-  auto rowsProject = [](const CacheEntryView &entryView) {
-    return asBitmapGlyph(entryView.freetype_glyph)->bitmap.rows;
-  };
+  auto rowsProject = [](const CacheEntryView &entryView)
+  { return asBitmapGlyph(entryView.freetype_glyph)->bitmap.rows; };
   std::ranges::sort(entriesViewVec, std::ranges::greater{}, rowsProject);
-  for (std::uint32_t accumulatedX{};
-       CacheEntryView &entryView : entriesViewVec) {
+  for (std::uint32_t accumulatedX{}; CacheEntryView &entryView : entriesViewVec)
+  {
     std::uint32_t bitmapWidth =
         asBitmapGlyph(entryView.freetype_glyph)->bitmap.width;
     if (bitmapWidth > ATLAS_SIDE)
@@ -1353,23 +1487,24 @@ void GlyphSequencer::pack_atlas() {
         accumulatedX + bitmapWidth > ATLAS_SIDE ? 0 : accumulatedX;
     accumulatedX = entryView.accumulated_x + bitmapWidth + ATLAS_PADDING;
   }
-  struct CacheShelfView {
+  struct CacheShelfView
+  {
     std::vector<CacheEntryView> entries;
     std::uint32_t accumulated_y;
   };
-  auto shelfPredicate = [](const CacheEntryView &viewA,
-                           const CacheEntryView &viewB) {
-    return viewA.accumulated_x < viewB.accumulated_x;
-  };
-  auto shelfProject = [](auto entriesSubrange) {
+  auto shelfPredicate =
+      [](const CacheEntryView &viewA, const CacheEntryView &viewB)
+  { return viewA.accumulated_x < viewB.accumulated_x; };
+  auto shelfProject = [](auto entriesSubrange)
+  {
     std::vector<CacheEntryView> entries{std::from_range, entriesSubrange};
     return CacheShelfView{.entries = std::move(entries), .accumulated_y = 0};
   };
   auto shelvesView = entriesViewVec | std::views::chunk_by(shelfPredicate) |
                      std::views::transform(shelfProject);
   std::vector<CacheShelfView> shelvesViewVec{std::from_range, shelvesView};
-  for (std::uint32_t accumulatedY{};
-       CacheShelfView &shelfView : shelvesViewVec) {
+  for (std::uint32_t accumulatedY{}; CacheShelfView &shelfView : shelvesViewVec)
+  {
     std::uint32_t shelfHeight =
         asBitmapGlyph(shelfView.entries.front().freetype_glyph)->bitmap.rows;
     if (shelfHeight > ATLAS_SIDE)
@@ -1378,15 +1513,15 @@ void GlyphSequencer::pack_atlas() {
         accumulatedY + shelfHeight > ATLAS_SIDE ? 0 : accumulatedY;
     accumulatedY = shelfView.accumulated_y + shelfHeight + ATLAS_PADDING;
   }
-  auto pagePredicate = [](const CacheShelfView &viewA,
-                          const CacheShelfView &viewB) {
-    return viewA.accumulated_y < viewB.accumulated_y;
-  };
+  auto pagePredicate =
+      [](const CacheShelfView &viewA, const CacheShelfView &viewB)
+  { return viewA.accumulated_y < viewB.accumulated_y; };
   auto pagesView = shelvesViewVec | std::views::chunk_by(pagePredicate) |
                    std::views::enumerate;
   for (const auto &[pageIdx, shelves] : pagesView)
     for (const CacheShelfView &shelfView : shelves)
-      for (const CacheEntryView &entryView : shelfView.entries) {
+      for (const CacheEntryView &entryView : shelfView.entries)
+      {
         entryView.atlas->page = static_cast<std::uint32_t>(pageIdx);
         entryView.atlas->y = shelfView.accumulated_y;
         entryView.atlas->x = entryView.accumulated_x;
@@ -1399,14 +1534,16 @@ void GlyphSequencer::pack_atlas() {
     atlasCopier.copy_bitmap(cacheItem);
 }
 
-void GlyphAtlasCopier::copy_bitmap(const GlyphCacheItem &cacheItem) {
+void GlyphAtlasCopier::copy_bitmap(const GlyphCacheItem &cacheItem)
+{
   atlas_info = cacheItem.atlas.get();
   bitmap = &asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
   for (std::uint32_t row = 0; row < bitmap->rows; ++row)
     copy_bitmap_row(row);
 }
 
-void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row) {
+void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row)
+{
   unsigned char *source = bitmap->buffer + row * bitmap->pitch;
   std::uint32_t atlasVertOffset = atlas_info->y + row;
   std::uint32_t atlasFullOffset =
@@ -1416,7 +1553,8 @@ void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row) {
   std::memcpy(transferBegin + atlasFullOffset, source, bitmap->width);
 }
 
-void GlyphSequencer::verify_instance_capacity() {
+void GlyphSequencer::verify_instance_capacity()
+{
   std::uint32_t bufferSize = static_cast<std::uint32_t>(
       hb_buffer_get_length(harfbuzz_buffer.get()) * sizeof(RectVertexInstance));
   if (instance_capacity >= bufferSize)
@@ -1432,7 +1570,8 @@ void GlyphSequencer::verify_instance_capacity() {
 
 std::optional<RectVertexInstance>
 GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
-                                       hb_position_t penX) {
+                                       hb_position_t penX)
+{
   hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   hb_glyph_position_t *positions =
@@ -1467,12 +1606,14 @@ GlyphSequencer::create_vertex_instance(unsigned int glyphIndex,
   return vertexInstance;
 }
 
-std::generator<RectVertexInstance> GlyphSequencer::emit_vertex_instances() {
+std::generator<RectVertexInstance> GlyphSequencer::emit_vertex_instances()
+{
   unsigned int glyphIndex{}, bufferLength{};
   hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), &bufferLength);
   hb_position_t penX{};
-  while (glyphIndex < bufferLength) {
+  while (glyphIndex < bufferLength)
+  {
     std::optional<RectVertexInstance> vertexInstance{
         create_vertex_instance(glyphIndex, penX)};
     if (vertexInstance)
@@ -1482,26 +1623,30 @@ std::generator<RectVertexInstance> GlyphSequencer::emit_vertex_instances() {
   }
 }
 
-void GlyphSequencer::transfer_vertex_instances() {
+void GlyphSequencer::transfer_vertex_instances()
+{
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true);
   for (const auto &[idx, data] :
-       emit_vertex_instances() | std::views::enumerate) {
+       emit_vertex_instances() | std::views::enumerate)
+  {
     auto *bufferBegin = static_cast<RectVertexInstance *>(mappedBuffer.get());
     std::memcpy(bufferBegin + idx, &data, sizeof(RectVertexInstance));
   }
 }
 
-void GlyphSequencer::queue_vertex_copypass() {
+void GlyphSequencer::queue_vertex_copypass()
+{
   verify_instance_capacity();
   transfer_vertex_instances();
   app->copypass_tasks.glyph_vertices.emplace(this);
 }
 
-std::array<hb_position_t, 4>
-GlyphSequencer::measure_text(unsigned int lbound,
-                             std::optional<unsigned int> rboundOpt) {
-  std::array<hb_position_t, 4> metrics{};
+GlyphSequencer::TextMetrics
+GlyphSequencer::text_measure(std::uint32_t markFrom,
+                             std::optional<std::uint32_t> markTo)
+{
+  TextMetrics metrics{};
   std::get<0>(metrics) = std::numeric_limits<hb_position_t>::max();
   std::get<1>(metrics) = std::numeric_limits<hb_position_t>::min();
   std::get<2>(metrics) = std::numeric_limits<hb_position_t>::max();
@@ -1511,40 +1656,47 @@ GlyphSequencer::measure_text(unsigned int lbound,
   const hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
 
-  struct GlyphCarry {
-    unsigned int glyph_index;
-    hb_position_t pen_x;
-  };
-  unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
-  unsigned int rbound = rboundOpt.value_or(bufferLen * 64);
-  for (GlyphCarry c{}; c.glyph_index * 64 < ((rbound + 63) & ~63);
-       c.pen_x += positions[c.glyph_index].x_advance, ++c.glyph_index) {
-    if ((lbound & ~63) > c.glyph_index * 64)
-      continue;
+  std::size_t pastMark{};
+  hb_position_t pastX{};
+  auto iterateGlyph = [&](const hb_glyph_position_t &curPosition) -> void
+  {
+    if (markFrom > pastMark)
+      return;
 
-    GlyphCache::iterator cacheIt =
-        glyph_cache.find(glyphInfos[c.glyph_index].codepoint);
+    std::ptrdiff_t ptrdiffGlyph = &curPosition - positions;
+    auto cacheIt = glyph_cache.find(glyphInfos[ptrdiffGlyph].codepoint);
     if (cacheIt == glyph_cache.end())
-      continue;
+      return;
 
     FT_BitmapGlyph bitmapGlyph =
         asBitmapGlyph(cacheIt->second.freetype_glyph.get());
-    hb_position_t left =
-        c.pen_x + positions[c.glyph_index].x_offset + bitmapGlyph->left * 64;
+    hb_position_t left = pastX + curPosition.x_offset + bitmapGlyph->left * 64;
     hb_position_t right = left + bitmapGlyph->bitmap.width * 64;
-    hb_position_t top =
-        -positions[c.glyph_index].y_offset - bitmapGlyph->top * 64;
+    hb_position_t top = -curPosition.y_offset - bitmapGlyph->top * 64;
     hb_position_t bottom = top + bitmapGlyph->bitmap.rows * 64;
 
     std::get<0>(metrics) = std::min(std::get<0>(metrics), left);
     std::get<1>(metrics) = std::max(std::get<1>(metrics), right);
     std::get<2>(metrics) = std::min(std::get<2>(metrics), top);
     std::get<3>(metrics) = std::max(std::get<3>(metrics), bottom);
+  };
+  for (const GlyphClusterSection &clusterSection : cluster_sections)
+  {
+    if (markTo.has_value() && pastMark >= *markTo)
+      break;
+    std::size_t markAdvance = clusterSection.positions.size() * 64;
+    for (const hb_glyph_position_t &position : clusterSection.positions)
+    {
+      iterateGlyph(position);
+      pastX += position.x_advance;
+    }
+    pastMark += markAdvance;
   }
   return metrics;
 }
 
-std::generator<GlyphClusterSection> GlyphSequencer::emit_cluster_sections() {
+std::generator<GlyphClusterSection> GlyphSequencer::emit_cluster_sections()
+{
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   const hb_glyph_position_t *positions =
@@ -1555,14 +1707,14 @@ std::generator<GlyphClusterSection> GlyphSequencer::emit_cluster_sections() {
     bufferPairs.emplace_back(glyphInfos[i].cluster, positions + i);
 
   std::vector<std::span<BufferPair>> clusterSpans{};
-  auto clusterPredicate = [](const BufferPair &infoA, const BufferPair &infoB) {
-    return infoA.first == infoB.first;
-  };
+  auto clusterPredicate = [](const BufferPair &infoA, const BufferPair &infoB)
+  { return infoA.first == infoB.first; };
   for (const auto &clusterChunk :
        bufferPairs | std::views::chunk_by(clusterPredicate))
     clusterSpans.emplace_back(clusterChunk);
 
-  for (const auto &[spanA, spanB] : clusterSpans | std::views::pairwise) {
+  for (const auto &[spanA, spanB] : clusterSpans | std::views::pairwise)
+  {
     auto codepointItA = std::ranges::lower_bound(
         codepoint_infos, spanA.front().first, std::ranges::less{},
         &CodepointInfo::byte_offset);
@@ -1576,7 +1728,8 @@ std::generator<GlyphClusterSection> GlyphSequencer::emit_cluster_sections() {
     co_yield clusterSection;
   }
   for (const std::span<BufferPair> &clusterSpan :
-       clusterSpans | std::views::reverse | std::views::take(1)) {
+       clusterSpans | std::views::reverse | std::views::take(1))
+  {
     auto codepointIt = std::ranges::lower_bound(
         codepoint_infos, clusterSpan.front().first, std::ranges::less{},
         &CodepointInfo::byte_offset);
@@ -1588,7 +1741,8 @@ std::generator<GlyphClusterSection> GlyphSequencer::emit_cluster_sections() {
   }
 }
 
-void CopypassTaskVisitor::operator()(CopyGlyphAtlas task) const {
+void CopypassTaskVisitor::operator()(CopyGlyphAtlas task) const
+{
   SDL_GPUTextureTransferInfo source{
       .transfer_buffer = task.sequencer->atlas_transfer.get(),
       .offset = 0,
@@ -1602,42 +1756,49 @@ void CopypassTaskVisitor::operator()(CopyGlyphAtlas task) const {
   SDL_UploadToGPUTexture(copypass, &source, &destination, false);
 }
 
-UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint) {
+UniqueFreetypeGlyph AppState::load_freetype_glyph(hb_codepoint_t codepoint)
+{
   FT_Error errcode{};
   FT_Face face = hb_ft_font_get_ft_face(harfbuzz_font.get());
   errcode = FT_Load_Glyph(
       face, codepoint, FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER);
-  if (errcode) {
+  if (errcode)
+  {
     std::string errorMsg{"FT_Load_Glyph failed for glyph: "};
     throw std::runtime_error{errorMsg + std::to_string(codepoint)};
   }
   FT_Glyph glyph{};
   errcode = FT_Get_Glyph(face->glyph, &glyph);
-  if (errcode) {
+  if (errcode)
+  {
     std::string errorMsg{"FT_Get_Glyph failed for glyph: "};
     throw std::runtime_error{errorMsg + std::to_string(codepoint)};
   }
   return UniqueFreetypeGlyph{glyph};
 }
 
-void AppState::caption_reflow() {
-  caption_sequencer.glyphs_shape(caption_string);
-  caption_sequencer.verify_glyph_cache();
-  std::tie(caption_sequencer.horz_min, caption_sequencer.horz_max,
-           caption_sequencer.vert_min, caption_sequencer.vert_max) =
-      caption_sequencer.measure_text(0, std::nullopt);
-  caption_sequencer.codepoint_infos.clear();
-  caption_sequencer.codepoint_infos.append_range(
-      emitCodepointInfo(caption_string));
-  caption_sequencer.cluster_sections.clear();
-  caption_sequencer.cluster_sections.append_range(
-      caption_sequencer.emit_cluster_sections());
-  caption_x = (INITIAL_WINDOW_W - caption_sequencer.measured_w()) / 2;
-  caption_y = (INITIAL_WINDOW_H - caption_sequencer.measured_h()) / 2;
-  caption_sequencer.queue_vertex_copypass();
+void GlyphSequencer::text_reflow(std::string_view textView)
+{
+  auto initiate = [textView, this]()
+  {
+    hb_buffer_reset(harfbuzz_buffer.get());
+    hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
+                       static_cast<int>(textView.size()), 0,
+                       static_cast<int>(textView.size()));
+    hb_buffer_guess_segment_properties(harfbuzz_buffer.get());
+    hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
+    codepoint_infos = {std::from_range, emitCodepointInfo(textView)};
+  };
+  initiate();
+  verify_glyph_cache();
+  cluster_sections = {std::from_range, emit_cluster_sections()};
+  std::tie(horz_min, horz_max, vert_min, vert_max) =
+      text_measure(0, std::nullopt);
+  queue_vertex_copypass();
 }
 
-void CopypassTaskVisitor::operator()(CopySelectionAreas task) const {
+void CopypassTaskVisitor::operator()(CopySelectionAreas task) const
+{
   SDL_GPUTransferBufferLocation instancesSource{
       .transfer_buffer = task.app->selection_transfer.get(), .offset = 0};
   SDL_GPUBufferRegion instancesDest{};
@@ -1647,13 +1808,15 @@ void CopypassTaskVisitor::operator()(CopySelectionAreas task) const {
   SDL_UploadToGPUBuffer(copypass, &instancesSource, &instancesDest, false);
 }
 
-void AppState::selection_reflow() {
+void AppState::selection_reflow()
+{
   verify_selection_capacity();
   transfer_selection_areas();
   copypass_tasks.selection_areas.emplace(this);
 }
 
-void AppState::verify_selection_capacity() {
+void AppState::verify_selection_capacity()
+{
   std::uint32_t instancesSize{static_cast<std::uint32_t>(
       selection_areas.size() * sizeof(RectVertexInstance))};
   if (instancesSize <= selection_instances_capacity)
@@ -1667,10 +1830,12 @@ void AppState::verify_selection_capacity() {
       createGPUTransferBuffer(device_ctx.get(), selection_instances_capacity);
 }
 
-void AppState::transfer_selection_areas() {
+void AppState::transfer_selection_areas()
+{
   UniqueGPUMappedBuffer selectionMapped =
       mapGPUTransferBuffer(device_ctx.get(), selection_transfer.get(), true);
-  for (const auto &[idx, entry] : selection_areas | std::views::enumerate) {
+  for (const auto &[idx, entry] : selection_areas | std::views::enumerate)
+  {
     auto [rectX, rectY, rectW, rectH] = entry.second;
     RectVertexInstance rectInstance{};
     rectInstance.rect_position[0] = static_cast<float>(rectX);
@@ -1684,43 +1849,56 @@ void AppState::transfer_selection_areas() {
   }
 }
 
-SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
-  if (not SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
+{
+  if (not SDL_InitSubSystem(SDL_INIT_VIDEO))
+  {
     SDL_Log("SDL_Init_Subsystem failed: %s", SDL_GetError());
     return SDL_APP_FAILURE;
   }
-  if (FT_Init_FreeType(&globalFTLibrary)) {
+  if (FT_Init_FreeType(&globalFTLibrary))
+  {
     SDL_Log("FT_Init_FreeType failed!");
     return SDL_APP_FAILURE;
   }
-  try {
+  try
+  {
     AppState *app = new AppState{};
     *appstate = app;
     app->instantiate(globalFTLibrary);
-    app->caption_reflow();
+    app->caption_sequencer.text_reflow(app->caption_string);
+    const GlyphSequencer &sequencer = app->caption_sequencer;
+    app->caption_x = (INITIAL_WINDOW_W - sequencer.measured_w()) / 2;
+    app->caption_y = (INITIAL_WINDOW_H - sequencer.measured_h()) / 2;
     return SDL_APP_CONTINUE;
-  } catch (const std::runtime_error &e) {
+  }
+  catch (const std::runtime_error &e)
+  {
     SDL_Log("[AppInit] %s", e.what());
     return SDL_APP_FAILURE;
   }
 }
 
-void SDL_AppQuit(void *appstate, SDL_AppResult result) {
+void SDL_AppQuit(void *appstate, SDL_AppResult result)
+{
   AppState *app = static_cast<AppState *>(appstate);
   delete app;
-  if (globalFTLibrary) {
+  if (globalFTLibrary)
+  {
     FT_Done_FreeType(globalFTLibrary);
     globalFTLibrary = nullptr;
   }
   SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
-SDL_AppResult SDL_AppIterate(void *appstate) {
+SDL_AppResult SDL_AppIterate(void *appstate)
+{
   AppState *app = static_cast<AppState *>(appstate);
   return app->iterate();
 }
 
-SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
+{
   AppState *app = static_cast<AppState *>(appstate);
   return app->handle_event(event);
 }
