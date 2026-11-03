@@ -786,7 +786,7 @@ struct GlyphClusterSection
   std::uint32_t cluster;
   std::span<const CodepointInfo> codepoint_infos;
   std::span<const hb_glyph_position_t> positions;
-  std::array<std::uint32_t, 4> metrics;
+  std::optional<std::array<hb_position_t, 4>> metrics;
 };
 
 struct AppState;
@@ -835,6 +835,12 @@ struct GlyphSequencer
   void pack_atlas();
 
   void text_reflow(std::string_view);
+  struct TextMeasureQuery
+  {
+    std::array<std::uint32_t, 2> cluster_start;
+    std::optional<std::array<std::uint32_t, 2>> cluster_end;
+  };
+  std::array<std::uint32_t, 4> text_measure(TextMeasureQuery);
 };
 
 struct CopyGlyphAtlas
@@ -1293,18 +1299,17 @@ std::uint32_t SelectionEventHandler::find_text_offset(float mousePointX)
   for (const GlyphClusterSection &clusterSection :
        app->caption_sequencer.cluster_sections)
   {
-    auto advanceDiscrete =
-        clusterSection.positions |
-        std::views::transform(&hb_glyph_position_t::x_advance);
-    hb_position_t advanceCluster = std::ranges::fold_left(
-        advanceDiscrete, hb_position_t{}, std::plus<hb_position_t>{});
-    float advanceClusterX = static_cast<float>(advanceCluster) / 64.0f;
+    std::ranges::transform_view positionAdvance{
+        clusterSection.positions, &hb_glyph_position_t::x_advance};
+    hb_position_t clusterAdvance = std::ranges::fold_left(
+        positionAdvance, hb_position_t{}, std::plus<hb_position_t>{});
+    float clusterAdvanceX = static_cast<float>(clusterAdvance) / 64.0f;
     float codepointCount =
         static_cast<float>(clusterSection.codepoint_infos.size());
     float mouseClusterX = std::max(mousePointX, pastX) - pastX;
     float mouseFraction =
-        std::round(mouseClusterX / advanceClusterX * codepointCount);
-    pastX += advanceClusterX;
+        std::round(mouseClusterX / clusterAdvanceX * codepointCount);
+    pastX += clusterAdvanceX;
     if (mouseFraction >= codepointCount)
       continue;
     std::uint32_t codepointIdx = static_cast<std::uint32_t>(mouseFraction);
@@ -1563,18 +1568,22 @@ void GlyphSequencer::transfer_instance_data()
   unsigned int bufferIdx{}, glyphCount{};
   auto *const positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), &glyphCount);
+  auto *const glyphInfos =
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true);
   auto *const bufferBegin = static_cast<RectInstanceData *>(mappedBuffer.get());
-  hb_position_t penX{};
-  auto copyVertexInstance = [&](GlyphCache::iterator cacheIt,
-                                unsigned int glyphIdx) -> void
+  hb_position_t pastX{};
+  auto copyVertexInstance = [&](unsigned int glyphIdx) -> void
   {
+    auto cacheIt = glyph_cache.find(glyphInfos[glyphIdx].codepoint);
+    if (cacheIt == glyph_cache.end())
+      return;
     FT_BitmapGlyph bitmapGlyph =
         asBitmapGlyph(cacheIt->second.freetype_glyph.get());
     RectInstanceData vertexInstance{};
     vertexInstance.rect_position[0] =
-        static_cast<float>(penX + positions[glyphIdx].x_offset +
+        static_cast<float>(pastX + positions[glyphIdx].x_offset +
                            bitmapGlyph->left * 64) /
         64.0f;
     vertexInstance.rect_position[1] =
@@ -1599,19 +1608,10 @@ void GlyphSequencer::transfer_instance_data()
                 sizeof(RectInstanceData));
     ++bufferIdx;
   };
-  auto *const glyphInfos =
-      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   for (unsigned int glyphIdx{}; glyphIdx < glyphCount; ++glyphIdx)
   {
-    hb_codepoint_t key{glyphInfos[glyphIdx].codepoint};
-    GlyphCache::iterator cacheIt = glyph_cache.find(key);
-    if (cacheIt == glyph_cache.end())
-      penX += positions[glyphIdx].x_advance;
-    else
-    {
-      copyVertexInstance(cacheIt, glyphIdx);
-      penX += positions[glyphIdx].x_advance;
-    }
+    copyVertexInstance(glyphIdx);
+    pastX += positions[glyphIdx].x_advance;
   }
 }
 
@@ -1624,38 +1624,78 @@ void GlyphSequencer::queue_vertex_copypass()
 
 void GlyphSequencer::calculate_cluster_metrics()
 {
-  std::get<0>(metrics) = std::numeric_limits<hb_position_t>::max();
-  std::get<1>(metrics) = std::numeric_limits<hb_position_t>::min();
-  std::get<2>(metrics) = std::numeric_limits<hb_position_t>::max();
-  std::get<3>(metrics) = std::numeric_limits<hb_position_t>::min();
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
   const hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
-
   hb_position_t pastX{};
-  for (const GlyphClusterSection &clusterSection : cluster_sections)
+  auto accumClusterMetrics =
+      [&](std::optional<std::array<hb_position_t, 4>> &clusterMetrics,
+          const hb_glyph_position_t &position) -> void
   {
-    std::uint32_t ptrdiffCluster = static_cast<std::uint32_t>(
-        std::distance(cluster_sections.data(), &clusterSection));
-    std::ptrdiff_t ptrdiffGlyph = &curPosition - positions;
+    std::ptrdiff_t ptrdiffGlyph = &position - positions;
     auto cacheIt = glyph_cache.find(glyphInfos[ptrdiffGlyph].codepoint);
     if (cacheIt == glyph_cache.end())
-      continue;
-
+      return;
     FT_BitmapGlyph bitmapGlyph =
         asBitmapGlyph(cacheIt->second.freetype_glyph.get());
-    hb_position_t left = pastX + curPosition.x_offset + bitmapGlyph->left * 64;
+    hb_position_t left = pastX + position.x_offset + bitmapGlyph->left * 64;
     hb_position_t right = left + bitmapGlyph->bitmap.width * 64;
-    hb_position_t top = -curPosition.y_offset - bitmapGlyph->top * 64;
+    hb_position_t top = -position.y_offset - bitmapGlyph->top * 64;
     hb_position_t bottom = top + bitmapGlyph->bitmap.rows * 64;
 
-    std::get<0>(metrics) = std::min(std::get<0>(metrics), left);
-    std::get<1>(metrics) = std::max(std::get<1>(metrics), right);
-    std::get<2>(metrics) = std::min(std::get<2>(metrics), top);
-    std::get<3>(metrics) = std::max(std::get<3>(metrics), bottom);
-  }
-  return metrics;
+    if (not clusterMetrics.has_value())
+      clusterMetrics.emplace();
+    auto &[clusterL, clusterR, clusterT, clusterB] = *clusterMetrics;
+    clusterL = std::min(clusterL, left);
+    clusterR = std::max(clusterR, right);
+    clusterT = std::min(clusterT, top);
+    clusterB = std::max(clusterB, bottom);
+  };
+  for (GlyphClusterSection &clusterSection : cluster_sections)
+    for (const hb_glyph_position_t &curPosition : clusterSection.positions)
+    {
+      accumClusterMetrics(clusterSection.metrics, curPosition);
+      pastX += curPosition.x_advance;
+    }
+}
+
+std::array<std::uint32_t, 4>
+GlyphSequencer::text_measure(TextMeasureQuery query)
+{
+  std::array<hb_position_t, 4> metrics{};
+  auto &[metricL, metricR, metricT, metricB] = metrics;
+  metricL = std::numeric_limits<hb_position_t>::max();
+  metricR = std::numeric_limits<hb_position_t>::min();
+  metricT = std::numeric_limits<hb_position_t>::max();
+  metricB = std::numeric_limits<hb_position_t>::min();
+  std::uint32_t queriedStart{std::get<0>(query.cluster_start)};
+  std::uint32_t queriedEnd{static_cast<std::uint32_t>(cluster_sections.size())};
+  if (query.cluster_end)
+    queriedEnd = std::get<0>(*query.cluster_end) + 1;
+  std::span queriedSections{cluster_sections.begin() + queriedStart,
+                            cluster_sections.begin() + queriedEnd};
+  for (const GlyphClusterSection &clusterSection : queriedSections)
+    if (clusterSection.metrics.has_value())
+    {
+      const auto [clusterL, clusterR, clusterT, clusterB] =
+          *clusterSection.metrics;
+      metricL = std::min(metricL, clusterL);
+      metricR = std::max(metricR, clusterR);
+      metricT = std::min(metricT, clusterT);
+      metricB = std::max(metricB, clusterB);
+    }
+    else
+    {
+      std::ranges::transform_view positionAdvance{
+          clusterSection.positions, &hb_glyph_position_t::x_advance};
+      hb_position_t clusterAdvance = std::ranges::fold_left(
+          positionAdvance, hb_position_t{}, std::plus<hb_position_t>{});
+      metricR = std::max(metricR, metricR + clusterAdvance);
+    }
+  return {
+      static_cast<std::uint32_t>(metricL), static_cast<std::uint32_t>(metricR),
+      static_cast<std::uint32_t>(metricT), static_cast<std::uint32_t>(metricB)};
 }
 
 std::vector<GlyphClusterSection> GlyphSequencer::make_cluster_sections()
@@ -1764,6 +1804,8 @@ void GlyphSequencer::text_reflow(std::string_view textView)
   verify_glyph_cache();
   cluster_sections = make_cluster_sections();
   calculate_cluster_metrics();
+  std::tie(horz_min, horz_max, vert_min, vert_max) =
+      text_measure(TextMeasureQuery{{0, 0}, std::nullopt});
   queue_vertex_copypass();
 }
 
