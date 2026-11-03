@@ -816,7 +816,7 @@ struct GlyphSequencer
 
   std::vector<GlyphClusterSection> cluster_sections;
   std::vector<GlyphClusterSection> make_cluster_sections();
-  void calculate_cluster_metrics();
+  void measure_cluster_sections();
 
   UniqueGPUBuffer instance_buffer;
   UniqueGPUTransferBuffer instance_transfer;
@@ -1622,7 +1622,7 @@ void GlyphSequencer::queue_vertex_copypass()
   app->copypass_tasks.glyph_vertices.emplace(this);
 }
 
-void GlyphSequencer::calculate_cluster_metrics()
+void GlyphSequencer::measure_cluster_sections()
 {
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
@@ -1663,12 +1663,10 @@ void GlyphSequencer::calculate_cluster_metrics()
 std::array<std::uint32_t, 4>
 GlyphSequencer::text_measure(TextMeasureQuery query)
 {
-  std::array<hb_position_t, 4> metrics{};
-  auto &[metricL, metricR, metricT, metricB] = metrics;
-  metricL = std::numeric_limits<hb_position_t>::max();
-  metricR = std::numeric_limits<hb_position_t>::min();
-  metricT = std::numeric_limits<hb_position_t>::max();
-  metricB = std::numeric_limits<hb_position_t>::min();
+  hb_position_t textL = std::numeric_limits<hb_position_t>::max(),
+                textR = std::numeric_limits<hb_position_t>::min(),
+                textT = std::numeric_limits<hb_position_t>::max(),
+                textB = std::numeric_limits<hb_position_t>::min();
   std::uint32_t queriedStart{std::get<0>(query.cluster_start)};
   std::uint32_t queriedEnd{static_cast<std::uint32_t>(cluster_sections.size())};
   if (query.cluster_end)
@@ -1676,14 +1674,20 @@ GlyphSequencer::text_measure(TextMeasureQuery query)
   std::span queriedSections{cluster_sections.begin() + queriedStart,
                             cluster_sections.begin() + queriedEnd};
   for (const GlyphClusterSection &clusterSection : queriedSections)
+  {
+    std::uint32_t ptrdiffCluster =
+        static_cast<std::uint32_t>(&clusterSection - cluster_sections);
+    if (ptrdiffCluster == std::get<0>(*query.cluster_start)))
+    {
+    }
     if (clusterSection.metrics.has_value())
     {
       const auto [clusterL, clusterR, clusterT, clusterB] =
           *clusterSection.metrics;
-      metricL = std::min(metricL, clusterL);
-      metricR = std::max(metricR, clusterR);
-      metricT = std::min(metricT, clusterT);
-      metricB = std::max(metricB, clusterB);
+      textL = std::min(textL, clusterL);
+      textR = std::max(textR, clusterR);
+      textT = std::min(textT, clusterT);
+      textB = std::max(textB, clusterB);
     }
     else
     {
@@ -1691,11 +1695,15 @@ GlyphSequencer::text_measure(TextMeasureQuery query)
           clusterSection.positions, &hb_glyph_position_t::x_advance};
       hb_position_t clusterAdvance = std::ranges::fold_left(
           positionAdvance, hb_position_t{}, std::plus<hb_position_t>{});
-      metricR = std::max(metricR, metricR + clusterAdvance);
+      textR = std::max(textR, textR + clusterAdvance);
     }
-  return {
-      static_cast<std::uint32_t>(metricL), static_cast<std::uint32_t>(metricR),
-      static_cast<std::uint32_t>(metricT), static_cast<std::uint32_t>(metricB)};
+  }
+  std::array<std::uint32_t, 4> result{};
+  std::get<0>(result) = static_cast<std::uint32_t>(textL);
+  std::get<1>(result) = static_cast<std::uint32_t>(textR);
+  std::get<2>(result) = static_cast<std::uint32_t>(textT);
+  std::get<3>(result) = static_cast<std::uint32_t>(textB);
+  return result;
 }
 
 std::vector<GlyphClusterSection> GlyphSequencer::make_cluster_sections()
@@ -1803,7 +1811,7 @@ void GlyphSequencer::text_reflow(std::string_view textView)
   initiate();
   verify_glyph_cache();
   cluster_sections = make_cluster_sections();
-  calculate_cluster_metrics();
+  measure_cluster_sections();
   std::tie(horz_min, horz_max, vert_min, vert_max) =
       text_measure(TextMeasureQuery{{0, 0}, std::nullopt});
   queue_vertex_copypass();
