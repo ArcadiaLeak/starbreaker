@@ -809,8 +809,8 @@ struct GlyphSequencer
 
   double x_min = 0, x_max = 0;
   double y_min = 0, y_max = 0;
-  double measured_w() const noexcept { return (x_max - x_min) / 64; }
-  double measured_h() const noexcept { return (y_max - y_min) / 64; }
+  double measured_w() const noexcept { return x_max - x_min; }
+  double measured_h() const noexcept { return y_max - y_min; }
 
   std::vector<CodepointInfo> codepoint_infos;
 
@@ -1235,11 +1235,9 @@ std::array<double, 4> AppState::caption_bbox() noexcept
 {
   static constexpr double PADDING_X = 1;
   static constexpr double PADDING_Y = 4;
-  double horzOffset = caption_sequencer.x_min / 64;
-  double vertOffset = caption_sequencer.y_max / 64;
   std::array<double, 4> captionBox{};
-  std::get<0>(captionBox) = caption_x + horzOffset - PADDING_X;
-  std::get<1>(captionBox) = caption_y + vertOffset - PADDING_Y;
+  std::get<0>(captionBox) = caption_x + caption_sequencer.x_min - PADDING_X;
+  std::get<1>(captionBox) = caption_y + caption_sequencer.y_max - PADDING_Y;
   std::get<2>(captionBox) = caption_sequencer.measured_w() + PADDING_X * 2;
   std::get<3>(captionBox) = caption_sequencer.measured_h() + PADDING_Y * 2;
   return captionBox;
@@ -1364,23 +1362,19 @@ void SelectionEventHandler::handle_mouse_button_up(
   TextMeasureQuery measureQuery{clusterStart, clusterFinal};
   auto [measureL, measureR, measureT, measureB] =
       app->caption_sequencer.text_measure(measureQuery);
-  std::uint32_t measureW =
-      static_cast<std::uint32_t>(measureR - measureL + 63) / 64u;
-  std::uint32_t measureH =
-      static_cast<std::uint32_t>(measureB - measureT + 63) / 64u;
+  double measureW = measureR - measureL;
+  double measureH = measureB - measureT;
 
   if (measureL == measureR)
     app->selection_areas.erase(drag_state->selection_id);
   else
   {
-    static constexpr std::uint32_t PADDING_X = 1;
-    static constexpr std::uint32_t PADDING_Y = 4;
+    static constexpr double PADDING_X = 1;
+    static constexpr double PADDING_Y = 4;
     auto &[selectionX, selectionY, selectionW, selectionH] =
         app->selection_areas[drag_state->selection_id];
-    selectionX = static_cast<std::uint32_t>(app->caption_x) +
-                 static_cast<std::uint32_t>(measureL) / 64u - PADDING_X;
-    selectionY = static_cast<std::uint32_t>(app->caption_y) +
-                 static_cast<std::uint32_t>(measureB) / 64u - PADDING_Y;
+    selectionX = app->caption_x + measureL - PADDING_X;
+    selectionY = app->caption_y + measureB - PADDING_Y;
     selectionW = measureW + PADDING_X * 2;
     selectionH = measureH + PADDING_Y * 2;
   }
@@ -1681,14 +1675,14 @@ void GlyphSequencer::measure_cluster_sections()
         asBitmapGlyph(cacheIt->second.freetype_glyph.get());
 
     double bitmapW = static_cast<double>(bitmapGlyph->bitmap.width);
-    double positionL = 64.0 * static_cast<double>(bitmapGlyph->left) +
-                       static_cast<double>(position.x_offset) + pastX;
-    double positionR = positionL + bitmapW * 64.0;
+    double positionL = pastX + static_cast<double>(bitmapGlyph->left) +
+                       static_cast<double>(position.x_offset) / 64.0;
+    double positionR = positionL + bitmapW;
 
     double bitmapH = static_cast<double>(bitmapGlyph->bitmap.rows);
-    double positionT = -1.0 * static_cast<double>(bitmapGlyph->top) * 64.0 -
-                       static_cast<double>(position.y_offset);
-    double positionB = positionT + bitmapH * 64.0;
+    double positionT = -1.0 * static_cast<double>(bitmapGlyph->top) -
+                       static_cast<double>(position.y_offset) / 64.0;
+    double positionB = positionT + bitmapH;
 
     auto &[clusterL, clusterR, clusterT, clusterB] = *clusterMetrics;
     clusterL = std::min(clusterL, positionL);
@@ -1700,7 +1694,7 @@ void GlyphSequencer::measure_cluster_sections()
     for (const hb_glyph_position_t &position : clusterSection.positions)
     {
       accumClusterMetrics(clusterSection.metrics, position);
-      pastX += static_cast<double>(position.x_advance);
+      pastX += static_cast<double>(position.x_advance) / 64.0;
     }
 }
 
@@ -1752,7 +1746,8 @@ std::array<double, 4> GlyphSequencer::text_measure(TextMeasureQuery query)
           clusterSection.positions, &hb_glyph_position_t::x_advance};
       hb_position_t clusterAdvance = std::ranges::fold_left(
           positionAdvance, hb_position_t{}, std::plus<hb_position_t>{});
-      textR = std::max(textR, textR + clusterAdvance);
+      double clusterAdvanceX = static_cast<double>(clusterAdvance) / 64.0;
+      textR = std::max(textR, textR + clusterAdvanceX);
     }
   }
   return textMetrics;
