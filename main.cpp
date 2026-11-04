@@ -1350,22 +1350,26 @@ void SelectionEventHandler::handle_mouse_button_up(
   if (not drag_state.has_value())
     return;
   auto [captionX, captionY, captionW, captionH] = app->caption_bbox();
-  auto [screenStartX, screenEndX] = drag_state->mouse_segment;
+  std::array<float, 2> screenX{drag_state->mouse_segment};
+  std::ranges::sort(screenX);
 
-  float startX = screenStartX - static_cast<float>(captionX);
+  float startX = std::get<0>(screenX) - static_cast<float>(captionX);
   std::uint32_t codepointStart = find_text_offset(startX);
   std::array<std::uint32_t, 2> clusterStart =
       find_cluster_offset(codepointStart);
 
-  float endX = screenEndX - static_cast<float>(captionX);
-  std::uint32_t codepointEnd = find_text_offset(endX);
-  std::array<std::uint32_t, 2> clusterEnd = find_cluster_offset(codepointEnd);
+  float finalX = std::get<1>(screenX) - static_cast<float>(captionX);
+  std::uint32_t codepointFinal = find_text_offset(finalX);
+  std::array<std::uint32_t, 2> clusterFinal =
+      find_cluster_offset(codepointFinal);
 
-  TextMeasureQuery measureQuery{clusterStart, clusterEnd};
+  TextMeasureQuery measureQuery{clusterStart, clusterFinal};
   auto [measureL, measureR, measureT, measureB] =
       app->caption_sequencer.text_measure(measureQuery);
-  std::uint32_t measureW = static_cast<std::uint32_t>(measureR - measureL);
-  std::uint32_t measureH = static_cast<std::uint32_t>(measureB - measureT);
+  std::uint32_t measureW =
+      static_cast<std::uint32_t>(measureR - measureL + 63) / 64u;
+  std::uint32_t measureH =
+      static_cast<std::uint32_t>(measureB - measureT + 63) / 64u;
 
   if (measureL == measureR)
     app->selection_areas.erase(drag_state->selection_id);
@@ -1377,12 +1381,10 @@ void SelectionEventHandler::handle_mouse_button_up(
         app->selection_areas[drag_state->selection_id];
     selectionX = static_cast<std::uint32_t>(app->caption_x) +
                  static_cast<std::uint32_t>(measureL) / 64u - PADDING_X;
-    selectionY =
-        static_cast<std::uint32_t>(app->caption_y) +
-        static_cast<std::uint32_t>(app->caption_sequencer.vert_max) / 64u -
-        static_cast<std::uint32_t>(measureB) / 64u + PADDING_Y;
-    selectionW = measureW / 64u + PADDING_X * 2;
-    selectionH = measureH / 64u + PADDING_Y * 2;
+    selectionY = static_cast<std::uint32_t>(app->caption_y) +
+                 static_cast<std::uint32_t>(measureB) / 64u - PADDING_Y;
+    selectionW = measureW + PADDING_X * 2;
+    selectionH = measureH + PADDING_Y * 2;
   }
 
   app->selection_areas_flag = true;
