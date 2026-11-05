@@ -205,6 +205,17 @@ void setWindowMinimumSize(SDL_Window *window, int minW, int minH)
   }
 }
 
+std::array<int, 2> getWindowSizeInPixels(SDL_Window *window)
+{
+  int windowW{}, windowH{};
+  if (not SDL_GetWindowSizeInPixels(window, &windowW, &windowH))
+  {
+    std::string errorMsg{"SDL_GetWindowSizeInPixels failed: "};
+    throw std::runtime_error{errorMsg + SDL_GetError()};
+  }
+  return {windowW, windowH};
+}
+
 struct FileContentDeleter
 {
   void operator()(void *fileContent) const { SDL_free(fileContent); }
@@ -1094,8 +1105,8 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
   RectUniform rectUni{};
   rectUni.viewport[0] = static_cast<float>(swapchain_w);
   rectUni.viewport[1] = static_cast<float>(swapchain_h);
-  rectUni.translate[0] = static_cast<float>(app->caption_x);
-  rectUni.translate[1] = static_cast<float>(app->caption_y);
+  rectUni.translate[0] = static_cast<float>(std::trunc(app->caption_x));
+  rectUni.translate[1] = static_cast<float>(std::trunc(app->caption_y));
   SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
   struct BlitUniform
   {
@@ -1443,12 +1454,10 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_WINDOW_RESIZED:
-    caption_x = static_cast<double>(event->window.data1) -
-                caption_sequencer.measured_w();
-    caption_x = std::trunc(caption_x / 2.0);
-    caption_y = static_cast<double>(event->window.data2) -
-                caption_sequencer.measured_h();
-    caption_y = std::trunc(caption_y / 2.0);
+    caption_x = static_cast<double>(event->window.data1) * 0.5 -
+                caption_sequencer.measured_w() * 0.5;
+    caption_y = static_cast<double>(event->window.data2) * 0.5 -
+                caption_sequencer.measured_h() * 0.5;
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_QUIT:
@@ -1984,10 +1993,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->instantiate(globalFTLibrary);
     app->caption_sequencer.text_reflow(app->caption_string);
     const GlyphSequencer &sequencer = app->caption_sequencer;
-    app->caption_x = INITIAL_WINDOW_W - sequencer.measured_w();
-    app->caption_x = std::trunc(app->caption_x / 2.0);
-    app->caption_y = INITIAL_WINDOW_H - sequencer.measured_h();
-    app->caption_y = std::trunc(app->caption_y / 2.0);
+    auto [windowW, windowH] = getWindowSizeInPixels(app->main_window.get());
+    app->caption_x =
+        static_cast<double>(windowW) * 0.5 - sequencer.measured_w() * 0.5;
+    app->caption_y =
+        static_cast<double>(windowH) * 0.5 - sequencer.measured_h() * 0.5;
     return SDL_APP_CONTINUE;
   }
   catch (const std::runtime_error &e)
