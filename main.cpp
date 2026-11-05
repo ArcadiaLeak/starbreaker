@@ -3,13 +3,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <flat_map>
 #include <format>
 #include <generator>
 #include <inplace_vector>
-#include <map>
 #include <memory>
 #include <meta>
 #include <ranges>
@@ -768,9 +767,9 @@ struct GlyphAtlasInfo
 struct GlyphCacheItem
 {
   UniqueFreetypeGlyph freetype_glyph;
-  std::unique_ptr<GlyphAtlasInfo> atlas;
+  GlyphAtlasInfo *atlas_info;
 };
-using GlyphCache = std::map<hb_codepoint_t, GlyphCacheItem>;
+using GlyphCache = std::flat_map<hb_codepoint_t, GlyphCacheItem>;
 
 struct GlyphAtlasCopier
 {
@@ -801,6 +800,7 @@ struct GlyphSequencer
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
   GlyphCache glyph_cache;
+  std::deque<GlyphAtlasInfo> atlas_infos;
 
   static constexpr std::uint32_t ATLAS_SIDE = 1024;
   static constexpr std::uint32_t ATLAS_PADDING = 1;
@@ -900,7 +900,7 @@ struct SelectionEventHandler
   AppState *app;
   std::optional<SelectionDragState> drag_state;
 
-  std::uint32_t find_unoccupied_id();
+  std::optional<std::uint32_t> find_unoccupied_slot();
   void copy_drag_state();
   std::uint32_t find_codepoint_offset(double);
   std::array<std::uint32_t, 2> find_cluster_offset(std::uint32_t);
@@ -908,6 +908,13 @@ struct SelectionEventHandler
   void handle_mouse_button_down(const SDL_MouseButtonEvent &event);
   void handle_mouse_button_up(const SDL_MouseButtonEvent &event);
   void handle_mouse_motion(const SDL_MouseMotionEvent &event);
+};
+
+struct SelectionAreaBlock
+{
+  using SelectionSlot = std::optional<std::array<double, 4>>;
+  std::unique_ptr<SelectionSlot[]> slots;
+  std::size_t block_size;
 };
 
 struct AppState
@@ -930,7 +937,7 @@ struct AppState
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
 
   SelectionEventHandler selection_handler{this};
-  std::flat_map<std::uint32_t, std::array<double, 4>> selection_areas;
+  std::vector<SelectionAreaBlock> selection_areas;
   bool selection_areas_flag = false;
 
   UniqueGPUGraphicsPipeline selection_pipeline;
@@ -1015,7 +1022,14 @@ void GPUCommandSequencer::issue_render_pass()
       &render_sequencer.swapchain_w, &render_sequencer.swapchain_h);
   if (not render_sequencer.swapchain_texture)
     return;
-  if (app->selection_areas.empty())
+  auto selectionProject = [](const SelectionAreaBlock &block)
+  { return std::span{block.slots.get(), block.block_size}; };
+  auto selectionFlattened = app->selection_areas |
+                            std::views::transform(selectionProject) |
+                            std::views::join;
+  auto selectionPredicate = [](const std::optional<std::array<double, 4>> &area)
+  { return area.has_value(); };
+  if (std::ranges::none_of(selectionFlattened, selectionPredicate))
   {
     SDL_GPUGraphicsPipeline *scenePipeline =
         app->caption_sequencer.swapchain_pipeline.get();
@@ -1243,15 +1257,21 @@ std::array<double, 4> AppState::caption_bbox() noexcept
   return captionBox;
 }
 
-std::uint32_t SelectionEventHandler::find_unoccupied_id()
+std::optional<std::uint32_t> SelectionEventHandler::find_unoccupied_slot()
 {
-  auto zippedPairs = std::ranges::zip_view{
-      std::ranges::iota_view<std::uint32_t>{}, app->selection_areas.keys()};
-  auto zippedPred = [](auto p) { return std::get<0>(p) != std::get<1>(p); };
-  auto zippedIt = std::ranges::find_if(zippedPairs, zippedPred);
-  return zippedIt == zippedPairs.end()
-             ? static_cast<uint32_t>(app->selection_areas.size())
-             : std::get<0>(*zippedIt);
+  auto selectionTransform = [](const SelectionAreaBlock &block)
+  { return std::span{block.slots.get(), block.block_size}; };
+  auto selectionEnumerated = app->selection_areas |
+                             std::views::transform(selectionTransform) |
+                             std::views::join | std::views::enumerate;
+  auto selectionPredicate = [](const auto &area) { return area.has_value(); };
+  auto selectionFindProject = [](const auto &areaTuple)
+  { return std::get<1>(areaTuple); };
+  auto selectionIt = std::ranges::find_if(
+      selectionEnumerated, selectionPredicate, selectionFindProject);
+  if (selectionIt == selectionEnumerated.end())
+    return std::nullopt;
+  return static_cast<std::uint32_t>(std::get<0>(*selectionIt));
 }
 
 void SelectionEventHandler::copy_drag_state()
@@ -1284,7 +1304,7 @@ void SelectionEventHandler::handle_mouse_button_down(
   if (not isPointInside({event.x, event.y}, app->caption_bbox()))
     return;
   drag_state.emplace();
-  drag_state->selection_id = find_unoccupied_id();
+  drag_state->selection_id = find_unoccupied_slot();
   std::get<0>(drag_state->mouse_segment) = event.x;
   std::get<1>(drag_state->mouse_segment) = event.x;
   copy_drag_state();
@@ -1463,7 +1483,7 @@ void GlyphSequencer::verify_glyph_cache()
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
     glyph_cache[info.codepoint] =
-        GlyphCacheItem{std::move(glyph), std::make_unique<GlyphAtlasInfo>()};
+        GlyphCacheItem{std::move(glyph), &atlas_infos.emplace_back()};
     everInserted = true;
   }
   if (everInserted)
@@ -1479,7 +1499,7 @@ void GlyphSequencer::pack_atlas()
   {
     hb_codepoint_t codepoint;
     FT_Glyph freetype_glyph;
-    GlyphAtlasInfo *atlas;
+    GlyphAtlasInfo *atlas_info;
     std::uint32_t accumulated_x;
   };
   auto entryProject = [](const auto &cacheEntry)
@@ -1487,7 +1507,7 @@ void GlyphSequencer::pack_atlas()
     const auto &[codepoint, cacheItem] = cacheEntry;
     return CacheEntryView{.codepoint = codepoint,
                           .freetype_glyph = cacheItem.freetype_glyph.get(),
-                          .atlas = cacheItem.atlas.get(),
+                          .atlas_info = cacheItem.atlas_info,
                           .accumulated_x = 0};
   };
   auto entriesView = glyph_cache | std::views::transform(entryProject);
@@ -1540,9 +1560,9 @@ void GlyphSequencer::pack_atlas()
     for (const CacheShelfView &shelfView : shelves)
       for (const CacheEntryView &entryView : shelfView.entries)
       {
-        entryView.atlas->page = static_cast<std::uint32_t>(pageIdx);
-        entryView.atlas->y = shelfView.accumulated_y;
-        entryView.atlas->x = entryView.accumulated_x;
+        entryView.atlas_info->y = shelfView.accumulated_y;
+        entryView.atlas_info->x = entryView.accumulated_x;
+        entryView.atlas_info->page = static_cast<std::uint32_t>(pageIdx);
       }
   GlyphAtlasCopier atlasCopier{};
   atlasCopier.mapped_atlas =
@@ -1554,7 +1574,7 @@ void GlyphSequencer::pack_atlas()
 
 void GlyphAtlasCopier::copy_bitmap(const GlyphCacheItem &cacheItem)
 {
-  atlas_info = cacheItem.atlas.get();
+  atlas_info = cacheItem.atlas_info;
   bitmap = &asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
   for (std::uint32_t row = 0; row < bitmap->rows; ++row)
     copy_bitmap_row(row);
@@ -1617,9 +1637,9 @@ void GlyphSequencer::transfer_instance_data()
     float bitmapH = static_cast<float>(bitmapGlyph->bitmap.rows);
     vertexInstance.rect_size[0] = bitmapW;
     vertexInstance.rect_size[1] = bitmapH;
-    float atlasU = static_cast<float>(cacheIt->second.atlas->x) /
+    float atlasU = static_cast<float>(cacheIt->second.atlas_info->x) /
                    static_cast<float>(ATLAS_SIDE);
-    float atlasV = static_cast<float>(cacheIt->second.atlas->y) /
+    float atlasV = static_cast<float>(cacheIt->second.atlas_info->y) /
                    static_cast<float>(ATLAS_SIDE);
     vertexInstance.uv_rect[0] = atlasU;
     vertexInstance.uv_rect[1] = atlasV;
