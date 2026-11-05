@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -891,7 +892,7 @@ struct GPURenderSequencer
 
 struct SelectionDragState
 {
-  std::uint32_t selection_id;
+  std::uint32_t selection_idx;
   std::array<double, 2> mouse_segment;
 };
 
@@ -900,7 +901,7 @@ struct SelectionEventHandler
   AppState *app;
   std::optional<SelectionDragState> drag_state;
 
-  std::optional<std::uint32_t> find_unoccupied_slot();
+  std::uint32_t find_unoccupied_slot();
   void copy_drag_state();
   std::uint32_t find_codepoint_offset(double);
   std::array<std::uint32_t, 2> find_cluster_offset(std::uint32_t);
@@ -912,9 +913,8 @@ struct SelectionEventHandler
 
 struct SelectionAreaBlock
 {
-  using SelectionSlot = std::optional<std::array<double, 4>>;
-  std::unique_ptr<SelectionSlot[]> slots;
-  std::size_t block_size;
+  std::bitset<64> engagement;
+  std::unique_ptr<std::array<double, 4>[]> slots;
 };
 
 struct AppState
@@ -937,7 +937,7 @@ struct AppState
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
 
   SelectionEventHandler selection_handler{this};
-  std::vector<SelectionAreaBlock> selection_areas;
+  std::vector<SelectionAreaBlock> selection_blocks;
   bool selection_areas_flag = false;
 
   UniqueGPUGraphicsPipeline selection_pipeline;
@@ -1022,14 +1022,9 @@ void GPUCommandSequencer::issue_render_pass()
       &render_sequencer.swapchain_w, &render_sequencer.swapchain_h);
   if (not render_sequencer.swapchain_texture)
     return;
-  auto selectionProject = [](const SelectionAreaBlock &block)
-  { return std::span{block.slots.get(), block.block_size}; };
-  auto selectionFlattened = app->selection_areas |
-                            std::views::transform(selectionProject) |
-                            std::views::join;
-  auto selectionPredicate = [](const std::optional<std::array<double, 4>> &area)
-  { return area.has_value(); };
-  if (std::ranges::none_of(selectionFlattened, selectionPredicate))
+  auto selectionPred = [](const SelectionAreaBlock &block)
+  { return block.engagement.any(); };
+  if (std::ranges::none_of(app->selection_blocks, selectionPred))
   {
     SDL_GPUGraphicsPipeline *scenePipeline =
         app->caption_sequencer.swapchain_pipeline.get();
@@ -1197,8 +1192,12 @@ void GPURenderSequencer::selected_areas_draw()
                         .radius = 0.2f};
   SDL_PushGPUFragmentUniformData(cmd, 0, &boxUniform, sizeof(BoxUniform));
 
-  std::uint32_t instanceCount{
-      static_cast<std::uint32_t>(app->selection_areas.size())};
+  auto selectionProj = [](const SelectionAreaBlock &block)
+  { return static_cast<std::uint32_t>(block.engagement.count()); };
+  std::ranges::transform_view selectionCounts{app->selection_blocks,
+                                              selectionProj};
+  std::uint32_t instanceCount = std::ranges::fold_left(
+      selectionCounts, std::uint32_t{}, std::plus<std::uint32_t>{});
   SDL_DrawGPUPrimitives(renderPass.get(), 4, instanceCount, 0, 0);
 }
 
@@ -1226,7 +1225,10 @@ SDL_AppResult AppState::iterate() noexcept
 {
   try
   {
-    if (selection_areas_flag && not selection_areas.empty())
+    auto selectionPred = [](const SelectionAreaBlock &block)
+    { return block.engagement.any(); };
+    if (selection_areas_flag &&
+        std::ranges::any_of(selection_blocks, selectionPred))
     {
       selection_reflow();
       selection_areas_flag = false;
@@ -1257,27 +1259,32 @@ std::array<double, 4> AppState::caption_bbox() noexcept
   return captionBox;
 }
 
-std::optional<std::uint32_t> SelectionEventHandler::find_unoccupied_slot()
+std::uint32_t SelectionEventHandler::find_unoccupied_slot()
 {
-  auto selectionTransform = [](const SelectionAreaBlock &block)
-  { return std::span{block.slots.get(), block.block_size}; };
-  auto selectionEnumerated = app->selection_areas |
-                             std::views::transform(selectionTransform) |
-                             std::views::join | std::views::enumerate;
-  auto selectionPredicate = [](const auto &area) { return area.has_value(); };
-  auto selectionFindProject = [](const auto &areaTuple)
-  { return std::get<1>(areaTuple); };
-  auto selectionIt = std::ranges::find_if(
-      selectionEnumerated, selectionPredicate, selectionFindProject);
-  if (selectionIt == selectionEnumerated.end())
-    return std::nullopt;
-  return static_cast<std::uint32_t>(std::get<0>(*selectionIt));
+  auto selectionPred = [](const SelectionAreaBlock &block)
+  { return not block.engagement.all(); };
+  auto blockIt = std::ranges::find_if(app->selection_blocks, selectionPred);
+  std::ptrdiff_t blockIdx{};
+  if (blockIt != app->selection_blocks.end())
+    blockIdx = std::distance(app->selection_blocks.begin(), blockIt);
+  else
+  {
+    SelectionAreaBlock &blockEmplaced = app->selection_blocks.emplace_back();
+    blockEmplaced.slots = std::make_unique<std::array<double, 4>[]>(64);
+    blockIdx = std::distance(app->selection_blocks.data(), &blockEmplaced);
+  }
+  int slotIdx =
+      std::countr_one(app->selection_blocks[blockIdx].engagement.to_ullong());
+  app->selection_blocks[blockIdx].engagement.set(slotIdx);
+  return 64 * static_cast<std::uint32_t>(blockIdx) +
+         static_cast<std::uint32_t>(slotIdx);
 }
 
 void SelectionEventHandler::copy_drag_state()
 {
   auto &[selectionX, selectionY, selectionW, selectionH] =
-      app->selection_areas[drag_state->selection_id];
+      app->selection_blocks[drag_state->selection_idx / 64]
+          .slots[drag_state->selection_idx % 64];
   const auto &[mouseA, mouseB] = drag_state->mouse_segment;
   selectionX = std::min(mouseA, mouseB);
   constexpr double MIN_SELECTION_W = 2.0;
@@ -1300,11 +1307,12 @@ bool isPointInside(const std::array<double, 2> &point,
 void SelectionEventHandler::handle_mouse_button_down(
     const SDL_MouseButtonEvent &event)
 {
-  app->selection_areas.clear();
+  for (SelectionAreaBlock &block : app->selection_blocks)
+    block.engagement.reset();
   if (not isPointInside({event.x, event.y}, app->caption_bbox()))
     return;
   drag_state.emplace();
-  drag_state->selection_id = find_unoccupied_slot();
+  drag_state->selection_idx = find_unoccupied_slot();
   std::get<0>(drag_state->mouse_segment) = event.x;
   std::get<1>(drag_state->mouse_segment) = event.x;
   copy_drag_state();
@@ -1386,13 +1394,15 @@ void SelectionEventHandler::handle_mouse_button_up(
   double measureH = measureB - measureT;
 
   if (measureL == measureR)
-    app->selection_areas.erase(drag_state->selection_id);
+    app->selection_blocks[drag_state->selection_idx / 64].engagement.reset(
+        drag_state->selection_idx % 64);
   else
   {
     static constexpr double PADDING_X = 1;
     static constexpr double PADDING_Y = 4;
     auto &[selectionX, selectionY, selectionW, selectionH] =
-        app->selection_areas[drag_state->selection_id];
+        app->selection_blocks[drag_state->selection_idx / 64]
+            .slots[drag_state->selection_idx % 64];
     selectionX = app->caption_x + measureL - PADDING_X;
     selectionY = app->caption_y + measureB - PADDING_Y;
     selectionW = measureW + PADDING_X * 2;
@@ -1889,8 +1899,13 @@ void CopypassTaskVisitor::operator()(CopySelectionAreas task) const
       .transfer_buffer = task.app->selection_transfer.get(), .offset = 0};
   SDL_GPUBufferRegion instancesDest{};
   instancesDest.buffer = task.app->selection_instances.get();
-  instancesDest.size = static_cast<std::uint32_t>(
-      task.app->selection_areas.size() * sizeof(RectInstanceData));
+  auto selectionProj = [](const SelectionAreaBlock &block)
+  { return static_cast<std::uint32_t>(block.engagement.count()); };
+  std::ranges::transform_view selectionCounts{task.app->selection_blocks,
+                                              selectionProj};
+  instancesDest.size = std::ranges::fold_left(selectionCounts, std::uint32_t{},
+                                              std::plus<std::uint32_t>{}) *
+                       sizeof(RectInstanceData);
   SDL_UploadToGPUBuffer(copypass, &instancesSource, &instancesDest, false);
 }
 
@@ -1903,8 +1918,13 @@ void AppState::selection_reflow()
 
 void AppState::verify_selection_capacity()
 {
-  std::uint32_t instancesSize{static_cast<std::uint32_t>(
-      selection_areas.size() * sizeof(RectInstanceData))};
+  auto selectionProj = [](const SelectionAreaBlock &block)
+  { return static_cast<std::uint32_t>(block.engagement.count()); };
+  std::ranges::transform_view selectionCounts{selection_blocks, selectionProj};
+  std::uint32_t instancesSize =
+      std::ranges::fold_left(selectionCounts, std::uint32_t{},
+                             std::plus<std::uint32_t>{}) *
+      sizeof(RectInstanceData);
   if (instancesSize <= selection_instances_capacity)
     return;
   selection_instances_capacity = std::max(1u << std::bit_width(instancesSize),
@@ -1920,9 +1940,19 @@ void AppState::transfer_selection_areas()
 {
   UniqueGPUMappedBuffer selectionMapped =
       mapGPUTransferBuffer(device_ctx.get(), selection_transfer.get(), true);
-  for (const auto &[idx, entry] : selection_areas | std::views::enumerate)
+  auto emitSelectionSlots = [](const SelectionAreaBlock &block)
+      -> std::generator<const std::array<double, 4> *>
   {
-    auto [rectX, rectY, rectW, rectH] = entry.second;
+    for (std::uint32_t i{}; i < 64; ++i)
+      if (block.engagement.test(i))
+        co_yield &block.slots[i];
+  };
+  auto selectionAreas = selection_blocks |
+                        std::views::transform(emitSelectionSlots) |
+                        std::views::join | std::views::enumerate;
+  for (const auto &[idx, selectionArea] : selectionAreas)
+  {
+    auto [rectX, rectY, rectW, rectH] = *selectionArea;
     RectInstanceData rectInstance{};
     rectInstance.rect_position[0] = static_cast<float>(rectX);
     rectInstance.rect_position[1] = static_cast<float>(rectY + rectH) * -1.0f;
