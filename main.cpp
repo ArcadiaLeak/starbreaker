@@ -831,7 +831,7 @@ struct GlyphSequencer
   double measured_h() const noexcept { return y_max - y_min; }
 
   std::vector<GlyphGeometry> glyph_geometries;
-  std::vector<GlyphGeometry> make_glyph_geometries();
+  std::generator<GlyphGeometry> emit_glyph_geometries();
 
   std::vector<GlyphClusterSection> cluster_sections;
   std::vector<GlyphClusterSection> make_cluster_sections();
@@ -1803,8 +1803,17 @@ std::array<double, 4> GlyphSequencer::text_measure(TextMeasureQuery query)
   return textMetrics;
 }
 
-std::vector<GlyphGeometry> GlyphSequencer::make_glyph_geometries()
+std::generator<GlyphGeometry> GlyphSequencer::emit_glyph_geometries()
 {
+  unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
+  std::span<const hb_glyph_position_t> positions{
+      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr), bufferLen};
+  std::span<const hb_glyph_info_t> glyphInfos{
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr), bufferLen};
+  for (const auto &[position, glyphInfo] :
+       std::ranges::zip_view{positions, glyphInfos})
+  {
+  }
   return {};
 }
 
