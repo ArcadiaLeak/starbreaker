@@ -1803,6 +1803,50 @@ std::array<double, 4> GlyphSequencer::text_measure(TextMeasureQuery query)
   return textMetrics;
 }
 
+struct GlyphGeometryBuilder
+{
+  const GlyphSequencer *sequencer;
+  std::optional<GlyphGeometry> prev_emitted{};
+  hb_position_t past_x{};
+  GlyphGeometry build_geometry(const hb_glyph_position_t &,
+                               const hb_glyph_info_t &);
+};
+
+GlyphGeometry
+GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
+                                     const hb_glyph_info_t &glyphInfo)
+{
+  auto cacheIt = sequencer->atlas_cache.find(glyphInfo.codepoint);
+  if (cacheIt == sequencer->atlas_cache.end())
+    return {};
+  FT_BitmapGlyph bitmapGlyph =
+      asBitmapGlyph(cacheIt->second.freetype_glyph.get());
+  RectInstanceData vertexInstance{};
+  vertexInstance.rect_position[0] =
+      static_cast<float>(past_x + position.x_offset + bitmapGlyph->left * 64) /
+      64.0f;
+  vertexInstance.rect_position[1] =
+      static_cast<float>(bitmapGlyph->top -
+                         static_cast<int>(bitmapGlyph->bitmap.rows)) -
+      static_cast<float>(position.y_offset) / 64.0f;
+  float bitmapW = static_cast<float>(bitmapGlyph->bitmap.width);
+  float bitmapH = static_cast<float>(bitmapGlyph->bitmap.rows);
+  vertexInstance.rect_size[0] = bitmapW;
+  vertexInstance.rect_size[1] = bitmapH;
+  const auto &[atlasX, atlasY, atlasPage] = *cacheIt->second.atlas_position;
+  float atlasU = static_cast<float>(atlasX) /
+                 static_cast<float>(GlyphSequencer::ATLAS_SIDE);
+  float atlasV = static_cast<float>(atlasY) /
+                 static_cast<float>(GlyphSequencer::ATLAS_SIDE);
+  vertexInstance.uv_rect[0] = atlasU;
+  vertexInstance.uv_rect[1] = atlasV;
+  vertexInstance.uv_rect[2] =
+      atlasU + bitmapW / static_cast<float>(GlyphSequencer::ATLAS_SIDE);
+  vertexInstance.uv_rect[3] =
+      atlasV + bitmapH / static_cast<float>(GlyphSequencer::ATLAS_SIDE);
+  return {};
+}
+
 std::generator<GlyphGeometry> GlyphSequencer::emit_glyph_geometries()
 {
   unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
@@ -1810,11 +1854,13 @@ std::generator<GlyphGeometry> GlyphSequencer::emit_glyph_geometries()
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr), bufferLen};
   std::span<const hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr), bufferLen};
-  for (const auto &[position, glyphInfo] :
-       std::ranges::zip_view{positions, glyphInfos})
+  GlyphGeometryBuilder builder{this};
+  for (const auto &bufferTuple : std::ranges::zip_view{positions, glyphInfos})
   {
+    const auto &[position, glyphInfo] = bufferTuple;
+    co_yield builder.build_geometry(position, glyphInfo);
+    builder.past_x += position.x_advance;
   }
-  return {};
 }
 
 std::vector<GlyphClusterSection> GlyphSequencer::make_cluster_sections()
