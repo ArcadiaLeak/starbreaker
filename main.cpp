@@ -788,9 +788,10 @@ struct GlyphClusterSection
 
 struct GlyphGeometry
 {
+  bool has_ink;
   std::array<double, 2> position;
   std::array<double, 2> sides;
-  std::array<double, 2> uv;
+  std::array<double, 4> uv;
 };
 
 struct GlyphAtlasCopier
@@ -1639,52 +1640,29 @@ void GlyphSequencer::verify_instance_capacity()
 
 void GlyphSequencer::transfer_instance_data()
 {
-  unsigned int bufferIdx{}, glyphCount{};
-  auto *const positions =
-      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), &glyphCount);
-  auto *const glyphInfos =
-      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
+  unsigned int bufferIdx{};
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
       app->device_ctx.get(), instance_transfer.get(), true);
-  auto *const bufferBegin = static_cast<RectInstanceData *>(mappedBuffer.get());
-  hb_position_t pastX{};
-  auto copyVertexInstance = [&](unsigned int glyphIdx) -> void
+  RectInstanceData *const bufferBegin =
+      static_cast<RectInstanceData *>(mappedBuffer.get());
+  for (const GlyphGeometry &geometry : glyph_geometries)
   {
-    auto cacheIt = atlas_cache.find(glyphInfos[glyphIdx].codepoint);
-    if (cacheIt == atlas_cache.end())
+    if (not geometry.has_ink)
       return;
-    FT_BitmapGlyph bitmapGlyph =
-        asBitmapGlyph(cacheIt->second.freetype_glyph.get());
     RectInstanceData vertexInstance{};
-    vertexInstance.rect_position[0] =
-        static_cast<float>(pastX + positions[glyphIdx].x_offset +
-                           bitmapGlyph->left * 64) /
-        64.0f;
-    vertexInstance.rect_position[1] =
-        static_cast<float>(bitmapGlyph->top -
-                           static_cast<int>(bitmapGlyph->bitmap.rows)) -
-        static_cast<float>(positions[glyphIdx].y_offset) / 64.0f;
-    float bitmapW = static_cast<float>(bitmapGlyph->bitmap.width);
-    float bitmapH = static_cast<float>(bitmapGlyph->bitmap.rows);
-    vertexInstance.rect_size[0] = bitmapW;
-    vertexInstance.rect_size[1] = bitmapH;
-    const auto &[atlasX, atlasY, atlasPage] = *cacheIt->second.atlas_position;
-    float atlasU = static_cast<float>(atlasX) / static_cast<float>(ATLAS_SIDE);
-    float atlasV = static_cast<float>(atlasY) / static_cast<float>(ATLAS_SIDE);
-    vertexInstance.uv_rect[0] = atlasU;
-    vertexInstance.uv_rect[1] = atlasV;
-    vertexInstance.uv_rect[2] =
-        atlasU + bitmapW / static_cast<float>(ATLAS_SIDE);
-    vertexInstance.uv_rect[3] =
-        atlasV + bitmapH / static_cast<float>(ATLAS_SIDE);
+    const auto &[geometryX, geometryY] = geometry.position;
+    vertexInstance.rect_position[0] = static_cast<float>(geometryX);
+    vertexInstance.rect_position[1] = static_cast<float>(geometryY);
+    const auto &[geometryW, geometryH] = geometry.sides;
+    vertexInstance.rect_size[0] = static_cast<float>(geometryW);
+    vertexInstance.rect_size[1] = static_cast<float>(geometryH);
+    vertexInstance.uv_rect[0] = static_cast<float>(std::get<0>(geometry.uv));
+    vertexInstance.uv_rect[1] = static_cast<float>(std::get<1>(geometry.uv));
+    vertexInstance.uv_rect[2] = static_cast<float>(std::get<2>(geometry.uv));
+    vertexInstance.uv_rect[3] = static_cast<float>(std::get<3>(geometry.uv));
     std::memcpy(bufferBegin + bufferIdx, &vertexInstance,
                 sizeof(RectInstanceData));
     ++bufferIdx;
-  };
-  for (unsigned int glyphIdx{}; glyphIdx < glyphCount; ++glyphIdx)
-  {
-    copyVertexInstance(glyphIdx);
-    pastX += positions[glyphIdx].x_advance;
   }
 }
 
@@ -1806,8 +1784,8 @@ std::array<double, 4> GlyphSequencer::text_measure(TextMeasureQuery query)
 struct GlyphGeometryBuilder
 {
   const GlyphSequencer *sequencer;
-  std::optional<GlyphGeometry> prev_emitted{};
-  hb_position_t past_x{};
+  std::optional<GlyphGeometry> prev_ink{};
+  double past_x{};
   GlyphGeometry build_geometry(const hb_glyph_position_t &,
                                const hb_glyph_info_t &);
 };
@@ -1816,35 +1794,46 @@ GlyphGeometry
 GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
                                      const hb_glyph_info_t &glyphInfo)
 {
+  GlyphGeometry geometry{};
+  auto &[geometryX, geometryY] = geometry.position;
+  auto &[geometryW, geometryH] = geometry.sides;
+
   auto cacheIt = sequencer->atlas_cache.find(glyphInfo.codepoint);
   if (cacheIt == sequencer->atlas_cache.end())
-    return {};
+  {
+    geometryX = past_x;
+    geometryW = static_cast<double>(position.x_advance) / 64.0;
+    geometryH =
+        prev_ink ? std::get<1>(prev_ink->sides) : sequencer->haitch_height;
+    return geometry;
+  }
+
   FT_BitmapGlyph bitmapGlyph =
       asBitmapGlyph(cacheIt->second.freetype_glyph.get());
-  RectInstanceData vertexInstance{};
-  vertexInstance.rect_position[0] =
-      static_cast<float>(past_x + position.x_offset + bitmapGlyph->left * 64) /
-      64.0f;
-  vertexInstance.rect_position[1] =
-      static_cast<float>(bitmapGlyph->top -
-                         static_cast<int>(bitmapGlyph->bitmap.rows)) -
-      static_cast<float>(position.y_offset) / 64.0f;
-  float bitmapW = static_cast<float>(bitmapGlyph->bitmap.width);
-  float bitmapH = static_cast<float>(bitmapGlyph->bitmap.rows);
-  vertexInstance.rect_size[0] = bitmapW;
-  vertexInstance.rect_size[1] = bitmapH;
+  geometryX = past_x + static_cast<double>(position.x_offset) / 64.0 +
+              static_cast<double>(bitmapGlyph->left);
+  geometryY = static_cast<double>(bitmapGlyph->top) -
+              static_cast<double>(bitmapGlyph->bitmap.rows) -
+              static_cast<double>(position.y_offset) / 64.0;
+
+  double bitmapW = static_cast<double>(bitmapGlyph->bitmap.width);
+  double bitmapH = static_cast<double>(bitmapGlyph->bitmap.rows);
+  geometryW = bitmapW;
+  geometryH = bitmapH;
+
   const auto &[atlasX, atlasY, atlasPage] = *cacheIt->second.atlas_position;
-  float atlasU = static_cast<float>(atlasX) /
-                 static_cast<float>(GlyphSequencer::ATLAS_SIDE);
-  float atlasV = static_cast<float>(atlasY) /
-                 static_cast<float>(GlyphSequencer::ATLAS_SIDE);
-  vertexInstance.uv_rect[0] = atlasU;
-  vertexInstance.uv_rect[1] = atlasV;
-  vertexInstance.uv_rect[2] =
-      atlasU + bitmapW / static_cast<float>(GlyphSequencer::ATLAS_SIDE);
-  vertexInstance.uv_rect[3] =
-      atlasV + bitmapH / static_cast<float>(GlyphSequencer::ATLAS_SIDE);
-  return {};
+  constexpr double ATLAS_SIDE = static_cast<double>(GlyphSequencer::ATLAS_SIDE);
+  double atlasU = static_cast<double>(atlasX) / ATLAS_SIDE;
+  double atlasV = static_cast<double>(atlasY) / ATLAS_SIDE;
+  std::get<0>(geometry.uv) = atlasU;
+  std::get<1>(geometry.uv) = atlasV;
+  std::get<2>(geometry.uv) = atlasU + bitmapW / ATLAS_SIDE;
+  std::get<3>(geometry.uv) = atlasV + bitmapH / ATLAS_SIDE;
+
+  geometry.has_ink = true;
+  prev_ink.emplace(geometry);
+
+  return geometry;
 }
 
 std::generator<GlyphGeometry> GlyphSequencer::emit_glyph_geometries()
@@ -1859,7 +1848,7 @@ std::generator<GlyphGeometry> GlyphSequencer::emit_glyph_geometries()
   {
     const auto &[position, glyphInfo] = bufferTuple;
     co_yield builder.build_geometry(position, glyphInfo);
-    builder.past_x += position.x_advance;
+    builder.past_x += static_cast<double>(position.x_advance) / 64.0;
   }
 }
 
@@ -1980,6 +1969,7 @@ void GlyphSequencer::text_reflow(std::string_view textView)
   };
   initiate();
   verify_atlas_cache();
+  glyph_geometries = {std::from_range, emit_glyph_geometries()};
   cluster_sections = make_cluster_sections();
   measure_cluster_sections();
   std::tie(x_min, x_max, y_min, y_max) = text_measure(TextMeasureQuery{});
