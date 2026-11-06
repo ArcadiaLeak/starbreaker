@@ -1648,7 +1648,7 @@ void GlyphSequencer::transfer_instance_data()
   for (const GlyphGeometry &geometry : glyph_geometries)
   {
     if (not geometry.has_ink)
-      return;
+      continue;
     RectInstanceData vertexInstance{};
     const auto &[geometryX, geometryY] = geometry.position;
     vertexInstance.rect_position[0] = static_cast<float>(geometryX);
