@@ -780,7 +780,7 @@ struct GlyphAtlasItem
 
 struct GlyphGeometry
 {
-  bool has_ink;
+  std::optional<hb_codepoint_t> glyph_id;
   double w, h;
   std::array<double, 4> bbox;
   std::array<double, 4> uv;
@@ -1637,7 +1637,7 @@ void GlyphSequencer::transfer_instance_data()
       static_cast<RectInstanceData *>(mappedBuffer.get());
   for (const GlyphGeometry &geometry : glyph_geometries)
   {
-    if (not geometry.has_ink)
+    if (not geometry.glyph_id)
       continue;
     RectInstanceData vertexInstance{};
     vertexInstance.rect_position[0] =
@@ -1688,7 +1688,15 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
     std::uint32_t clusterIdx =
         clusterStart + static_cast<std::uint32_t>(enumerationIdx);
     double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
-    double clusterR = std::get<1>(clusterSection.geometries.back().bbox);
+    if (clusterSection.geometries.front().glyph_id)
+    {
+      const GlyphAtlasItem &atlasItem =
+          atlas_cache[*clusterSection.geometries.front().glyph_id];
+      FT_BitmapGlyph bitmapGlyph =
+          asBitmapGlyph(atlasItem.freetype_glyph.get());
+      clusterL -= static_cast<double>(bitmapGlyph->left);
+    }
+    double clusterR = clusterL + clusterSection.geometries.back().w;
     std::ranges::transform_view geometriesTop{
         clusterSection.geometries, [](const GlyphGeometry &geometry)
         { return std::get<2>(geometry.bbox); }};
@@ -1760,7 +1768,7 @@ GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
   std::get<2>(geometry.uv) = atlasU + geometry.w / ATLAS_SIDE;
   std::get<3>(geometry.uv) = atlasV + geometry.h / ATLAS_SIDE;
 
-  geometry.has_ink = true;
+  geometry.glyph_id = glyphInfo.codepoint;
   prev_ink.emplace(geometry);
 
   return geometry;

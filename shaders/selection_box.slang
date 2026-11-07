@@ -22,7 +22,7 @@ float4 main(VSOutput input) : SV_Target {
     float2 pLocal = (input.uv * 2.0 - 1.0) * input.half_size;
     float smaller = min(input.half_size.x, input.half_size.y);
     float nearest = sd_round_box(
-        pLocal, input.half_size, smaller * u.radius);
+        pLocal, input.half_size, max(smaller * u.radius, min(smaller, 6.0)));
     float aaFactor = length(float2(ddx(nearest), ddy(nearest))) * 0.75;
     float coverage = 1.0 - smoothstep(-aaFactor, aaFactor, nearest);
     if (coverage == 0.0)
