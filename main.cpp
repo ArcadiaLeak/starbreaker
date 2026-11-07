@@ -1366,13 +1366,11 @@ SelectionEventHandler::find_cluster_offset(std::uint32_t textOffset)
     { return offset == textOffset; };
     auto codepointIt = std::ranges::find_if(
         clusterSection.codepoint_infos, findPred, &CodepointInfo::byte_offset);
-    std::ptrdiff_t codepointIdx =
-        &(*codepointIt) - app->caption_sequencer.codepoint_infos.data();
     const std::span<const CodepointInfo> &codepointInfos =
         clusterSection.codepoint_infos;
     auto &[clusterIndex, normalT] = clusterOffset;
     clusterIndex = static_cast<std::uint32_t>(enumerationIdx);
-    normalT = static_cast<double>(codepointIdx) /
+    normalT = static_cast<double>(codepointIt - codepointInfos.begin()) /
               static_cast<double>(codepointInfos.size());
     if (codepointIt != codepointInfos.end())
       break;
