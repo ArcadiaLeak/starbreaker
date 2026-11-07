@@ -1413,7 +1413,8 @@ void SelectionEventHandler::handle_mouse_button_up(
         app->selection_blocks[drag_state->selection_idx / 64]
             .slots[drag_state->selection_idx % 64];
     selectionX = app->caption_x + measureL - PADDING_X;
-    selectionY = app->caption_y + measureB - PADDING_Y;
+    selectionY = app->caption_y + app->caption_sequencer.measured_h() +
+                 measureT - PADDING_Y;
     selectionW = measureW + PADDING_X * 2;
     selectionH = measureH + PADDING_Y * 2;
   }
@@ -1701,6 +1702,8 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
         finalBound && clusterIdx == clusterFinal ? codepointFinal : 1;
     textL = std::min(textL, std::lerp(clusterL, clusterR, normalStart));
     textR = std::max(textR, std::lerp(clusterL, clusterR, normalFinal));
+    if (normalFinal == 0)
+      break;
     textT = std::min(textT, clusterT);
     textB = std::max(textB, clusterB);
   }
