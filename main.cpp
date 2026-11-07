@@ -776,6 +776,7 @@ struct GlyphAtlasItem
 {
   UniqueFreetypeGlyph freetype_glyph;
   std::array<std::uint32_t, 3> *atlas_position;
+  double lsb_delta, rsb_delta;
 };
 
 struct GlyphGeometry
@@ -985,6 +986,8 @@ void AppState::instantiate(FT_Library library)
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
   harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 24 * 64,
                                      getWindowDisplayScale(main_window.get()));
+  hb_ft_font_set_load_flags(harfbuzz_font.get(),
+                            FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
   selection_pipeline = createSelectionGPUGraphicsPipeline(device_ctx.get());
   difference_blend_pipeline =
       createDifferenceBlendGPUPipeline(device_ctx.get());
@@ -1502,8 +1505,14 @@ void GlyphSequencer::verify_atlas_cache()
     const FT_Bitmap &bitmap = asBitmapGlyph(glyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
-    atlas_cache[info.codepoint] =
-        GlyphAtlasItem{std::move(glyph), &atlas_positions.emplace_back()};
+    GlyphAtlasItem &atlasItem = atlas_cache[info.codepoint];
+    atlasItem.freetype_glyph = std::move(glyph);
+    atlasItem.atlas_position = &atlas_positions.emplace_back();
+    FT_Face freetypeFace = hb_ft_font_get_ft_face(app->harfbuzz_font.get());
+    atlasItem.lsb_delta =
+        static_cast<double>(freetypeFace->glyph->lsb_delta) / 64.0;
+    atlasItem.rsb_delta =
+        static_cast<double>(freetypeFace->glyph->rsb_delta) / 64.0;
     everInserted = true;
   }
   if (everInserted)
@@ -1688,6 +1697,8 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
     std::uint32_t clusterIdx =
         clusterStart + static_cast<std::uint32_t>(enumerationIdx);
     double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
+    double clusterR = std::get<0>(clusterSection.geometries.back().bbox) +
+                      clusterSection.geometries.back().w;
     if (clusterSection.geometries.front().glyph_id)
     {
       const GlyphAtlasItem &atlasItem =
@@ -1696,7 +1707,6 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
           asBitmapGlyph(atlasItem.freetype_glyph.get());
       clusterL -= static_cast<double>(bitmapGlyph->left);
     }
-    double clusterR = clusterL + clusterSection.geometries.back().w;
     std::ranges::transform_view geometriesTop{
         clusterSection.geometries, [](const GlyphGeometry &geometry)
         { return std::get<2>(geometry.bbox); }};
