@@ -778,19 +778,19 @@ struct GlyphAtlasItem
   std::array<std::uint32_t, 3> *atlas_position;
 };
 
+struct GlyphGeometry
+{
+  bool has_ink;
+  double w, h;
+  std::array<double, 4> bbox;
+  std::array<double, 4> uv;
+};
+
 struct GlyphClusterSection
 {
   std::uint32_t cluster;
   std::span<const CodepointInfo> codepoint_infos;
-  std::span<const hb_glyph_position_t> positions;
-};
-
-struct GlyphGeometry
-{
-  bool has_ink;
-  std::array<double, 2> position;
-  std::array<double, 2> sides;
-  std::array<double, 4> uv;
+  std::span<const GlyphGeometry> geometries;
 };
 
 struct GlyphAtlasCopier
@@ -1334,20 +1334,16 @@ void SelectionEventHandler::handle_mouse_button_down(
 std::uint32_t SelectionEventHandler::find_codepoint_offset(double mouseX)
 {
   std::size_t captionOffset{app->caption_string.size()};
-  for (double pastX{}; const GlyphClusterSection &clusterSection :
-                       app->caption_sequencer.cluster_sections)
+  for (const GlyphClusterSection &clusterSection :
+       app->caption_sequencer.cluster_sections)
   {
-    std::ranges::transform_view positionAdvance{
-        clusterSection.positions, &hb_glyph_position_t::x_advance};
-    hb_position_t clusterAdvance = std::ranges::fold_left(
-        positionAdvance, hb_position_t{}, std::plus<hb_position_t>{});
-    double clusterAdvanceX = static_cast<double>(clusterAdvance) / 64.0;
+    double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
+    double clusterR = std::get<1>(clusterSection.geometries.back().bbox);
     double codepointCount =
         static_cast<double>(clusterSection.codepoint_infos.size());
-    double mouseClusterX = std::max(mouseX, pastX) - pastX;
+    double mouseClusterX = std::max(mouseX, clusterL) - clusterL;
     double mouseFraction =
-        std::round(mouseClusterX / clusterAdvanceX * codepointCount);
-    pastX += clusterAdvanceX;
+        std::round(mouseClusterX / (clusterR - clusterL) * codepointCount);
     if (mouseFraction >= codepointCount)
       continue;
     std::uint32_t codepointIdx = static_cast<std::uint32_t>(mouseFraction);
@@ -1645,12 +1641,12 @@ void GlyphSequencer::transfer_instance_data()
     if (not geometry.has_ink)
       continue;
     RectInstanceData vertexInstance{};
-    const auto &[geometryX, geometryY] = geometry.position;
-    vertexInstance.rect_position[0] = static_cast<float>(geometryX);
-    vertexInstance.rect_position[1] = static_cast<float>(geometryY);
-    const auto &[geometryW, geometryH] = geometry.sides;
-    vertexInstance.rect_size[0] = static_cast<float>(geometryW);
-    vertexInstance.rect_size[1] = static_cast<float>(geometryH);
+    vertexInstance.rect_position[0] =
+        static_cast<float>(std::get<0>(geometry.bbox));
+    vertexInstance.rect_position[1] =
+        static_cast<float>(std::get<3>(geometry.bbox));
+    vertexInstance.rect_size[0] = static_cast<float>(geometry.w);
+    vertexInstance.rect_size[1] = static_cast<float>(geometry.h);
     vertexInstance.uv_rect[0] = static_cast<float>(std::get<0>(geometry.uv));
     vertexInstance.uv_rect[1] = static_cast<float>(std::get<1>(geometry.uv));
     vertexInstance.uv_rect[2] = static_cast<float>(std::get<2>(geometry.uv));
@@ -1680,33 +1676,33 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
   auto &[textL, textR, textT, textB] = textMetrics;
   textL = MAX_SAFE_INTEGER, textR = MIN_SAFE_INTEGER;
   textT = MAX_SAFE_INTEGER, textB = MIN_SAFE_INTEGER;
-  std::uint32_t queriedStart{std::get<0>(query.cluster_begin)};
-  std::uint32_t queriedEnd{static_cast<std::uint32_t>(cluster_sections.size())};
-  if (query.cluster_end)
-    queriedEnd = std::get<0>(*query.cluster_end) + 1;
-  std::span queriedSections{cluster_sections.begin() + queriedStart,
-                            cluster_sections.begin() + queriedEnd};
-  for (const GlyphClusterSection &clusterSection : queriedSections)
+  const auto [clusterStart, codepointStart] = start;
+  const auto [clusterFinal, codepointFinal] = final;
+  std::uint32_t sectionsLen =
+      static_cast<std::uint32_t>(cluster_sections.size());
+  std::uint32_t clusterEnd = finalBound ? clusterFinal + 1 : sectionsLen;
+  std::span queriedSections{cluster_sections.begin() + clusterStart,
+                            cluster_sections.begin() + clusterEnd};
+  for (const auto &[enumerationIdx, clusterSection] :
+       queriedSections | std::views::enumerate)
   {
-    const std::span<const CodepointInfo> &codepointInfos =
-        clusterSection.codepoint_infos;
-    std::ptrdiff_t clusterIdx = &clusterSection - cluster_sections.data();
-
-    auto [beginCluster, beginCp] = query.cluster_begin;
-    beginCp = clusterIdx == beginCluster ? beginCp : 0;
-
-    auto [endCluster, endCp] = query.cluster_end.value_or({});
-    std::uint32_t infosLen = static_cast<std::uint32_t>(codepointInfos.size());
-    endCp = query.cluster_end && clusterIdx == endCluster ? endCp : infosLen;
-
-    auto interpCp = [&](std::uint32_t codepointIdx) -> double
-    {
-      double interpT = static_cast<double>(codepointIdx) /
-                       static_cast<double>(codepointInfos.size());
-      return std::lerp(clusterL, clusterR, interpT);
-    };
-    textL = std::min(textL, interpCp(beginCp));
-    textR = std::max(textR, interpCp(endCodepoint));
+    std::uint32_t clusterIdx =
+        clusterStart + static_cast<std::uint32_t>(enumerationIdx);
+    double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
+    double clusterR = std::get<1>(clusterSection.geometries.back().bbox);
+    std::ranges::transform_view geometriesTop{
+        clusterSection.geometries, [](const GlyphGeometry &geometry)
+        { return std::get<2>(geometry.bbox); }};
+    double clusterT = std::ranges::min(geometriesTop);
+    std::ranges::transform_view geometriesBottom{
+        clusterSection.geometries, [](const GlyphGeometry &geometry)
+        { return std::get<3>(geometry.bbox); }};
+    double clusterB = std::ranges::min(geometriesBottom);
+    double normalStart = clusterIdx == clusterStart ? codepointStart : 0;
+    double normalFinal =
+        finalBound && clusterIdx == clusterFinal ? codepointFinal : 1;
+    textL = std::min(textL, std::lerp(clusterL, clusterR, normalStart));
+    textR = std::max(textR, std::lerp(clusterL, clusterR, normalFinal));
     textT = std::min(textT, clusterT);
     textB = std::max(textB, clusterB);
   }
@@ -1727,31 +1723,32 @@ GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
                                      const hb_glyph_info_t &glyphInfo)
 {
   GlyphGeometry geometry{};
-  auto &[geometryX, geometryY] = geometry.position;
-  auto &[geometryW, geometryH] = geometry.sides;
 
   auto cacheIt = sequencer->atlas_cache.find(glyphInfo.codepoint);
   if (cacheIt == sequencer->atlas_cache.end())
   {
-    geometryX = past_x;
-    geometryW = static_cast<double>(position.x_advance) / 64.0;
-    geometryH =
-        prev_ink ? std::get<1>(prev_ink->sides) : sequencer->haitch_height;
+    geometry.w = static_cast<double>(position.x_advance) / 64.0;
+    geometry.h = prev_ink ? prev_ink->h : sequencer->haitch_height;
+
+    std::get<0>(geometry.bbox) = past_x;
+    std::get<1>(geometry.bbox) = past_x + geometry.w;
+    std::get<2>(geometry.bbox) = -1.0 * geometry.h;
     return geometry;
   }
 
   FT_BitmapGlyph bitmapGlyph =
       asBitmapGlyph(cacheIt->second.freetype_glyph.get());
-  geometryX = past_x + static_cast<double>(position.x_offset) / 64.0 +
-              static_cast<double>(bitmapGlyph->left);
-  geometryY = static_cast<double>(bitmapGlyph->top) -
-              static_cast<double>(bitmapGlyph->bitmap.rows) -
-              static_cast<double>(position.y_offset) / 64.0;
+  geometry.w = static_cast<double>(bitmapGlyph->bitmap.width);
+  geometry.h = static_cast<double>(bitmapGlyph->bitmap.rows);
 
-  double bitmapW = static_cast<double>(bitmapGlyph->bitmap.width);
-  double bitmapH = static_cast<double>(bitmapGlyph->bitmap.rows);
-  geometryW = bitmapW;
-  geometryH = bitmapH;
+  std::get<0>(geometry.bbox) = past_x +
+                               static_cast<double>(position.x_offset) / 64.0 +
+                               static_cast<double>(bitmapGlyph->left);
+  std::get<1>(geometry.bbox) = static_cast<double>(position.x_advance) / 64.0 +
+                               std::get<0>(geometry.bbox);
+  std::get<2>(geometry.bbox) = static_cast<double>(bitmapGlyph->top) -
+                               static_cast<double>(position.y_offset) / 64.0;
+  std::get<3>(geometry.bbox) = std::get<2>(geometry.bbox) - geometry.h;
 
   const auto &[atlasX, atlasY, atlasPage] = *cacheIt->second.atlas_position;
   constexpr double ATLAS_SIDE = static_cast<double>(GlyphSequencer::ATLAS_SIDE);
@@ -1759,8 +1756,8 @@ GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
   double atlasV = static_cast<double>(atlasY) / ATLAS_SIDE;
   std::get<0>(geometry.uv) = atlasU;
   std::get<1>(geometry.uv) = atlasV;
-  std::get<2>(geometry.uv) = atlasU + bitmapW / ATLAS_SIDE;
-  std::get<3>(geometry.uv) = atlasV + bitmapH / ATLAS_SIDE;
+  std::get<2>(geometry.uv) = atlasU + geometry.w / ATLAS_SIDE;
+  std::get<3>(geometry.uv) = atlasV + geometry.h / ATLAS_SIDE;
 
   geometry.has_ink = true;
   prev_ink.emplace(geometry);
@@ -1788,12 +1785,11 @@ std::vector<GlyphClusterSection> GlyphSequencer::make_cluster_sections()
 {
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
-  const hb_glyph_position_t *positions =
-      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr);
-  using BufferPair = std::pair<std::uint32_t, const hb_glyph_position_t *>;
+  using BufferPair = std::pair<std::uint32_t, const GlyphGeometry *>;
   std::vector<BufferPair> bufferPairs{};
-  for (unsigned int i{}; i < hb_buffer_get_length(harfbuzz_buffer.get()); ++i)
-    bufferPairs.emplace_back(glyphInfos[i].cluster, positions + i);
+  for (std::size_t i{}; i < glyph_geometries.size(); ++i)
+    bufferPairs.emplace_back(glyphInfos[i].cluster,
+                             glyph_geometries.data() + i);
 
   std::vector<std::span<BufferPair>> clusterSpans{};
   auto clusterPredicate = [](const BufferPair &infoA, const BufferPair &infoB)
@@ -1814,7 +1810,7 @@ std::vector<GlyphClusterSection> GlyphSequencer::make_cluster_sections()
     GlyphClusterSection clusterSection{};
     clusterSection.cluster = spanA.front().first;
     clusterSection.codepoint_infos = {codepointItA, codepointItB};
-    clusterSection.positions = {spanA.front().second, spanA.size()};
+    clusterSection.geometries = {spanA.front().second, spanA.size()};
     return clusterSection;
   };
   auto sectionsHead = clusterSpans | std::views::pairwise |
@@ -1828,7 +1824,8 @@ std::vector<GlyphClusterSection> GlyphSequencer::make_cluster_sections()
     GlyphClusterSection clusterSection{};
     clusterSection.cluster = clusterSpan.front().first;
     clusterSection.codepoint_infos = {codepointIt, codepoint_infos.end()};
-    clusterSection.positions = {clusterSpan.front().second, clusterSpan.size()};
+    clusterSection.geometries = {clusterSpan.front().second,
+                                 clusterSpan.size()};
     return clusterSection;
   };
   auto sectionsTail = clusterSpans | std::views::reverse | std::views::take(1) |
