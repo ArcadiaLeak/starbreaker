@@ -1644,7 +1644,7 @@ void GlyphSequencer::transfer_instance_data()
     vertexInstance.rect_position[0] =
         static_cast<float>(std::get<0>(geometry.bbox));
     vertexInstance.rect_position[1] =
-        static_cast<float>(std::get<3>(geometry.bbox));
+        -1.0f * static_cast<float>(std::get<3>(geometry.bbox));
     vertexInstance.rect_size[0] = static_cast<float>(geometry.w);
     vertexInstance.rect_size[1] = static_cast<float>(geometry.h);
     vertexInstance.uv_rect[0] = static_cast<float>(std::get<0>(geometry.uv));
@@ -1697,7 +1697,7 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
     std::ranges::transform_view geometriesBottom{
         clusterSection.geometries, [](const GlyphGeometry &geometry)
         { return std::get<3>(geometry.bbox); }};
-    double clusterB = std::ranges::min(geometriesBottom);
+    double clusterB = std::ranges::max(geometriesBottom);
     double normalStart = clusterIdx == clusterStart ? codepointStart : 0;
     double normalFinal =
         finalBound && clusterIdx == clusterFinal ? codepointFinal : 1;
@@ -1746,9 +1746,9 @@ GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
                                static_cast<double>(bitmapGlyph->left);
   std::get<1>(geometry.bbox) = static_cast<double>(position.x_advance) / 64.0 +
                                std::get<0>(geometry.bbox);
-  std::get<2>(geometry.bbox) = static_cast<double>(bitmapGlyph->top) -
-                               static_cast<double>(position.y_offset) / 64.0;
-  std::get<3>(geometry.bbox) = std::get<2>(geometry.bbox) - geometry.h;
+  std::get<2>(geometry.bbox) = static_cast<double>(position.y_offset) / 64.0 -
+                               static_cast<double>(bitmapGlyph->top);
+  std::get<3>(geometry.bbox) = std::get<2>(geometry.bbox) + geometry.h;
 
   const auto &[atlasX, atlasY, atlasPage] = *cacheIt->second.atlas_position;
   constexpr double ATLAS_SIDE = static_cast<double>(GlyphSequencer::ATLAS_SIDE);
@@ -1966,7 +1966,7 @@ void AppState::transfer_selection_areas()
     auto [rectX, rectY, rectW, rectH] = *selectionArea;
     RectInstanceData rectInstance{};
     rectInstance.rect_position[0] = static_cast<float>(rectX);
-    rectInstance.rect_position[1] = static_cast<float>(rectY + rectH) * -1.0f;
+    rectInstance.rect_position[1] = -1.0f * static_cast<float>(rectY + rectH);
     rectInstance.rect_size[0] = static_cast<float>(rectW);
     rectInstance.rect_size[1] = static_cast<float>(rectH);
     rectInstance.uv_rect[2] = 1.0f;
