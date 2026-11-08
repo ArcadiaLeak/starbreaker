@@ -803,7 +803,8 @@ struct GlyphAtlasCopier
   void copy_bitmap_row(std::uint32_t row);
 };
 
-using GlyphAtlasCache = std::flat_map<hb_codepoint_t, GlyphAtlasItem>;
+using GlyphAtlasLabel = std::pair<hb_codepoint_t, int>;
+using GlyphAtlasCache = std::flat_map<GlyphAtlasLabel, GlyphAtlasItem>;
 
 struct AppState;
 struct GlyphSequencer
@@ -984,7 +985,7 @@ void AppState::instantiate(FT_Library library)
                        static_cast<int>(INITIAL_WINDOW_H));
   main_window_for_gpu_device =
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
-  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 24 * 64,
+  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
   hb_ft_font_set_load_flags(harfbuzz_font.get(),
                             FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
@@ -1499,13 +1500,14 @@ void GlyphSequencer::verify_atlas_cache()
   bool everInserted{};
   for (const hb_glyph_info_t &info : glyphInfos)
   {
-    if (atlas_cache.contains(info.codepoint))
+    GlyphAtlasLabel cacheLabel{info.codepoint, int{}};
+    if (atlas_cache.contains(cacheLabel))
       continue;
     UniqueFreetypeGlyph glyph = app->freetype_load_glyph(info.codepoint);
     const FT_Bitmap &bitmap = asBitmapGlyph(glyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
-    GlyphAtlasItem &atlasItem = atlas_cache[info.codepoint];
+    GlyphAtlasItem &atlasItem = atlas_cache[cacheLabel];
     atlasItem.freetype_glyph = std::move(glyph);
     atlasItem.atlas_position = &atlas_positions.emplace_back();
     FT_Face freetypeFace = hb_ft_font_get_ft_face(app->harfbuzz_font.get());
@@ -1533,8 +1535,8 @@ void GlyphSequencer::pack_atlas()
   };
   auto entryProject = [](const auto &cacheEntry)
   {
-    const auto &[codepoint, cacheItem] = cacheEntry;
-    return CacheEntryView{.codepoint = codepoint,
+    const auto &[cacheLabel, cacheItem] = cacheEntry;
+    return CacheEntryView{.codepoint = cacheLabel.first,
                           .freetype_glyph = cacheItem.freetype_glyph.get(),
                           .atlas_position = cacheItem.atlas_position,
                           .accumulated_x = 0};
@@ -1598,7 +1600,7 @@ void GlyphSequencer::pack_atlas()
   atlasCopier.mapped_atlas =
       mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true);
   std::memset(atlasCopier.mapped_atlas.get(), 0, ATLAS_SIDE * ATLAS_SIDE);
-  for (const auto &[codepoint, cacheItem] : atlas_cache)
+  for (const auto &[cacheLabel, cacheItem] : atlas_cache)
     atlasCopier.copy_bitmap(cacheItem);
 }
 
@@ -1701,8 +1703,9 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
                       clusterSection.geometries.back().w;
     if (clusterSection.geometries.front().glyph_id)
     {
-      const GlyphAtlasItem &atlasItem =
-          atlas_cache[*clusterSection.geometries.front().glyph_id];
+      GlyphAtlasLabel atlasLabel{*clusterSection.geometries.front().glyph_id,
+                                 int{}};
+      const GlyphAtlasItem &atlasItem = atlas_cache[atlasLabel];
       FT_BitmapGlyph bitmapGlyph =
           asBitmapGlyph(atlasItem.freetype_glyph.get());
       clusterL -= static_cast<double>(bitmapGlyph->left);
@@ -1743,7 +1746,8 @@ GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
 {
   GlyphGeometry geometry{};
 
-  auto cacheIt = sequencer->atlas_cache.find(glyphInfo.codepoint);
+  GlyphAtlasLabel cacheLabel{glyphInfo.codepoint, int{}};
+  auto cacheIt = sequencer->atlas_cache.find(cacheLabel);
   if (cacheIt == sequencer->atlas_cache.end())
   {
     geometry.w = static_cast<double>(position.x_advance) / 64.0;
