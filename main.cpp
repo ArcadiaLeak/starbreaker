@@ -831,7 +831,7 @@ struct GlyphSequencer
 
   struct CaretStep
   {
-    double x_position;
+    double x_glyph, x_pen;
     int subpixel_phase;
   };
   std::generator<CaretStep> emit_caret_steps();
@@ -1793,6 +1793,27 @@ GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
   prev_ink.emplace(geometry);
 
   return geometry;
+}
+
+std::generator<GlyphSequencer::CaretStep> GlyphSequencer::emit_caret_steps()
+{
+  unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
+  std::span<const hb_glyph_position_t> positions{
+      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr), bufferLen};
+  CaretStep caret{};
+  for (const hb_glyph_position_t &position : positions)
+  {
+    constexpr int PHASE_CNT = 4;
+    double precise =
+        caret.x_pen + static_cast<double>(position.x_offset) / 64.0;
+    double whole = std::trunc(precise), fraction = precise - whole;
+    int phase =
+        static_cast<int>(std::round(fraction * static_cast<double>(PHASE_CNT)));
+    caret.x_glyph = whole + static_cast<int>(phase == PHASE_CNT);
+    caret.subpixel_phase = phase % PHASE_CNT;
+    co_yield caret;
+    caret.x_pen += static_cast<double>(position.x_advance) / 64.0;
+  }
 }
 
 std::generator<GlyphGeometry> GlyphSequencer::emit_glyph_geometries()
