@@ -829,6 +829,13 @@ struct GlyphSequencer
   std::vector<GlyphGeometry> glyph_geometries;
   std::generator<GlyphGeometry> emit_glyph_geometries();
 
+  struct CaretStep
+  {
+    double x_position;
+    int subpixel_phase;
+  };
+  std::generator<CaretStep> emit_caret_steps();
+
   std::vector<GlyphClusterSection> cluster_sections;
   std::vector<GlyphClusterSection> make_cluster_sections();
 
