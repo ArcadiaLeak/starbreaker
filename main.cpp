@@ -1778,14 +1778,14 @@ void GlyphSequencer::populate_glyph_geometries()
   for (const auto &[step, glyphInfo] :
        std::ranges::zip_view{emit_position_steps(), glyphInfos})
   {
-    auto cacheIt = atlas_cache.find(GlyphAtlasLabel{glyphInfo.codepoint, 0});
-    if (cacheIt == atlas_cache.end())
+    GlyphAtlasLabel atlasLabel{glyphInfo.codepoint, 0};
+    if (not atlas_cache.contains(atlasLabel))
     {
       GlyphGeometry geometry{};
+      bool behind = glyph_geometries.size() > 0 &&
+                    glyph_geometries.back().glyph_id.has_value();
       geometry.w = step.pen_advance;
-      bool hasPredecessor =
-          glyph_geometries.size() > 0 && glyph_geometries.back().glyph_id;
-      geometry.h = hasPredecessor ? glyph_geometries.back().h : haitch_height;
+      geometry.h = behind ? glyph_geometries.back().h : haitch_height;
 
       std::get<0>(geometry.bbox) = step.pen_position;
       std::get<1>(geometry.bbox) = step.pen_position + geometry.w;
@@ -1797,8 +1797,8 @@ void GlyphSequencer::populate_glyph_geometries()
     GlyphGeometry &geometry = glyph_geometries.emplace_back();
     geometry.glyph_id = glyphInfo.codepoint;
 
-    FT_BitmapGlyph bitmapGlyph =
-        asBitmapGlyph(cacheIt->second.freetype_glyph.get());
+    const GlyphAtlasItem &atlasItem = atlas_cache[atlasLabel];
+    FT_BitmapGlyph bitmapGlyph = asBitmapGlyph(atlasItem.freetype_glyph.get());
     geometry.w = static_cast<double>(bitmapGlyph->bitmap.width);
     geometry.h = static_cast<double>(bitmapGlyph->bitmap.rows);
 
@@ -1809,7 +1809,7 @@ void GlyphSequencer::populate_glyph_geometries()
         step.vert_offset - static_cast<double>(bitmapGlyph->top);
     std::get<3>(geometry.bbox) = std::get<2>(geometry.bbox) + geometry.h;
 
-    const auto &[atlasX, atlasY, atlasPage] = *cacheIt->second.atlas_position;
+    const auto &[atlasX, atlasY, atlasPage] = *atlasItem.atlas_position;
     constexpr double SIDE_DIVISOR = static_cast<double>(ATLAS_SIDE);
     double atlasU = static_cast<double>(atlasX) / SIDE_DIVISOR;
     double atlasV = static_cast<double>(atlasY) / SIDE_DIVISOR;
