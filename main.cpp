@@ -232,14 +232,6 @@ UniqueFileContent loadFile(const char *filepath, size_t *datasize)
   throw std::runtime_error{std::move(errorMsg)};
 }
 
-struct GPUShaderCreateInfo
-{
-  const char *filepath;
-  SDL_GPUShaderStage stage;
-  Uint32 num_samplers;
-  Uint32 num_uniform_buffers;
-};
-
 struct GPUShaderDeleter
 {
   SDL_GPUDevice *device;
@@ -251,18 +243,23 @@ void GPUShaderDeleter::operator()(SDL_GPUShader *shader) const
   SDL_ReleaseGPUShader(device, shader);
 }
 
+const std::array vertexRectInstance = std::to_array<std::uint8_t>({
+#embed "rect_instance.spv"
+});
+const std::array fragmentSelection = std::to_array<std::uint8_t>({
+#embed "selection_box.spv"
+});
+const std::array fragmentTint = std::to_array<std::uint8_t>({
+#embed "coverage_tint.spv"
+});
+const std::array computeDifferenceBlend = std::to_array<std::uint8_t>({
+#embed "difference_blend.spv"
+});
+
 UniqueGPUShader createGPUShader(SDL_GPUDevice *device,
-                                GPUShaderCreateInfo createInfo)
+                                SDL_GPUShaderCreateInfo createInfo)
 {
-  SDL_GPUShaderCreateInfo shaderInfo{};
-  UniqueFileContent shaderCode =
-      loadFile(createInfo.filepath, &shaderInfo.code_size);
-  shaderInfo.code = static_cast<const Uint8 *>(shaderCode.get());
-  shaderInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  shaderInfo.stage = createInfo.stage;
-  shaderInfo.num_samplers = createInfo.num_samplers;
-  shaderInfo.num_uniform_buffers = createInfo.num_uniform_buffers;
-  SDL_GPUShader *shader = SDL_CreateGPUShader(device, &shaderInfo);
+  SDL_GPUShader *shader = SDL_CreateGPUShader(device, &createInfo);
   if (not shader)
   {
     std::string errorMsg{"SDL_CreateGPUShader failed: "};
@@ -451,16 +448,21 @@ UniqueGPUGraphicsPipeline
 createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
                                SDL_GPUTextureFormat targetFormat)
 {
-  GPUShaderCreateInfo vertexInfo{.filepath = "rect_instance.spv",
-                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-                                 .num_samplers = 0,
-                                 .num_uniform_buffers = 1};
+  SDL_GPUShaderCreateInfo vertexInfo{};
+  vertexInfo.code = vertexRectInstance.data();
+  vertexInfo.code_size = vertexRectInstance.size();
+  vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+  vertexInfo.num_uniform_buffers = 1;
   UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
 
-  GPUShaderCreateInfo fragmentInfo{.filepath = "coverage_tint.spv",
-                                   .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                   .num_samplers = 1,
-                                   .num_uniform_buffers = 1};
+  SDL_GPUShaderCreateInfo fragmentInfo{};
+  fragmentInfo.code = fragmentTint.data();
+  fragmentInfo.code_size = fragmentTint.size();
+  fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+  fragmentInfo.num_samplers = 1;
+  fragmentInfo.num_uniform_buffers = 1;
   UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
 
   SDL_GPUColorTargetDescription colorTarget{};
@@ -522,16 +524,20 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
 UniqueGPUGraphicsPipeline
 createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device)
 {
-  GPUShaderCreateInfo vertexInfo{.filepath = "rect_instance.spv",
-                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-                                 .num_samplers = 0,
-                                 .num_uniform_buffers = 1};
+  SDL_GPUShaderCreateInfo vertexInfo{};
+  vertexInfo.code = vertexRectInstance.data();
+  vertexInfo.code_size = vertexRectInstance.size();
+  vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+  vertexInfo.num_uniform_buffers = 1;
   UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
 
-  GPUShaderCreateInfo fragmentInfo{.filepath = "selection_box.spv",
-                                   .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                   .num_samplers = 0,
-                                   .num_uniform_buffers = 1};
+  SDL_GPUShaderCreateInfo fragmentInfo{};
+  fragmentInfo.code = fragmentSelection.data();
+  fragmentInfo.code_size = fragmentSelection.size();
+  fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+  fragmentInfo.num_uniform_buffers = 1;
   UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
 
   SDL_GPUColorTargetDescription colorTarget{};
@@ -620,9 +626,8 @@ createGPUComputePipeline(SDL_GPUDevice *device,
 UniqueGPUComputePipeline createDifferenceBlendGPUPipeline(SDL_GPUDevice *device)
 {
   SDL_GPUComputePipelineCreateInfo pipelineInfo{};
-  UniqueFileContent shaderCode =
-      loadFile("difference_blend.spv", &pipelineInfo.code_size);
-  pipelineInfo.code = static_cast<const Uint8 *>(shaderCode.get());
+  pipelineInfo.code = computeDifferenceBlend.data();
+  pipelineInfo.code_size = computeDifferenceBlend.size();
   pipelineInfo.entrypoint = "main";
   pipelineInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
   pipelineInfo.num_readonly_storage_textures = 2;
@@ -1755,17 +1760,13 @@ std::generator<GlyphPositionStep> GlyphSequencer::emit_position_steps()
   {
     step.horz_offset = getPositionInPixels(position.x_offset);
     step.horz_position = step.pen_position + step.horz_offset;
-
     constexpr int SUBPIXEL_PHASE_COUNT = 4;
     double phase = (step.horz_position - std::trunc(step.horz_position)) *
                    static_cast<double>(SUBPIXEL_PHASE_COUNT);
     step.subpixel_phase = static_cast<int>(std::round(phase));
-
     step.vert_offset = getPositionInPixels(position.y_offset);
     step.pen_advance = getPositionInPixels(position.x_advance);
-
     co_yield step;
-
     step.pen_position += step.pen_advance;
   }
 }
