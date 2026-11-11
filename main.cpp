@@ -803,6 +803,13 @@ struct GlyphAtlasCopier
   void copy_bitmap_row(std::uint32_t row);
 };
 
+struct GlyphPositionStep
+{
+  double pen_position, pen_advance;
+  double horz_offset, vert_offset, horz_position;
+  int subpixel_phase;
+};
+
 using GlyphAtlasLabel = std::pair<hb_codepoint_t, int>;
 using GlyphAtlasCache = std::flat_map<GlyphAtlasLabel, GlyphAtlasItem>;
 
@@ -827,14 +834,9 @@ struct GlyphSequencer
   double measured_h() const noexcept { return y_max - y_min; }
 
   std::vector<GlyphGeometry> glyph_geometries;
-  std::generator<GlyphGeometry> emit_glyph_geometries();
+  void populate_glyph_geometries();
 
-  struct CaretStep
-  {
-    double x_glyph, x_pen;
-    int subpixel_phase;
-  };
-  std::generator<CaretStep> emit_caret_steps();
+  std::generator<GlyphPositionStep> emit_position_steps();
 
   std::vector<GlyphClusterSection> cluster_sections;
   std::vector<GlyphClusterSection> make_cluster_sections();
@@ -1738,97 +1740,83 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
   return textMetrics;
 }
 
-struct GlyphGeometryBuilder
-{
-  const GlyphSequencer *sequencer;
-  std::optional<GlyphGeometry> prev_ink{};
-  double past_x{};
-  GlyphGeometry build_geometry(const hb_glyph_position_t &,
-                               const hb_glyph_info_t &);
-};
-
-GlyphGeometry
-GlyphGeometryBuilder::build_geometry(const hb_glyph_position_t &position,
-                                     const hb_glyph_info_t &glyphInfo)
-{
-  GlyphGeometry geometry{};
-
-  GlyphAtlasLabel cacheLabel{glyphInfo.codepoint, int{}};
-  auto cacheIt = sequencer->atlas_cache.find(cacheLabel);
-  if (cacheIt == sequencer->atlas_cache.end())
-  {
-    geometry.w = static_cast<double>(position.x_advance) / 64.0;
-    geometry.h = prev_ink ? prev_ink->h : sequencer->haitch_height;
-
-    std::get<0>(geometry.bbox) = past_x;
-    std::get<1>(geometry.bbox) = past_x + geometry.w;
-    std::get<2>(geometry.bbox) = -1.0 * geometry.h;
-    return geometry;
-  }
-
-  FT_BitmapGlyph bitmapGlyph =
-      asBitmapGlyph(cacheIt->second.freetype_glyph.get());
-  geometry.w = static_cast<double>(bitmapGlyph->bitmap.width);
-  geometry.h = static_cast<double>(bitmapGlyph->bitmap.rows);
-
-  std::get<0>(geometry.bbox) = past_x +
-                               static_cast<double>(position.x_offset) / 64.0 +
-                               static_cast<double>(bitmapGlyph->left);
-  std::get<1>(geometry.bbox) = static_cast<double>(position.x_advance) / 64.0 +
-                               std::get<0>(geometry.bbox);
-  std::get<2>(geometry.bbox) = static_cast<double>(position.y_offset) / 64.0 -
-                               static_cast<double>(bitmapGlyph->top);
-  std::get<3>(geometry.bbox) = std::get<2>(geometry.bbox) + geometry.h;
-
-  const auto &[atlasX, atlasY, atlasPage] = *cacheIt->second.atlas_position;
-  constexpr double ATLAS_SIDE = static_cast<double>(GlyphSequencer::ATLAS_SIDE);
-  double atlasU = static_cast<double>(atlasX) / ATLAS_SIDE;
-  double atlasV = static_cast<double>(atlasY) / ATLAS_SIDE;
-  std::get<0>(geometry.uv) = atlasU;
-  std::get<1>(geometry.uv) = atlasV;
-  std::get<2>(geometry.uv) = atlasU + geometry.w / ATLAS_SIDE;
-  std::get<3>(geometry.uv) = atlasV + geometry.h / ATLAS_SIDE;
-
-  geometry.glyph_id = glyphInfo.codepoint;
-  prev_ink.emplace(geometry);
-
-  return geometry;
-}
-
-std::generator<GlyphSequencer::CaretStep> GlyphSequencer::emit_caret_steps()
+std::generator<GlyphPositionStep> GlyphSequencer::emit_position_steps()
 {
   unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
   std::span<const hb_glyph_position_t> positions{
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr), bufferLen};
-  CaretStep caret{};
+  GlyphPositionStep step{};
+  auto getPositionInPixels = [](hb_position_t pos) -> double
+  {
+    constexpr double GLYPH_POSITION_UNIT = 1.0 / 64.0;
+    return static_cast<double>(pos) * GLYPH_POSITION_UNIT;
+  };
   for (const hb_glyph_position_t &position : positions)
   {
-    constexpr int PHASE_CNT = 4;
-    double precise =
-        caret.x_pen + static_cast<double>(position.x_offset) / 64.0;
-    double whole = std::trunc(precise), fraction = precise - whole;
-    int phase =
-        static_cast<int>(std::round(fraction * static_cast<double>(PHASE_CNT)));
-    caret.x_glyph = whole + static_cast<int>(phase == PHASE_CNT);
-    caret.subpixel_phase = phase % PHASE_CNT;
-    co_yield caret;
-    caret.x_pen += static_cast<double>(position.x_advance) / 64.0;
+    step.horz_offset = getPositionInPixels(position.x_offset);
+    step.horz_position = step.pen_position + step.horz_offset;
+
+    constexpr int SUBPIXEL_PHASE_COUNT = 4;
+    double phase = (step.horz_position - std::trunc(step.horz_position)) *
+                   static_cast<double>(SUBPIXEL_PHASE_COUNT);
+    step.subpixel_phase = static_cast<int>(std::round(phase));
+
+    step.vert_offset = getPositionInPixels(position.y_offset);
+    step.pen_advance = getPositionInPixels(position.x_advance);
+
+    co_yield step;
+
+    step.pen_position += step.pen_advance;
   }
 }
 
-std::generator<GlyphGeometry> GlyphSequencer::emit_glyph_geometries()
+void GlyphSequencer::populate_glyph_geometries()
 {
-  unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
-  std::span<const hb_glyph_position_t> positions{
-      hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr), bufferLen};
   std::span<const hb_glyph_info_t> glyphInfos{
-      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr), bufferLen};
-  GlyphGeometryBuilder builder{this};
-  for (const auto &bufferTuple : std::ranges::zip_view{positions, glyphInfos})
+      hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
+      hb_buffer_get_length(harfbuzz_buffer.get())};
+  for (const auto &[step, glyphInfo] :
+       std::ranges::zip_view{emit_position_steps(), glyphInfos})
   {
-    const auto &[position, glyphInfo] = bufferTuple;
-    co_yield builder.build_geometry(position, glyphInfo);
-    builder.past_x += static_cast<double>(position.x_advance) / 64.0;
+    auto cacheIt = atlas_cache.find(GlyphAtlasLabel{glyphInfo.codepoint, 0});
+    if (cacheIt == atlas_cache.end())
+    {
+      GlyphGeometry geometry{};
+      geometry.w = step.pen_advance;
+      bool hasPredecessor =
+          glyph_geometries.size() > 0 && glyph_geometries.back().glyph_id;
+      geometry.h = hasPredecessor ? glyph_geometries.back().h : haitch_height;
+
+      std::get<0>(geometry.bbox) = step.pen_position;
+      std::get<1>(geometry.bbox) = step.pen_position + geometry.w;
+      std::get<2>(geometry.bbox) = -1.0 * geometry.h;
+
+      glyph_geometries.push_back(geometry);
+      continue;
+    }
+    GlyphGeometry &geometry = glyph_geometries.emplace_back();
+    geometry.glyph_id = glyphInfo.codepoint;
+
+    FT_BitmapGlyph bitmapGlyph =
+        asBitmapGlyph(cacheIt->second.freetype_glyph.get());
+    geometry.w = static_cast<double>(bitmapGlyph->bitmap.width);
+    geometry.h = static_cast<double>(bitmapGlyph->bitmap.rows);
+
+    std::get<0>(geometry.bbox) =
+        step.horz_position + static_cast<double>(bitmapGlyph->left);
+    std::get<1>(geometry.bbox) = step.pen_advance + std::get<0>(geometry.bbox);
+    std::get<2>(geometry.bbox) =
+        step.vert_offset - static_cast<double>(bitmapGlyph->top);
+    std::get<3>(geometry.bbox) = std::get<2>(geometry.bbox) + geometry.h;
+
+    const auto &[atlasX, atlasY, atlasPage] = *cacheIt->second.atlas_position;
+    constexpr double SIDE_DIVISOR = static_cast<double>(ATLAS_SIDE);
+    double atlasU = static_cast<double>(atlasX) / SIDE_DIVISOR;
+    double atlasV = static_cast<double>(atlasY) / SIDE_DIVISOR;
+    std::get<0>(geometry.uv) = atlasU;
+    std::get<1>(geometry.uv) = atlasV;
+    std::get<2>(geometry.uv) = atlasU + geometry.w / SIDE_DIVISOR;
+    std::get<3>(geometry.uv) = atlasV + geometry.h / SIDE_DIVISOR;
   }
 }
 
@@ -1949,7 +1937,8 @@ void GlyphSequencer::text_reflow(std::string_view textView)
   };
   initiate();
   verify_atlas_cache();
-  glyph_geometries = {std::from_range, emit_glyph_geometries()};
+  glyph_geometries.clear();
+  populate_glyph_geometries();
   cluster_sections = make_cluster_sections();
   std::tie(x_min, x_max, y_min, y_max) = text_measure({}, {}, false);
   queue_vertex_copypass();
