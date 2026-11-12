@@ -786,7 +786,7 @@ struct GlyphAtlasItem
 
 struct GlyphGeometry
 {
-  std::optional<hb_codepoint_t> glyph_id;
+  std::optional<hb_codepoint_t> glyphid;
   double w, h;
   std::array<double, 4> bbox;
   std::array<double, 4> uv;
@@ -958,7 +958,7 @@ struct AppState
   double caption_x = 0, caption_y = 0;
   GlyphSequencer caption_sequencer{this};
 
-  UniqueFreetypeGlyph freetype_load_glyph(hb_codepoint_t);
+  UniqueFreetypeGlyph freetype_load_glyph(hb_codepoint_t glyphid, int phase);
   const FT_Glyph_Metrics &freetype_codepoint_metrics(FT_ULong codepoint);
 
   UniqueGPUTexture offscreen_texture;
@@ -1000,7 +1000,7 @@ void AppState::instantiate(FT_Library library)
                        static_cast<int>(INITIAL_WINDOW_H));
   main_window_for_gpu_device =
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
-  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
+  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 24 * 64,
                                      getWindowDisplayScale(main_window.get()));
   hb_ft_font_set_load_flags(harfbuzz_font.get(),
                             FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
@@ -1513,12 +1513,13 @@ void GlyphSequencer::verify_atlas_cache()
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get())};
   bool everInserted{};
-  for (const hb_glyph_info_t &info : glyphInfos)
+  for (const auto &[step, glyphInfo] : std::views::zip(glyph_steps, glyphInfos))
   {
-    GlyphAtlasLabel cacheLabel{info.codepoint, int{}};
+    const GlyphAtlasLabel cacheLabel{glyphInfo.codepoint, step.subpixel_phase};
     if (atlas_cache.contains(cacheLabel))
       continue;
-    UniqueFreetypeGlyph glyph = app->freetype_load_glyph(info.codepoint);
+    UniqueFreetypeGlyph glyph =
+        app->freetype_load_glyph(glyphInfo.codepoint, step.subpixel_phase);
     const FT_Bitmap &bitmap = asBitmapGlyph(glyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
@@ -1663,7 +1664,7 @@ void GlyphSequencer::transfer_instance_data()
       static_cast<RectInstanceData *>(mappedBuffer.get());
   for (const GlyphGeometry &geometry : glyph_geometries)
   {
-    if (not geometry.glyph_id)
+    if (not geometry.glyphid)
       continue;
     RectInstanceData vertexInstance{};
     vertexInstance.rect_position[0] =
@@ -1716,10 +1717,10 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
     double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
     double clusterR = std::get<0>(clusterSection.geometries.back().bbox) +
                       clusterSection.geometries.back().w;
-    if (clusterSection.geometries.front().glyph_id)
+    if (clusterSection.geometries.front().glyphid)
     {
-      GlyphAtlasLabel atlasLabel{*clusterSection.geometries.front().glyph_id,
-                                 int{}};
+      const GlyphAtlasLabel atlasLabel{
+          *clusterSection.geometries.front().glyphid, int{}};
       const GlyphAtlasItem &atlasItem = atlas_cache[atlasLabel];
       FT_BitmapGlyph bitmapGlyph =
           asBitmapGlyph(atlasItem.freetype_glyph.get());
@@ -1777,15 +1778,14 @@ void GlyphSequencer::populate_glyph_geometries()
   std::span<const hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get())};
-  for (const auto &[step, glyphInfo] :
-       std::ranges::zip_view{glyph_steps, glyphInfos})
+  for (const auto &[step, glyphInfo] : std::views::zip(glyph_steps, glyphInfos))
   {
     GlyphAtlasLabel atlasLabel{glyphInfo.codepoint, 0};
     if (not atlas_cache.contains(atlasLabel))
     {
       GlyphGeometry geometry{};
       bool behind = glyph_geometries.size() > 0 &&
-                    glyph_geometries.back().glyph_id.has_value();
+                    glyph_geometries.back().glyphid.has_value();
       geometry.w = step.pen_advance;
       geometry.h = behind ? glyph_geometries.back().h : haitch_height;
 
@@ -1797,7 +1797,7 @@ void GlyphSequencer::populate_glyph_geometries()
       continue;
     }
     GlyphGeometry &geometry = glyph_geometries.emplace_back();
-    geometry.glyph_id = glyphInfo.codepoint;
+    geometry.glyphid = glyphInfo.codepoint;
 
     const GlyphAtlasItem &atlasItem = atlas_cache[atlasLabel];
     FT_BitmapGlyph bitmapGlyph = asBitmapGlyph(atlasItem.freetype_glyph.get());
@@ -1891,23 +1891,31 @@ void CopypassTaskVisitor::operator()(CopyGlyphAtlas task) const
   SDL_UploadToGPUTexture(copypass, &source, &destination, false);
 }
 
-UniqueFreetypeGlyph AppState::freetype_load_glyph(hb_codepoint_t glyphId)
+UniqueFreetypeGlyph AppState::freetype_load_glyph(hb_codepoint_t glyphid,
+                                                  int phase)
 {
   FT_Error errcode{};
   FT_Face face = hb_ft_font_get_ft_face(harfbuzz_font.get());
-  errcode = FT_Load_Glyph(
-      face, glyphId, FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT | FT_LOAD_RENDER);
+  errcode =
+      FT_Load_Glyph(face, glyphid, FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
   if (errcode)
   {
     std::string errorMsg{"FT_Load_Glyph failed for glyph: "};
-    throw std::runtime_error{errorMsg + std::to_string(glyphId)};
+    throw std::runtime_error{errorMsg + std::to_string(glyphid)};
   }
   FT_Glyph glyph{};
   errcode = FT_Get_Glyph(face->glyph, &glyph);
   if (errcode)
   {
     std::string errorMsg{"FT_Get_Glyph failed for glyph: "};
-    throw std::runtime_error{errorMsg + std::to_string(glyphId)};
+    throw std::runtime_error{errorMsg + std::to_string(glyphid)};
+  }
+  const FT_Vector origin{static_cast<FT_Pos>(phase) * 16, 0};
+  errcode = FT_Glyph_To_Bitmap(&glyph, FT_RENDER_MODE_NORMAL, &origin, 1);
+  if (errcode)
+  {
+    std::string errorMsg{"FT_Glyph_To_Bitmap failed for glyph: "};
+    throw std::runtime_error{errorMsg + std::to_string(glyphid)};
   }
   return UniqueFreetypeGlyph{glyph};
 }
