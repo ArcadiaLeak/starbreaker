@@ -808,7 +808,7 @@ struct GlyphAtlasCopier
   void copy_bitmap_row(std::uint32_t row);
 };
 
-struct GlyphPositionStep
+struct GlyphCaretStep
 {
   double pen_position, pen_advance;
   double horz_offset, vert_offset, horz_position;
@@ -841,7 +841,8 @@ struct GlyphSequencer
   std::vector<GlyphGeometry> glyph_geometries;
   void populate_glyph_geometries();
 
-  std::generator<GlyphPositionStep> emit_position_steps();
+  std::vector<GlyphCaretStep> glyph_steps;
+  std::generator<GlyphCaretStep> emit_glyph_steps();
 
   std::vector<GlyphClusterSection> cluster_sections;
   std::vector<GlyphClusterSection> make_cluster_sections();
@@ -1745,12 +1746,12 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
   return textMetrics;
 }
 
-std::generator<GlyphPositionStep> GlyphSequencer::emit_position_steps()
+std::generator<GlyphCaretStep> GlyphSequencer::emit_glyph_steps()
 {
   unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
   std::span<const hb_glyph_position_t> positions{
       hb_buffer_get_glyph_positions(harfbuzz_buffer.get(), nullptr), bufferLen};
-  GlyphPositionStep step{};
+  GlyphCaretStep step{};
   auto getPositionInPixels = [](hb_position_t pos) -> double
   {
     constexpr double GLYPH_POSITION_UNIT = 1.0 / 64.0;
@@ -1777,7 +1778,7 @@ void GlyphSequencer::populate_glyph_geometries()
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
       hb_buffer_get_length(harfbuzz_buffer.get())};
   for (const auto &[step, glyphInfo] :
-       std::ranges::zip_view{emit_position_steps(), glyphInfos})
+       std::ranges::zip_view{glyph_steps, glyphInfos})
   {
     GlyphAtlasLabel atlasLabel{glyphInfo.codepoint, 0};
     if (not atlas_cache.contains(atlasLabel))
@@ -1926,17 +1927,14 @@ const FT_Glyph_Metrics &AppState::freetype_codepoint_metrics(FT_ULong codepoint)
 
 void GlyphSequencer::text_reflow(std::string_view textView)
 {
-  auto initiate = [textView, this]()
-  {
-    hb_buffer_reset(harfbuzz_buffer.get());
-    hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
-                       static_cast<int>(textView.size()), 0,
-                       static_cast<int>(textView.size()));
-    hb_buffer_guess_segment_properties(harfbuzz_buffer.get());
-    hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
-    codepoint_infos = {std::from_range, emitCodepointInfo(textView)};
-  };
-  initiate();
+  hb_buffer_reset(harfbuzz_buffer.get());
+  hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
+                     static_cast<int>(textView.size()), 0,
+                     static_cast<int>(textView.size()));
+  hb_buffer_guess_segment_properties(harfbuzz_buffer.get());
+  hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
+  codepoint_infos = {std::from_range, emitCodepointInfo(textView)};
+  glyph_steps = {std::from_range, emit_glyph_steps()};
   verify_atlas_cache();
   glyph_geometries.clear();
   populate_glyph_geometries();
