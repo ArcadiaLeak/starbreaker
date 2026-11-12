@@ -784,9 +784,12 @@ struct GlyphAtlasItem
   double lsb_delta, rsb_delta;
 };
 
+using GlyphAtlasLabel = std::pair<hb_codepoint_t, int>;
+using GlyphAtlasCache = std::flat_map<GlyphAtlasLabel, GlyphAtlasItem>;
+
 struct GlyphGeometry
 {
-  std::optional<hb_codepoint_t> glyphid;
+  std::optional<GlyphAtlasLabel> atlas_label;
   double w, h;
   std::array<double, 4> bbox;
   std::array<double, 4> uv;
@@ -814,9 +817,6 @@ struct GlyphCaretStep
   double horz_offset, vert_offset, horz_position;
   int subpixel_phase;
 };
-
-using GlyphAtlasLabel = std::pair<hb_codepoint_t, int>;
-using GlyphAtlasCache = std::flat_map<GlyphAtlasLabel, GlyphAtlasItem>;
 
 struct AppState;
 struct GlyphSequencer
@@ -1000,7 +1000,7 @@ void AppState::instantiate(FT_Library library)
                        static_cast<int>(INITIAL_WINDOW_H));
   main_window_for_gpu_device =
       claimWindowForGPUDevice(device_ctx.get(), main_window.get());
-  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 24 * 64,
+  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
   hb_ft_font_set_load_flags(harfbuzz_font.get(),
                             FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
@@ -1664,7 +1664,7 @@ void GlyphSequencer::transfer_instance_data()
       static_cast<RectInstanceData *>(mappedBuffer.get());
   for (const GlyphGeometry &geometry : glyph_geometries)
   {
-    if (not geometry.glyphid)
+    if (not geometry.atlas_label)
       continue;
     RectInstanceData vertexInstance{};
     vertexInstance.rect_position[0] =
@@ -1714,13 +1714,13 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
   {
     std::uint32_t clusterIdx =
         clusterStart + static_cast<std::uint32_t>(enumerationIdx);
-    double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
-    double clusterR = std::get<0>(clusterSection.geometries.back().bbox) +
-                      clusterSection.geometries.back().w;
-    if (clusterSection.geometries.front().glyphid)
+    auto geometriesFirst = clusterSection.geometries.cbegin();
+    auto geometriesFinal = clusterSection.geometries.crbegin();
+    double clusterL = std::get<0>(geometriesFirst->bbox);
+    double clusterR = std::get<0>(geometriesFinal->bbox) + geometriesFinal->w;
+    if (geometriesFirst->atlas_label.has_value())
     {
-      const GlyphAtlasLabel atlasLabel{
-          *clusterSection.geometries.front().glyphid, int{}};
+      const GlyphAtlasLabel &atlasLabel = *geometriesFirst->atlas_label;
       const GlyphAtlasItem &atlasItem = atlas_cache[atlasLabel];
       FT_BitmapGlyph bitmapGlyph =
           asBitmapGlyph(atlasItem.freetype_glyph.get());
@@ -1780,12 +1780,12 @@ void GlyphSequencer::populate_glyph_geometries()
       hb_buffer_get_length(harfbuzz_buffer.get())};
   for (const auto &[step, glyphInfo] : std::views::zip(glyph_steps, glyphInfos))
   {
-    GlyphAtlasLabel atlasLabel{glyphInfo.codepoint, 0};
+    const GlyphAtlasLabel atlasLabel{glyphInfo.codepoint, step.subpixel_phase};
     if (not atlas_cache.contains(atlasLabel))
     {
       GlyphGeometry geometry{};
       bool behind = glyph_geometries.size() > 0 &&
-                    glyph_geometries.back().glyphid.has_value();
+                    glyph_geometries.back().atlas_label.has_value();
       geometry.w = step.pen_advance;
       geometry.h = behind ? glyph_geometries.back().h : haitch_height;
 
@@ -1797,7 +1797,7 @@ void GlyphSequencer::populate_glyph_geometries()
       continue;
     }
     GlyphGeometry &geometry = glyph_geometries.emplace_back();
-    geometry.glyphid = glyphInfo.codepoint;
+    geometry.atlas_label = atlasLabel;
 
     const GlyphAtlasItem &atlasItem = atlas_cache[atlasLabel];
     FT_BitmapGlyph bitmapGlyph = asBitmapGlyph(atlasItem.freetype_glyph.get());
@@ -1805,7 +1805,7 @@ void GlyphSequencer::populate_glyph_geometries()
     geometry.h = static_cast<double>(bitmapGlyph->bitmap.rows);
 
     std::get<0>(geometry.bbox) =
-        step.horz_position + static_cast<double>(bitmapGlyph->left);
+        std::trunc(step.horz_position) + static_cast<double>(bitmapGlyph->left);
     std::get<1>(geometry.bbox) = step.pen_advance + std::get<0>(geometry.bbox);
     std::get<2>(geometry.bbox) =
         step.vert_offset - static_cast<double>(bitmapGlyph->top);
