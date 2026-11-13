@@ -822,13 +822,6 @@ struct GlyphSequencer
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
 
-  static constexpr std::uint32_t ATLAS_SIDE = 1024;
-  static constexpr std::uint32_t ATLAS_PADDING = 1;
-  GlyphAtlasCache atlas_cache;
-  UniqueGPUTransferBuffer atlas_transfer;
-  UniqueGPUTexture atlas_texture;
-
-  double haitch_height = 0;
   double x_min = 0, x_max = 0;
   double y_min = 0, y_max = 0;
   double measured_w() const noexcept { return x_max - x_min; }
@@ -851,22 +844,17 @@ struct GlyphSequencer
   void transfer_instance_data();
   void queue_vertex_copypass();
 
-  UniqueGPUSampler sampler;
-  UniqueGPUGraphicsPipeline swapchain_pipeline;
-  UniqueGPUGraphicsPipeline offscreen_pipeline;
-
   void instantiate(SDL_Window *window);
-  void verify_atlas_cache();
-  void pack_atlas();
+  bool verify_atlas_cache();
 
-  void text_reflow(std::string_view);
+  bool text_reshape(std::string_view);
+  void text_reflow();
   std::array<double, 4> text_measure(std::pair<std::uint32_t, double>,
                                      std::pair<std::uint32_t, double>, bool);
 };
 
 struct CopyGlyphAtlas
 {
-  GlyphSequencer *sequencer;
 };
 struct CopyGlyphVertices
 {
@@ -941,7 +929,13 @@ struct AppState
 
   std::string caption_string = "Hello figure kerning Text";
   double caption_x = 0, caption_y = 0;
-  GlyphSequencer caption_sequencer{this};
+
+  static constexpr std::uint32_t ATLAS_SIDE = 1024;
+  static constexpr std::uint32_t ATLAS_PADDING = 1;
+  UniqueGPUTransferBuffer atlas_transfer;
+  UniqueGPUTexture atlas_texture;
+  GlyphAtlasCache atlas_cache;
+  std::vector<GlyphSequencer> glyph_sequencers;
 
   UniqueFreetypeGlyph freetype_load_glyph(hb_codepoint_t glyphid, int phase);
   const FT_Glyph_Metrics &freetype_codepoint_metrics(FT_ULong codepoint);
@@ -950,11 +944,15 @@ struct AppState
   UniqueGPUTexture selection_texture;
   UniqueGPUTexture processed_texture;
   std::uint32_t offscreen_w = 0, offscreen_h = 0;
+  double haitch_height = 0;
 
   SelectionEventHandler selection_handler{this};
   std::vector<std::optional<std::array<double, 4>>> selection_slots;
   bool selection_areas_flag = false;
 
+  UniqueGPUSampler sampler;
+  UniqueGPUGraphicsPipeline swapchain_pipeline;
+  UniqueGPUGraphicsPipeline offscreen_pipeline;
   UniqueGPUGraphicsPipeline selection_pipeline;
   UniqueGPUComputePipeline difference_blend_pipeline;
 
@@ -972,6 +970,7 @@ struct AppState
   SDL_AppResult handle_event(SDL_Event *event) noexcept;
 
   void instantiate(FT_Library library);
+  void pack_atlas();
 
   std::array<double, 4> caption_bbox() noexcept;
 };
@@ -992,7 +991,22 @@ void AppState::instantiate(FT_Library library)
   selection_pipeline = createSelectionGPUGraphicsPipeline(device_ctx.get());
   difference_blend_pipeline =
       createDifferenceBlendGPUPipeline(device_ctx.get());
-  caption_sequencer.instantiate(main_window.get());
+  GPUTextureCreateInfo textureInfo{.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                   .texture_w = ATLAS_SIDE,
+                                   .texture_h = ATLAS_SIDE};
+  atlas_texture = createGPUTexture(device_ctx.get(), textureInfo);
+  atlas_transfer =
+      createGPUTransferBuffer(device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
+  sampler = createCommonGPUSampler(device_ctx.get());
+  swapchain_pipeline = createGlyphGPUGraphicsPipeline(
+      device_ctx.get(),
+      SDL_GetGPUSwapchainTextureFormat(device_ctx.get(), main_window.get()));
+  offscreen_pipeline = createGlyphGPUGraphicsPipeline(
+      device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+  const FT_Glyph_Metrics &haitch_metrics = freetype_codepoint_metrics(72);
+  haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
+  glyph_sequencers.emplace_back(this).instantiate(main_window.get());
 }
 
 void GPUCommandSequencer::issue_copy_pass()
@@ -1030,16 +1044,14 @@ void GPUCommandSequencer::issue_render_pass()
       std::ranges::distance(app->selection_slots | std::views::join);
   if (numSelections == 0)
   {
-    SDL_GPUGraphicsPipeline *scenePipeline =
-        app->caption_sequencer.swapchain_pipeline.get();
+    SDL_GPUGraphicsPipeline *scenePipeline = app->swapchain_pipeline.get();
     render_sequencer.draw_scene(render_sequencer.swapchain_texture,
                                 scenePipeline);
   }
   else
   {
     render_sequencer.verify_storage_textures();
-    SDL_GPUGraphicsPipeline *scenePipeline =
-        app->caption_sequencer.offscreen_pipeline.get();
+    SDL_GPUGraphicsPipeline *scenePipeline = app->offscreen_pipeline.get();
     render_sequencer.draw_scene(app->offscreen_texture.get(), scenePipeline);
     render_sequencer.selected_areas_draw();
     render_sequencer.selected_areas_blend();
@@ -1087,7 +1099,7 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
   SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
   SDL_GPUTextureSamplerBinding samplerBinding{};
   samplerBinding.texture = app->caption_sequencer.atlas_texture.get();
-  samplerBinding.sampler = app->caption_sequencer.sampler.get();
+  samplerBinding.sampler = app->sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
   struct alignas(16) RectUniform
@@ -1446,26 +1458,10 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
 
 void GlyphSequencer::instantiate(SDL_Window *window)
 {
-  GPUTextureCreateInfo textureInfo{.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
-                                   .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-                                   .texture_w = ATLAS_SIDE,
-                                   .texture_h = ATLAS_SIDE};
-  atlas_texture = createGPUTexture(app->device_ctx.get(), textureInfo);
-  atlas_transfer =
-      createGPUTransferBuffer(app->device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
   harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
-
-  sampler = createCommonGPUSampler(app->device_ctx.get());
-  swapchain_pipeline = createGlyphGPUGraphicsPipeline(
-      app->device_ctx.get(),
-      SDL_GetGPUSwapchainTextureFormat(app->device_ctx.get(), window));
-  offscreen_pipeline = createGlyphGPUGraphicsPipeline(
-      app->device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
-  const FT_Glyph_Metrics &haitch_metrics = app->freetype_codepoint_metrics(72);
-  haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
 }
 
-void GlyphSequencer::verify_atlas_cache()
+bool GlyphSequencer::verify_atlas_cache()
 {
   std::span<hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
@@ -1474,7 +1470,7 @@ void GlyphSequencer::verify_atlas_cache()
   for (const auto &[step, glyphInfo] : std::views::zip(glyph_steps, glyphInfos))
   {
     const GlyphAtlasLabel cacheLabel{glyphInfo.codepoint, step.subpixel_phase};
-    if (atlas_cache.contains(cacheLabel))
+    if (app->atlas_cache.contains(cacheLabel))
       continue;
     UniqueFreetypeGlyph ftglyph =
         app->freetype_load_glyph(glyphInfo.codepoint, step.subpixel_phase);
@@ -1482,7 +1478,7 @@ void GlyphSequencer::verify_atlas_cache()
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
     FT_Face freetypeFace = hb_ft_font_get_ft_face(app->harfbuzz_font.get());
-    GlyphAtlasItem &atlasItem = atlas_cache[cacheLabel];
+    GlyphAtlasItem &atlasItem = app->atlas_cache[cacheLabel];
     atlasItem.lsb_delta =
         static_cast<double>(freetypeFace->glyph->lsb_delta) / 64.0;
     atlasItem.rsb_delta =
@@ -1490,14 +1486,10 @@ void GlyphSequencer::verify_atlas_cache()
     atlasItem.ftglyph = std::move(ftglyph);
     everInserted = true;
   }
-  if (everInserted)
-  {
-    pack_atlas();
-    app->copypass_tasks.push_back(CopyGlyphAtlas{this});
-  }
+  return everInserted;
 }
 
-void GlyphSequencer::pack_atlas()
+void AppState::pack_atlas()
 {
   struct AtlasColumnItem
   {
@@ -1575,7 +1567,7 @@ void GlyphSequencer::pack_atlas()
       }
   GlyphAtlasCopier atlasCopier{};
   atlasCopier.mapped_atlas =
-      mapGPUTransferBuffer(app->device_ctx.get(), atlas_transfer.get(), true);
+      mapGPUTransferBuffer(device_ctx.get(), atlas_transfer.get(), true);
   std::memset(atlasCopier.mapped_atlas.get(), 0, ATLAS_SIDE * ATLAS_SIDE);
   for (const auto &[cacheLabel, cacheItem] : atlas_cache)
     atlasCopier.copy_bitmap(cacheItem);
@@ -1595,7 +1587,7 @@ void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row)
   unsigned char *source = bitmap->buffer + row * bitmap->pitch;
   std::uint32_t atlasVertOffset = atlasY + row;
   std::uint32_t atlasFullOffset =
-      atlasVertOffset * GlyphSequencer::ATLAS_SIDE + atlasX;
+      atlasVertOffset * AppState::ATLAS_SIDE + atlasX;
   unsigned char *transferBegin =
       static_cast<unsigned char *>(mapped_atlas.get());
   std::memcpy(transferBegin + atlasFullOffset, source, bitmap->width);
@@ -1682,7 +1674,7 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
     if (geometriesFirst->atlas_label.has_value())
     {
       const GlyphAtlasItem &atlasItem =
-          atlas_cache.at(*geometriesFirst->atlas_label);
+          app->atlas_cache.at(*geometriesFirst->atlas_label);
       FT_BitmapGlyph bitmapGlyph = asBitmapGlyph(atlasItem.ftglyph.get());
       clusterL -= static_cast<double>(bitmapGlyph->left);
     }
@@ -1741,13 +1733,13 @@ void GlyphSequencer::populate_glyph_geometries()
   for (const auto &[step, glyphInfo] : std::views::zip(glyph_steps, glyphInfos))
   {
     const GlyphAtlasLabel atlasLabel{glyphInfo.codepoint, step.subpixel_phase};
-    if (not atlas_cache.contains(atlasLabel))
+    if (not app->atlas_cache.contains(atlasLabel))
     {
       GlyphGeometry geometry{};
       bool behind = glyph_geometries.size() > 0 &&
                     glyph_geometries.back().atlas_label.has_value();
       geometry.w = step.pen_advance;
-      geometry.h = behind ? glyph_geometries.back().h : haitch_height;
+      geometry.h = behind ? glyph_geometries.back().h : app->haitch_height;
 
       std::get<0>(geometry.bbox) = step.pen_position;
       std::get<1>(geometry.bbox) = step.pen_position + geometry.w;
@@ -1760,7 +1752,7 @@ void GlyphSequencer::populate_glyph_geometries()
     geometry.atlas_label = atlasLabel;
 
     FT_BitmapGlyph bitmapGlyph =
-        asBitmapGlyph(atlas_cache.at(atlasLabel).ftglyph.get());
+        asBitmapGlyph(app->atlas_cache.at(atlasLabel).ftglyph.get());
     geometry.w = static_cast<double>(bitmapGlyph->bitmap.width);
     geometry.h = static_cast<double>(bitmapGlyph->bitmap.rows);
 
@@ -1772,8 +1764,8 @@ void GlyphSequencer::populate_glyph_geometries()
     std::get<3>(geometry.bbox) = std::get<2>(geometry.bbox) + geometry.h;
 
     const auto &[atlasX, atlasY, atlasPage] =
-        atlas_cache.at(atlasLabel).atlas_position;
-    constexpr double SIDE_DIVISOR = static_cast<double>(ATLAS_SIDE);
+        app->atlas_cache.at(atlasLabel).atlas_position;
+    constexpr double SIDE_DIVISOR = static_cast<double>(AppState::ATLAS_SIDE);
     double atlasU = static_cast<double>(atlasX) / SIDE_DIVISOR;
     double atlasV = static_cast<double>(atlasY) / SIDE_DIVISOR;
     std::get<0>(geometry.uv) = atlasU;
@@ -1837,17 +1829,16 @@ std::vector<GlyphClusterSection> GlyphSequencer::make_cluster_sections()
   return {std::from_range, sectionsAll};
 }
 
-void CopypassTaskVisitor::operator()(CopyGlyphAtlas task) const
+void CopypassTaskVisitor::operator()(CopyGlyphAtlas) const
 {
-  SDL_GPUTextureTransferInfo source{
-      .transfer_buffer = task.sequencer->atlas_transfer.get(),
-      .offset = 0,
-      .pixels_per_row = GlyphSequencer::ATLAS_SIDE,
-      .rows_per_layer = GlyphSequencer::ATLAS_SIDE};
+  SDL_GPUTextureTransferInfo source{};
+  source.transfer_buffer = app->atlas_transfer.get();
+  source.pixels_per_row = AppState::ATLAS_SIDE;
+  source.rows_per_layer = AppState::ATLAS_SIDE;
   SDL_GPUTextureRegion destination{};
-  destination.texture = task.sequencer->atlas_texture.get();
-  destination.w = GlyphSequencer::ATLAS_SIDE;
-  destination.h = GlyphSequencer::ATLAS_SIDE;
+  destination.texture = app->atlas_texture.get();
+  destination.w = AppState::ATLAS_SIDE;
+  destination.h = AppState::ATLAS_SIDE;
   destination.d = 1;
   SDL_UploadToGPUTexture(copypass, &source, &destination, false);
 }
@@ -1894,7 +1885,7 @@ const FT_Glyph_Metrics &AppState::freetype_codepoint_metrics(FT_ULong codepoint)
   return face->glyph->metrics;
 }
 
-void GlyphSequencer::text_reflow(std::string_view textView)
+bool GlyphSequencer::text_reshape(std::string_view textView)
 {
   hb_buffer_reset(harfbuzz_buffer.get());
   hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
@@ -1904,7 +1895,11 @@ void GlyphSequencer::text_reflow(std::string_view textView)
   hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
   codepoint_infos = {std::from_range, emitCodepointInfo(textView)};
   glyph_steps = {std::from_range, emit_glyph_steps()};
-  verify_atlas_cache();
+  return verify_atlas_cache();
+}
+
+void GlyphSequencer::text_reflow()
+{
   glyph_geometries.clear();
   populate_glyph_geometries();
   cluster_sections = make_cluster_sections();
@@ -1983,13 +1978,21 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     AppState *app = new AppState{};
     *appstate = app;
     app->instantiate(globalFTLibrary);
-    app->caption_sequencer.text_reflow(app->caption_string);
-    const GlyphSequencer &sequencer = app->caption_sequencer;
+    bool atlasInserted{};
+    for (GlyphSequencer &sequencer : app->glyph_sequencers)
+      atlasInserted |= sequencer.text_reshape(app->caption_string);
+    if (atlasInserted)
+    {
+      app->pack_atlas();
+      app->copypass_tasks.push_back(CopyGlyphAtlas{});
+    }
+    for (GlyphSequencer &sequencer : app->glyph_sequencers)
+      sequencer.text_reflow();
     auto [windowW, windowH] = getWindowSizeInPixels(app->main_window.get());
-    app->caption_x =
-        static_cast<double>(windowW) * 0.5 - sequencer.measured_w() * 0.5;
-    app->caption_y =
-        static_cast<double>(windowH) * 0.5 - sequencer.measured_h() * 0.5;
+    app->caption_x = static_cast<double>(windowW) * 0.5 -
+                     app->caption_sequencer.measured_w() * 0.5;
+    app->caption_y = static_cast<double>(windowH) * 0.5 -
+                     app->caption_sequencer.measured_h() * 0.5;
     return SDL_APP_CONTINUE;
   }
   catch (const std::runtime_error &e)
