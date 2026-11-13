@@ -874,7 +874,7 @@ struct CopyGlyphVertices
 };
 struct CopySelectionAreas
 {
-  AppState *app;
+  std::uint32_t num_selections;
 };
 using CopypassTask =
     std::variant<CopyGlyphAtlas, CopyGlyphVertices, CopySelectionAreas>;
@@ -883,6 +883,7 @@ struct CopypassTaskVisitor
   void operator()(CopyGlyphAtlas task) const;
   void operator()(CopyGlyphVertices task) const;
   void operator()(CopySelectionAreas task) const;
+  AppState *app;
   SDL_GPUCopyPass *copypass;
 };
 
@@ -961,7 +962,7 @@ struct AppState
   UniqueGPUTransferBuffer selection_transfer;
   std::uint32_t selection_instances_capacity = 0;
 
-  void verify_selection_capacity();
+  void verify_selection_capacity(std::uint32_t numSelections);
   void transfer_selection_areas();
   void selection_reflow();
 
@@ -1000,7 +1001,7 @@ void GPUCommandSequencer::issue_copy_pass()
     return;
   UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
   for (const CopypassTask &copypassTask : app->copypass_tasks)
-    copypassTask.visit(CopypassTaskVisitor{copypass.get()});
+    copypassTask.visit(CopypassTaskVisitor{app, copypass.get()});
   app->copypass_tasks.clear();
 }
 
@@ -1914,26 +1915,24 @@ void GlyphSequencer::text_reflow(std::string_view textView)
 void CopypassTaskVisitor::operator()(CopySelectionAreas task) const
 {
   SDL_GPUTransferBufferLocation source{
-      .transfer_buffer = task.app->selection_transfer.get(), .offset = 0};
+      .transfer_buffer = app->selection_transfer.get(), .offset = 0};
   SDL_GPUBufferRegion destination{};
-  destination.buffer = task.app->selection_instances.get();
-  std::uint32_t numSelections = static_cast<std::uint32_t>(
-      std::ranges::distance(task.app->selection_slots | std::views::join));
-  destination.size = numSelections * sizeof(RectInstanceData);
+  destination.buffer = app->selection_instances.get();
+  destination.size = task.num_selections * sizeof(RectInstanceData);
   SDL_UploadToGPUBuffer(copypass, &source, &destination, false);
 }
 
 void AppState::selection_reflow()
 {
-  verify_selection_capacity();
-  transfer_selection_areas();
-  copypass_tasks.push_back(CopySelectionAreas{this});
-}
-
-void AppState::verify_selection_capacity()
-{
   std::uint32_t numSelections = static_cast<std::uint32_t>(
       std::ranges::distance(selection_slots | std::views::join));
+  verify_selection_capacity(numSelections);
+  transfer_selection_areas();
+  copypass_tasks.push_back(CopySelectionAreas{numSelections});
+}
+
+void AppState::verify_selection_capacity(std::uint32_t numSelections)
+{
   std::uint32_t instancesSize = numSelections * sizeof(RectInstanceData);
   if (instancesSize <= selection_instances_capacity)
     return;
