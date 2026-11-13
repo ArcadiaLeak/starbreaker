@@ -1283,16 +1283,12 @@ std::uint32_t SelectionEventHandler::find_unoccupied_slot()
   { return not slot.has_value(); };
   auto selectionIt =
       std::ranges::find_if(app->selection_slots, selectionPredicate);
-  std::ptrdiff_t selectionIdx{};
-  if (selectionIt != app->selection_slots.end())
-    selectionIdx = std::distance(app->selection_slots.begin(), selectionIt);
-  else
-  {
-    std::optional<std::array<double, 4>> &trailing =
-        app->selection_slots.emplace_back(std::array<double, 4>{});
-    selectionIdx = std::distance(app->selection_slots.data(), &trailing);
-  }
-  return static_cast<std::uint32_t>(selectionIdx);
+  if (selectionIt == app->selection_slots.end())
+    selectionIt =
+        app->selection_slots.insert(app->selection_slots.end(), std::nullopt);
+  selectionIt->emplace();
+  return static_cast<std::uint32_t>(
+      std::distance(app->selection_slots.begin(), selectionIt));
 }
 
 void SelectionEventHandler::copy_drag_state()
