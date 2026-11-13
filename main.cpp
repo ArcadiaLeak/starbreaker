@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <flat_map>
 #include <format>
 #include <generator>
@@ -779,8 +778,8 @@ uTextLoop:
 
 struct GlyphAtlasItem
 {
-  UniqueFreetypeGlyph freetype_glyph;
-  std::array<std::uint32_t, 3> *atlas_position;
+  UniqueFreetypeGlyph ftglyph;
+  std::array<std::uint32_t, 3> atlas_position;
   double lsb_delta, rsb_delta;
 };
 
@@ -823,12 +822,10 @@ struct GlyphSequencer
 {
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
-  std::vector<CodepointInfo> codepoint_infos;
 
   static constexpr std::uint32_t ATLAS_SIDE = 1024;
   static constexpr std::uint32_t ATLAS_PADDING = 1;
   GlyphAtlasCache atlas_cache;
-  std::deque<std::array<std::uint32_t, 3>> atlas_positions;
   UniqueGPUTransferBuffer atlas_transfer;
   UniqueGPUTexture atlas_texture;
 
@@ -839,12 +836,12 @@ struct GlyphSequencer
   double measured_h() const noexcept { return y_max - y_min; }
 
   std::vector<GlyphGeometry> glyph_geometries;
-  void populate_glyph_geometries();
-
   std::vector<GlyphCaretStep> glyph_steps;
-  std::generator<GlyphCaretStep> emit_glyph_steps();
-
   std::vector<GlyphClusterSection> cluster_sections;
+  std::vector<CodepointInfo> codepoint_infos;
+
+  void populate_glyph_geometries();
+  std::generator<GlyphCaretStep> emit_glyph_steps();
   std::vector<GlyphClusterSection> make_cluster_sections();
 
   UniqueGPUBuffer instance_buffer;
@@ -1518,19 +1515,18 @@ void GlyphSequencer::verify_atlas_cache()
     const GlyphAtlasLabel cacheLabel{glyphInfo.codepoint, step.subpixel_phase};
     if (atlas_cache.contains(cacheLabel))
       continue;
-    UniqueFreetypeGlyph glyph =
+    UniqueFreetypeGlyph ftglyph =
         app->freetype_load_glyph(glyphInfo.codepoint, step.subpixel_phase);
-    const FT_Bitmap &bitmap = asBitmapGlyph(glyph.get())->bitmap;
+    const FT_Bitmap &bitmap = asBitmapGlyph(ftglyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
-    GlyphAtlasItem &atlasItem = atlas_cache[cacheLabel];
-    atlasItem.freetype_glyph = std::move(glyph);
-    atlasItem.atlas_position = &atlas_positions.emplace_back();
     FT_Face freetypeFace = hb_ft_font_get_ft_face(app->harfbuzz_font.get());
+    GlyphAtlasItem &atlasItem = atlas_cache[cacheLabel];
     atlasItem.lsb_delta =
         static_cast<double>(freetypeFace->glyph->lsb_delta) / 64.0;
     atlasItem.rsb_delta =
         static_cast<double>(freetypeFace->glyph->rsb_delta) / 64.0;
+    atlasItem.ftglyph = std::move(ftglyph);
     everInserted = true;
   }
   if (everInserted)
@@ -1542,74 +1538,78 @@ void GlyphSequencer::verify_atlas_cache()
 
 void GlyphSequencer::pack_atlas()
 {
-  struct CacheEntryView
+  struct AtlasColumnItem
   {
-    hb_codepoint_t codepoint;
-    FT_Glyph freetype_glyph;
-    std::array<std::uint32_t, 3> *atlas_position;
-    std::uint32_t accumulated_x;
+    GlyphAtlasLabel atlas_label;
+    std::uint32_t atlas_offset;
   };
-  auto entryProject = [](const auto &cacheEntry)
+  auto atlasLabelProj = [](const GlyphAtlasLabel &atlasLabel)
+  { return AtlasColumnItem{.atlas_label = atlasLabel}; };
+  std::vector<AtlasColumnItem> atlasColumnItems =
+      atlas_cache.keys() | std::views::transform(atlasLabelProj) |
+      std::ranges::to<std::vector<AtlasColumnItem>>();
+  auto atlasGlyphH = [this](const AtlasColumnItem &columnItem)
   {
-    const auto &[cacheLabel, cacheItem] = cacheEntry;
-    return CacheEntryView{.codepoint = cacheLabel.first,
-                          .freetype_glyph = cacheItem.freetype_glyph.get(),
-                          .atlas_position = cacheItem.atlas_position,
-                          .accumulated_x = 0};
+    const GlyphAtlasItem &atlasItem = atlas_cache.at(columnItem.atlas_label);
+    return asBitmapGlyph(atlasItem.ftglyph.get())->bitmap.rows;
   };
-  auto entriesView = atlas_cache | std::views::transform(entryProject);
-  std::vector<CacheEntryView> entriesViewVec{std::from_range, entriesView};
-  auto rowsProject = [](const CacheEntryView &entryView)
-  { return asBitmapGlyph(entryView.freetype_glyph)->bitmap.rows; };
-  std::ranges::sort(entriesViewVec, std::ranges::greater{}, rowsProject);
-  for (std::uint32_t accumulatedX{}; CacheEntryView &entryView : entriesViewVec)
+  std::ranges::sort(atlasColumnItems, std::ranges::greater{}, atlasGlyphH);
+  std::uint32_t accumulatedX{};
+  for (AtlasColumnItem &columnItem : atlasColumnItems)
   {
-    std::uint32_t bitmapWidth =
-        asBitmapGlyph(entryView.freetype_glyph)->bitmap.width;
-    if (bitmapWidth > ATLAS_SIDE)
+    FT_BitmapGlyph bitmapGlyph =
+        asBitmapGlyph(atlas_cache.at(columnItem.atlas_label).ftglyph.get());
+    std::uint32_t bitmapW = bitmapGlyph->bitmap.width;
+    if (bitmapW > ATLAS_SIDE)
       continue;
-    entryView.accumulated_x =
-        accumulatedX + bitmapWidth > ATLAS_SIDE ? 0 : accumulatedX;
-    accumulatedX = entryView.accumulated_x + bitmapWidth + ATLAS_PADDING;
+    columnItem.atlas_offset =
+        accumulatedX + bitmapW > ATLAS_SIDE ? 0 : accumulatedX;
+    accumulatedX = columnItem.atlas_offset + bitmapW + ATLAS_PADDING;
   }
-  struct CacheShelfView
+  struct GlyphAtlasShelf
   {
-    std::vector<CacheEntryView> entries;
-    std::uint32_t accumulated_y;
+    std::vector<AtlasColumnItem> children;
+    std::uint32_t atlas_offset;
   };
   auto shelfPredicate =
-      [](const CacheEntryView &viewA, const CacheEntryView &viewB)
-  { return viewA.accumulated_x < viewB.accumulated_x; };
-  auto shelfProject = [](auto entriesSubrange)
+      [](const AtlasColumnItem &viewA, const AtlasColumnItem &viewB)
+  { return viewA.atlas_offset < viewB.atlas_offset; };
+  auto shelfProject = [](auto shelfItems)
   {
-    std::vector<CacheEntryView> entries{std::from_range, entriesSubrange};
-    return CacheShelfView{.entries = std::move(entries), .accumulated_y = 0};
+    GlyphAtlasShelf atlasShelf{};
+    atlasShelf.children = {std::from_range, shelfItems};
+    return atlasShelf;
   };
-  auto shelvesView = entriesViewVec | std::views::chunk_by(shelfPredicate) |
-                     std::views::transform(shelfProject);
-  std::vector<CacheShelfView> shelvesViewVec{std::from_range, shelvesView};
-  for (std::uint32_t accumulatedY{}; CacheShelfView &shelfView : shelvesViewVec)
+  std::vector<GlyphAtlasShelf> atlasShelves =
+      atlasColumnItems | std::views::chunk_by(shelfPredicate) |
+      std::views::transform(shelfProject) |
+      std::ranges::to<std::vector<GlyphAtlasShelf>>();
+  std::uint32_t accumulatedY{};
+  for (GlyphAtlasShelf &atlasShelf : atlasShelves)
   {
-    std::uint32_t shelfHeight =
-        asBitmapGlyph(shelfView.entries.front().freetype_glyph)->bitmap.rows;
-    if (shelfHeight > ATLAS_SIDE)
+    const GlyphAtlasItem &atlasItem =
+        atlas_cache.at(atlasShelf.children.front().atlas_label);
+    std::uint32_t atlasShelfH =
+        asBitmapGlyph(atlasItem.ftglyph.get())->bitmap.rows;
+    if (atlasShelfH > ATLAS_SIDE)
       continue;
-    shelfView.accumulated_y =
-        accumulatedY + shelfHeight > ATLAS_SIDE ? 0 : accumulatedY;
-    accumulatedY = shelfView.accumulated_y + shelfHeight + ATLAS_PADDING;
+    atlasShelf.atlas_offset =
+        accumulatedY + atlasShelfH > ATLAS_SIDE ? 0 : accumulatedY;
+    accumulatedY = atlasShelf.atlas_offset + atlasShelfH + ATLAS_PADDING;
   }
   auto pagePredicate =
-      [](const CacheShelfView &viewA, const CacheShelfView &viewB)
-  { return viewA.accumulated_y < viewB.accumulated_y; };
-  auto pagesView = shelvesViewVec | std::views::chunk_by(pagePredicate) |
-                   std::views::enumerate;
-  for (const auto &[pageIdx, shelves] : pagesView)
-    for (const CacheShelfView &shelfView : shelves)
-      for (const CacheEntryView &entryView : shelfView.entries)
+      [](const GlyphAtlasShelf &viewA, const GlyphAtlasShelf &viewB)
+  { return viewA.atlas_offset < viewB.atlas_offset; };
+  auto atlasPages = atlasShelves | std::views::chunk_by(pagePredicate) |
+                    std::views::enumerate;
+  for (const auto &[pageIdx, pageShelves] : atlasPages)
+    for (const GlyphAtlasShelf &atlasShelf : pageShelves)
+      for (const AtlasColumnItem &shelfChild : atlasShelf.children)
       {
-        auto &[atlasX, atlasY, atlasPage] = *entryView.atlas_position;
-        atlasX = entryView.accumulated_x;
-        atlasY = shelfView.accumulated_y;
+        GlyphAtlasItem &atlasItem = atlas_cache.at(shelfChild.atlas_label);
+        auto &[atlasX, atlasY, atlasPage] = atlasItem.atlas_position;
+        atlasX = shelfChild.atlas_offset;
+        atlasY = atlasShelf.atlas_offset;
         atlasPage = static_cast<std::uint32_t>(pageIdx);
       }
   GlyphAtlasCopier atlasCopier{};
@@ -1622,8 +1622,8 @@ void GlyphSequencer::pack_atlas()
 
 void GlyphAtlasCopier::copy_bitmap(const GlyphAtlasItem &cacheItem)
 {
-  atlas_position = cacheItem.atlas_position;
-  bitmap = &asBitmapGlyph(cacheItem.freetype_glyph.get())->bitmap;
+  atlas_position = &cacheItem.atlas_position;
+  bitmap = &asBitmapGlyph(cacheItem.ftglyph.get())->bitmap;
   for (std::uint32_t row = 0; row < bitmap->rows; ++row)
     copy_bitmap_row(row);
 }
@@ -1720,10 +1720,9 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
     double clusterR = std::get<0>(geometriesFinal->bbox) + geometriesFinal->w;
     if (geometriesFirst->atlas_label.has_value())
     {
-      const GlyphAtlasLabel &atlasLabel = *geometriesFirst->atlas_label;
-      const GlyphAtlasItem &atlasItem = atlas_cache[atlasLabel];
-      FT_BitmapGlyph bitmapGlyph =
-          asBitmapGlyph(atlasItem.freetype_glyph.get());
+      const GlyphAtlasItem &atlasItem =
+          atlas_cache.at(*geometriesFirst->atlas_label);
+      FT_BitmapGlyph bitmapGlyph = asBitmapGlyph(atlasItem.ftglyph.get());
       clusterL -= static_cast<double>(bitmapGlyph->left);
     }
     std::ranges::transform_view geometriesTop{
@@ -1799,8 +1798,8 @@ void GlyphSequencer::populate_glyph_geometries()
     GlyphGeometry &geometry = glyph_geometries.emplace_back();
     geometry.atlas_label = atlasLabel;
 
-    const GlyphAtlasItem &atlasItem = atlas_cache[atlasLabel];
-    FT_BitmapGlyph bitmapGlyph = asBitmapGlyph(atlasItem.freetype_glyph.get());
+    FT_BitmapGlyph bitmapGlyph =
+        asBitmapGlyph(atlas_cache.at(atlasLabel).ftglyph.get());
     geometry.w = static_cast<double>(bitmapGlyph->bitmap.width);
     geometry.h = static_cast<double>(bitmapGlyph->bitmap.rows);
 
@@ -1811,7 +1810,8 @@ void GlyphSequencer::populate_glyph_geometries()
         step.vert_offset - static_cast<double>(bitmapGlyph->top);
     std::get<3>(geometry.bbox) = std::get<2>(geometry.bbox) + geometry.h;
 
-    const auto &[atlasX, atlasY, atlasPage] = *atlasItem.atlas_position;
+    const auto &[atlasX, atlasY, atlasPage] =
+        atlas_cache.at(atlasLabel).atlas_position;
     constexpr double SIDE_DIVISOR = static_cast<double>(ATLAS_SIDE);
     double atlasU = static_cast<double>(atlasX) / SIDE_DIVISOR;
     double atlasV = static_cast<double>(atlasY) / SIDE_DIVISOR;
