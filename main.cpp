@@ -1431,7 +1431,9 @@ void SelectionEventHandler::handle_mouse_motion(
 {
   if (not drag_state.has_value())
     return;
-  auto [captionX, captionY, captionW, captionH] = app->caption_bbox();
+  const GlyphSequencer &sequencer =
+      app->glyph_sequencers[drag_state->sequencer_idx];
+  auto [captionX, captionY, captionW, captionH] = sequencer.bounding_box();
   float captionMin = static_cast<float>(captionX);
   float captionMax = static_cast<float>(captionX + captionW);
   std::get<1>(drag_state->mouse_segment) =
@@ -1456,10 +1458,13 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_WINDOW_RESIZED:
-    caption_x = static_cast<double>(event->window.data1) * 0.5 -
-                caption_sequencer.measured_w() * 0.5;
-    caption_y = static_cast<double>(event->window.data2) * 0.5 -
-                caption_sequencer.measured_h() * 0.5;
+    for (GlyphSequencer &sequencer : glyph_sequencers)
+    {
+      sequencer.translate_x = static_cast<double>(event->window.data1) * 0.5 -
+                              sequencer.measured_w() * 0.5;
+      sequencer.translate_y = static_cast<double>(event->window.data2) * 0.5 -
+                              sequencer.measured_h() * 0.5;
+    }
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_QUIT:
@@ -2003,10 +2008,13 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     for (GlyphSequencer &sequencer : app->glyph_sequencers)
       sequencer.text_reflow();
     auto [windowW, windowH] = getWindowSizeInPixels(app->main_window.get());
-    app->caption_x = static_cast<double>(windowW) * 0.5 -
-                     app->caption_sequencer.measured_w() * 0.5;
-    app->caption_y = static_cast<double>(windowH) * 0.5 -
-                     app->caption_sequencer.measured_h() * 0.5;
+    for (GlyphSequencer &sequencer : app->glyph_sequencers)
+    {
+      sequencer.translate_x =
+          static_cast<double>(windowW) * 0.5 - sequencer.measured_w() * 0.5;
+      sequencer.translate_y =
+          static_cast<double>(windowH) * 0.5 - sequencer.measured_h() * 0.5;
+    }
     return SDL_APP_CONTINUE;
   }
   catch (const std::runtime_error &e)
