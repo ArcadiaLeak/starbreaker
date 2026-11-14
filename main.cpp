@@ -1122,7 +1122,9 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
     rectUni.translate[0] =
         static_cast<float>(std::trunc(shapeItem->translate_x));
     rectUni.translate[1] =
-        static_cast<float>(std::trunc(shapeItem->translate_y));
+        static_cast<float>(swapchain_h) -
+        static_cast<float>(std::trunc(shapeItem->translate_y)) -
+        static_cast<float>(shapeItem->measured_h());
     rectUni.viewport[0] = static_cast<float>(swapchain_w);
     rectUni.viewport[1] = static_cast<float>(swapchain_h);
     SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
