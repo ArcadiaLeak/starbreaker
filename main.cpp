@@ -822,10 +822,12 @@ struct GlyphSequencer
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
 
+  double translate_x = 0, translate_y = 0;
   double x_min = 0, x_max = 0;
   double y_min = 0, y_max = 0;
   double measured_w() const noexcept { return x_max - x_min; }
   double measured_h() const noexcept { return y_max - y_min; }
+  std::array<double, 4> bounding_box() const noexcept;
 
   std::vector<GlyphGeometry> glyph_geometries;
   std::vector<GlyphCaretStep> glyph_steps;
@@ -850,7 +852,11 @@ struct GlyphSequencer
   bool text_reshape(std::string_view);
   void text_reflow();
   std::array<double, 4> text_measure(std::pair<std::uint32_t, double>,
-                                     std::pair<std::uint32_t, double>, bool);
+                                     std::pair<std::uint32_t, double>,
+                                     bool) const;
+  std::uint32_t find_codepoint_offset(double screenX) const;
+  std::pair<std::uint32_t, double>
+  find_cluster_offset(std::uint32_t textOffset) const;
 };
 
 struct CopyGlyphAtlas
@@ -900,7 +906,7 @@ struct GPURenderSequencer
 
 struct SelectionDragState
 {
-  std::uint32_t selection_idx;
+  std::uint32_t selection_idx, sequencer_idx;
   std::array<double, 2> mouse_segment;
 };
 
@@ -911,8 +917,6 @@ struct SelectionEventHandler
 
   std::uint32_t find_unoccupied_slot();
   void copy_drag_state();
-  std::uint32_t find_codepoint_offset(double);
-  std::pair<std::uint32_t, double> find_cluster_offset(std::uint32_t);
 
   void handle_mouse_button_down(const SDL_MouseButtonEvent &event);
   void handle_mouse_button_up(const SDL_MouseButtonEvent &event);
@@ -928,7 +932,6 @@ struct AppState
   UniqueWindowForGPUDevice main_window_for_gpu_device;
 
   std::string caption_string = "Hello figure kerning Text";
-  double caption_x = 0, caption_y = 0;
 
   static constexpr std::uint32_t ATLAS_SIDE = 1024;
   static constexpr std::uint32_t ATLAS_PADDING = 1;
@@ -971,8 +974,6 @@ struct AppState
 
   void instantiate(FT_Library library);
   void pack_atlas();
-
-  std::array<double, 4> caption_bbox() noexcept;
 };
 
 void AppState::instantiate(FT_Library library)
@@ -1094,35 +1095,41 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
   SDL_SetGPUScissor(renderPass.get(), &scissor);
 
   SDL_BindGPUGraphicsPipeline(renderPass.get(), pipeline);
-  SDL_GPUBufferBinding instanceBinding{
-      app->caption_sequencer.instance_buffer.get(), 0};
-  SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
   SDL_GPUTextureSamplerBinding samplerBinding{};
-  samplerBinding.texture = app->caption_sequencer.atlas_texture.get();
+  samplerBinding.texture = app->atlas_texture.get();
   samplerBinding.sampler = app->sampler.get();
   SDL_BindGPUFragmentSamplers(renderPass.get(), 0, &samplerBinding, 1);
 
-  struct alignas(16) RectUniform
-  {
-    float viewport[2];
-    float translate[2];
-  };
-  RectUniform rectUni{};
-  rectUni.viewport[0] = static_cast<float>(swapchain_w);
-  rectUni.viewport[1] = static_cast<float>(swapchain_h);
-  rectUni.translate[0] = static_cast<float>(std::trunc(app->caption_x));
-  rectUni.translate[1] = static_cast<float>(std::trunc(app->caption_y));
-  SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
-  struct BlitUniform
+  struct alignas(16) BlitUniform
   {
     float tint[4];
   };
   BlitUniform blit{.tint = {1.0f, 1.0f, 1.0f, 1.0f}};
   SDL_PushGPUFragmentUniformData(cmd, 0, &blit, sizeof(BlitUniform));
 
-  std::uint32_t numInstances =
-      hb_buffer_get_length(app->caption_sequencer.harfbuzz_buffer.get());
-  SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
+  struct alignas(16) RectUniform
+  {
+    float viewport[2];
+    float translate[2];
+  };
+  for (const GlyphSequencer &sequencer : app->glyph_sequencers)
+  {
+    SDL_GPUBufferBinding instanceBinding{sequencer.instance_buffer.get(), 0};
+    SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
+
+    RectUniform rectUni{};
+    rectUni.translate[0] =
+        static_cast<float>(std::trunc(sequencer.translate_x));
+    rectUni.translate[1] =
+        static_cast<float>(std::trunc(sequencer.translate_y));
+    rectUni.viewport[0] = static_cast<float>(swapchain_w);
+    rectUni.viewport[1] = static_cast<float>(swapchain_h);
+    SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
+
+    std::uint32_t numInstances =
+        hb_buffer_get_length(sequencer.harfbuzz_buffer.get());
+    SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
+  }
 }
 
 void GPURenderSequencer::verify_storage_textures()
@@ -1258,16 +1265,16 @@ SDL_AppResult AppState::iterate() noexcept
   }
 }
 
-std::array<double, 4> AppState::caption_bbox() noexcept
+std::array<double, 4> GlyphSequencer::bounding_box() const noexcept
 {
   static constexpr double PADDING_X = 1;
   static constexpr double PADDING_Y = 4;
-  std::array<double, 4> captionBox{};
-  std::get<0>(captionBox) = caption_x + caption_sequencer.x_min - PADDING_X;
-  std::get<1>(captionBox) = caption_y + caption_sequencer.y_max - PADDING_Y;
-  std::get<2>(captionBox) = caption_sequencer.measured_w() + PADDING_X * 2;
-  std::get<3>(captionBox) = caption_sequencer.measured_h() + PADDING_Y * 2;
-  return captionBox;
+  std::array<double, 4> boundingBox{};
+  std::get<0>(boundingBox) = translate_x + x_min - PADDING_X;
+  std::get<1>(boundingBox) = translate_y + y_max - PADDING_Y;
+  std::get<2>(boundingBox) = measured_w() + PADDING_X * 2;
+  std::get<3>(boundingBox) = measured_h() + PADDING_Y * 2;
+  return boundingBox;
 }
 
 std::uint32_t SelectionEventHandler::find_unoccupied_slot()
@@ -1292,7 +1299,8 @@ void SelectionEventHandler::copy_drag_state()
   selectionX = std::min(mouseA, mouseB);
   constexpr double MIN_SELECTION_W = 2.0;
   selectionW = std::max(std::abs(mouseA - mouseB), MIN_SELECTION_W);
-  auto [captionX, captionY, captionW, captionH] = app->caption_bbox();
+  auto [captionX, captionY, captionW, captionH] =
+      app->glyph_sequencers[drag_state->sequencer_idx].bounding_box();
   selectionY = captionY;
   selectionH = captionH;
   app->selection_areas_flag = true;
@@ -1312,31 +1320,35 @@ void SelectionEventHandler::handle_mouse_button_down(
 {
   for (std::optional<std::array<double, 4>> &selection : app->selection_slots)
     selection.reset();
-  if (not isPointInside({event.x, event.y}, app->caption_bbox()))
-    return;
-  drag_state.emplace();
-  drag_state->selection_idx = find_unoccupied_slot();
-  std::get<0>(drag_state->mouse_segment) = event.x;
-  std::get<1>(drag_state->mouse_segment) = event.x;
-  copy_drag_state();
+  for (const GlyphSequencer &sequencer : app->glyph_sequencers)
+    if (isPointInside({event.x, event.y}, sequencer.bounding_box()))
+    {
+      drag_state.emplace();
+      drag_state->sequencer_idx =
+          static_cast<std::uint32_t>(&sequencer - app->glyph_sequencers.data());
+      drag_state->selection_idx = find_unoccupied_slot();
+      std::get<0>(drag_state->mouse_segment) = event.x;
+      std::get<1>(drag_state->mouse_segment) = event.x;
+      copy_drag_state();
+      break;
+    }
 }
 
-std::uint32_t SelectionEventHandler::find_codepoint_offset(double mouseX)
+std::uint32_t GlyphSequencer::find_codepoint_offset(double screenX) const
 {
   std::size_t captionOffset{app->caption_string.size()};
-  for (const GlyphClusterSection &clusterSection :
-       app->caption_sequencer.cluster_sections)
+  for (const GlyphClusterSection &clusterSection : cluster_sections)
   {
     double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
     double clusterR = std::get<1>(clusterSection.geometries.back().bbox);
-    double codepointCount =
+    double numCodepoints =
         static_cast<double>(clusterSection.codepoint_infos.size());
-    double mouseClusterX = std::max(mouseX, clusterL) - clusterL;
-    double mouseFraction =
-        std::round(mouseClusterX / (clusterR - clusterL) * codepointCount);
-    if (mouseFraction >= codepointCount)
+    double clusterHorz = std::max(screenX, clusterL) - clusterL;
+    double approxCodepointIdx =
+        std::round(clusterHorz / (clusterR - clusterL) * numCodepoints);
+    if (approxCodepointIdx >= numCodepoints)
       continue;
-    std::uint32_t codepointIdx = static_cast<std::uint32_t>(mouseFraction);
+    std::uint32_t codepointIdx = static_cast<std::uint32_t>(approxCodepointIdx);
     const CodepointInfo &codepointInfo =
         clusterSection.codepoint_infos.at(codepointIdx);
     captionOffset = codepointInfo.byte_offset;
@@ -1346,11 +1358,11 @@ std::uint32_t SelectionEventHandler::find_codepoint_offset(double mouseX)
 }
 
 std::pair<std::uint32_t, double>
-SelectionEventHandler::find_cluster_offset(std::uint32_t textOffset)
+GlyphSequencer::find_cluster_offset(std::uint32_t textOffset) const
 {
   std::pair<std::uint32_t, double> clusterOffset{};
   for (const auto &[enumerationIdx, clusterSection] :
-       app->caption_sequencer.cluster_sections | std::views::enumerate)
+       cluster_sections | std::views::enumerate)
   {
     auto findPred = [textOffset](std::uint32_t offset)
     { return offset == textOffset; };
@@ -1373,22 +1385,24 @@ void SelectionEventHandler::handle_mouse_button_up(
 {
   if (not drag_state.has_value())
     return;
-  auto [captionX, captionY, captionW, captionH] = app->caption_bbox();
+  const GlyphSequencer &sequencer =
+      app->glyph_sequencers[drag_state->sequencer_idx];
+  auto [captionX, captionY, captionW, captionH] = sequencer.bounding_box();
   std::array<double, 2> screenX{drag_state->mouse_segment};
   std::ranges::sort(screenX);
 
   double startX = std::get<0>(screenX) - captionX;
-  std::uint32_t codepointStart = find_codepoint_offset(startX);
+  std::uint32_t codepointStart = sequencer.find_codepoint_offset(startX);
   std::pair<std::uint32_t, double> clusterStart =
-      find_cluster_offset(codepointStart);
+      sequencer.find_cluster_offset(codepointStart);
 
   double finalX = std::get<1>(screenX) - captionX;
-  std::uint32_t codepointFinal = find_codepoint_offset(finalX);
+  std::uint32_t codepointFinal = sequencer.find_codepoint_offset(finalX);
   std::pair<std::uint32_t, double> clusterFinal =
-      find_cluster_offset(codepointFinal);
+      sequencer.find_cluster_offset(codepointFinal);
 
   auto [measureL, measureR, measureT, measureB] =
-      app->caption_sequencer.text_measure(clusterStart, clusterFinal, true);
+      sequencer.text_measure(clusterStart, clusterFinal, true);
   double measureW = measureR - measureL;
   double measureH = measureB - measureT;
 
@@ -1401,9 +1415,9 @@ void SelectionEventHandler::handle_mouse_button_up(
     static constexpr double PADDING_X = 1;
     static constexpr double PADDING_Y = 4;
     auto &[selectionX, selectionY, selectionW, selectionH] = *selection;
-    selectionX = app->caption_x + measureL - PADDING_X;
-    selectionY = app->caption_y + app->caption_sequencer.measured_h() +
-                 measureT - PADDING_Y;
+    selectionX = sequencer.translate_x + measureL - PADDING_X;
+    selectionY =
+        sequencer.translate_y + sequencer.measured_h() + measureT - PADDING_Y;
     selectionW = measureW + PADDING_X * 2;
     selectionH = measureH + PADDING_Y * 2;
   }
@@ -1649,7 +1663,7 @@ constexpr double MIN_SAFE_INTEGER = -1.0 * MAX_SAFE_INTEGER;
 std::array<double, 4>
 GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
                              std::pair<std::uint32_t, double> final,
-                             bool finalBound)
+                             bool finalBound) const
 {
   std::array<double, 4> textMetrics{};
   auto &[textL, textR, textT, textB] = textMetrics;
