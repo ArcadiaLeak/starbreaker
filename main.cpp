@@ -1119,14 +1119,14 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
     SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
 
     RectUniform rectUni{};
-    rectUni.translate[0] =
-        static_cast<float>(std::trunc(shapeItem->translate_x));
-    rectUni.translate[1] =
-        static_cast<float>(swapchain_h) -
-        static_cast<float>(std::trunc(shapeItem->translate_y)) -
-        static_cast<float>(shapeItem->measured_h());
     rectUni.viewport[0] = static_cast<float>(swapchain_w);
     rectUni.viewport[1] = static_cast<float>(swapchain_h);
+    rectUni.translate[0] =
+        static_cast<float>(std::trunc(shapeItem->translate_x));
+    double vertTranslate = static_cast<double>(swapchain_h) -
+                           shapeItem->translate_y - shapeItem->measured_h();
+    rectUni.translate[1] = static_cast<float>(std::trunc(vertTranslate));
+
     SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
 
     std::uint32_t numInstances =
