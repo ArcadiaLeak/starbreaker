@@ -817,7 +817,7 @@ struct GlyphCaretStep
 };
 
 struct AppState;
-struct GlyphSequencer
+struct GlyphShapeItem
 {
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
@@ -864,7 +864,7 @@ struct CopyGlyphAtlas
 };
 struct CopyGlyphVertices
 {
-  GlyphSequencer *sequencer;
+  GlyphShapeItem *shape_item;
 };
 struct CopySelectionAreas
 {
@@ -906,7 +906,7 @@ struct GPURenderSequencer
 
 struct SelectionDragState
 {
-  std::uint32_t selection_idx, sequencer_idx;
+  std::uint32_t selection_idx, shape_item_idx;
   std::array<double, 2> mouse_segment;
 };
 
@@ -938,7 +938,7 @@ struct AppState
   UniqueGPUTransferBuffer atlas_transfer;
   UniqueGPUTexture atlas_texture;
   GlyphAtlasCache atlas_cache;
-  std::vector<GlyphSequencer> glyph_sequencers;
+  std::vector<GlyphShapeItem> glyph_shape_items;
 
   UniqueFreetypeGlyph freetype_load_glyph(hb_codepoint_t glyphid, int phase);
   const FT_Glyph_Metrics &freetype_codepoint_metrics(FT_ULong codepoint);
@@ -1007,7 +1007,7 @@ void AppState::instantiate(FT_Library library)
       device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
   const FT_Glyph_Metrics &haitch_metrics = freetype_codepoint_metrics(72);
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
-  glyph_sequencers.emplace_back(this).instantiate(main_window.get());
+  glyph_shape_items.emplace_back(this).instantiate(main_window.get());
 }
 
 void GPUCommandSequencer::issue_copy_pass()
@@ -1023,11 +1023,11 @@ void GPUCommandSequencer::issue_copy_pass()
 void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const
 {
   SDL_GPUTransferBufferLocation src{
-      .transfer_buffer = task.sequencer->instance_transfer.get(), .offset = 0};
+      .transfer_buffer = task.shape_item->instance_transfer.get(), .offset = 0};
   std::uint32_t bufferSize{static_cast<std::uint32_t>(
-      hb_buffer_get_length(task.sequencer->harfbuzz_buffer.get()) *
+      hb_buffer_get_length(task.shape_item->harfbuzz_buffer.get()) *
       sizeof(RectInstanceData))};
-  SDL_GPUBufferRegion dst{.buffer = task.sequencer->instance_buffer.get(),
+  SDL_GPUBufferRegion dst{.buffer = task.shape_item->instance_buffer.get(),
                           .offset = 0,
                           .size = bufferSize};
   SDL_UploadToGPUBuffer(copypass, &src, &dst, false);
@@ -1112,22 +1112,22 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
     float viewport[2];
     float translate[2];
   };
-  for (const GlyphSequencer &sequencer : app->glyph_sequencers)
+  for (const GlyphShapeItem &shapeItem : app->glyph_shape_items)
   {
-    SDL_GPUBufferBinding instanceBinding{sequencer.instance_buffer.get(), 0};
+    SDL_GPUBufferBinding instanceBinding{shapeItem.instance_buffer.get(), 0};
     SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
 
     RectUniform rectUni{};
     rectUni.translate[0] =
-        static_cast<float>(std::trunc(sequencer.translate_x));
+        static_cast<float>(std::trunc(shapeItem.translate_x));
     rectUni.translate[1] =
-        static_cast<float>(std::trunc(sequencer.translate_y));
+        static_cast<float>(std::trunc(shapeItem.translate_y));
     rectUni.viewport[0] = static_cast<float>(swapchain_w);
     rectUni.viewport[1] = static_cast<float>(swapchain_h);
     SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
 
     std::uint32_t numInstances =
-        hb_buffer_get_length(sequencer.harfbuzz_buffer.get());
+        hb_buffer_get_length(shapeItem.harfbuzz_buffer.get());
     SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
   }
 }
@@ -1265,7 +1265,7 @@ SDL_AppResult AppState::iterate() noexcept
   }
 }
 
-std::array<double, 4> GlyphSequencer::bounding_box() const noexcept
+std::array<double, 4> GlyphShapeItem::bounding_box() const noexcept
 {
   static constexpr double PADDING_X = 1;
   static constexpr double PADDING_Y = 4;
@@ -1300,7 +1300,7 @@ void SelectionEventHandler::copy_drag_state()
   constexpr double MIN_SELECTION_W = 2.0;
   selectionW = std::max(std::abs(mouseA - mouseB), MIN_SELECTION_W);
   auto [captionX, captionY, captionW, captionH] =
-      app->glyph_sequencers[drag_state->sequencer_idx].bounding_box();
+      app->glyph_shape_items[drag_state->shape_item_idx].bounding_box();
   selectionY = captionY;
   selectionH = captionH;
   app->selection_areas_flag = true;
@@ -1320,12 +1320,12 @@ void SelectionEventHandler::handle_mouse_button_down(
 {
   for (std::optional<std::array<double, 4>> &selection : app->selection_slots)
     selection.reset();
-  for (const GlyphSequencer &sequencer : app->glyph_sequencers)
-    if (isPointInside({event.x, event.y}, sequencer.bounding_box()))
+  for (const GlyphShapeItem &shapeItem : app->glyph_shape_items)
+    if (isPointInside({event.x, event.y}, shapeItem.bounding_box()))
     {
       drag_state.emplace();
-      drag_state->sequencer_idx =
-          static_cast<std::uint32_t>(&sequencer - app->glyph_sequencers.data());
+      drag_state->shape_item_idx = static_cast<std::uint32_t>(
+          &shapeItem - app->glyph_shape_items.data());
       drag_state->selection_idx = find_unoccupied_slot();
       std::get<0>(drag_state->mouse_segment) = event.x;
       std::get<1>(drag_state->mouse_segment) = event.x;
@@ -1334,7 +1334,7 @@ void SelectionEventHandler::handle_mouse_button_down(
     }
 }
 
-std::uint32_t GlyphSequencer::find_codepoint_offset(double screenX) const
+std::uint32_t GlyphShapeItem::find_codepoint_offset(double screenX) const
 {
   std::size_t captionOffset{app->caption_string.size()};
   for (const GlyphClusterSection &clusterSection : cluster_sections)
@@ -1358,7 +1358,7 @@ std::uint32_t GlyphSequencer::find_codepoint_offset(double screenX) const
 }
 
 std::pair<std::uint32_t, double>
-GlyphSequencer::find_cluster_offset(std::uint32_t textOffset) const
+GlyphShapeItem::find_cluster_offset(std::uint32_t textOffset) const
 {
   std::pair<std::uint32_t, double> clusterOffset{};
   for (const auto &[enumerationIdx, clusterSection] :
@@ -1385,24 +1385,24 @@ void SelectionEventHandler::handle_mouse_button_up(
 {
   if (not drag_state.has_value())
     return;
-  const GlyphSequencer &sequencer =
-      app->glyph_sequencers[drag_state->sequencer_idx];
-  auto [captionX, captionY, captionW, captionH] = sequencer.bounding_box();
+  const GlyphShapeItem &shapeItem =
+      app->glyph_shape_items[drag_state->shape_item_idx];
+  auto [captionX, captionY, captionW, captionH] = shapeItem.bounding_box();
   std::array<double, 2> screenX{drag_state->mouse_segment};
   std::ranges::sort(screenX);
 
   double startX = std::get<0>(screenX) - captionX;
-  std::uint32_t codepointStart = sequencer.find_codepoint_offset(startX);
+  std::uint32_t codepointStart = shapeItem.find_codepoint_offset(startX);
   std::pair<std::uint32_t, double> clusterStart =
-      sequencer.find_cluster_offset(codepointStart);
+      shapeItem.find_cluster_offset(codepointStart);
 
   double finalX = std::get<1>(screenX) - captionX;
-  std::uint32_t codepointFinal = sequencer.find_codepoint_offset(finalX);
+  std::uint32_t codepointFinal = shapeItem.find_codepoint_offset(finalX);
   std::pair<std::uint32_t, double> clusterFinal =
-      sequencer.find_cluster_offset(codepointFinal);
+      shapeItem.find_cluster_offset(codepointFinal);
 
   auto [measureL, measureR, measureT, measureB] =
-      sequencer.text_measure(clusterStart, clusterFinal, true);
+      shapeItem.text_measure(clusterStart, clusterFinal, true);
   double measureW = measureR - measureL;
   double measureH = measureB - measureT;
 
@@ -1415,9 +1415,9 @@ void SelectionEventHandler::handle_mouse_button_up(
     static constexpr double PADDING_X = 1;
     static constexpr double PADDING_Y = 4;
     auto &[selectionX, selectionY, selectionW, selectionH] = *selection;
-    selectionX = sequencer.translate_x + measureL - PADDING_X;
+    selectionX = shapeItem.translate_x + measureL - PADDING_X;
     selectionY =
-        sequencer.translate_y + sequencer.measured_h() + measureT - PADDING_Y;
+        shapeItem.translate_y + shapeItem.measured_h() + measureT - PADDING_Y;
     selectionW = measureW + PADDING_X * 2;
     selectionH = measureH + PADDING_Y * 2;
   }
@@ -1431,9 +1431,9 @@ void SelectionEventHandler::handle_mouse_motion(
 {
   if (not drag_state.has_value())
     return;
-  const GlyphSequencer &sequencer =
-      app->glyph_sequencers[drag_state->sequencer_idx];
-  auto [captionX, captionY, captionW, captionH] = sequencer.bounding_box();
+  const GlyphShapeItem &shapeItem =
+      app->glyph_shape_items[drag_state->shape_item_idx];
+  auto [captionX, captionY, captionW, captionH] = shapeItem.bounding_box();
   float captionMin = static_cast<float>(captionX);
   float captionMax = static_cast<float>(captionX + captionW);
   std::get<1>(drag_state->mouse_segment) =
@@ -1458,12 +1458,12 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_WINDOW_RESIZED:
-    for (GlyphSequencer &sequencer : glyph_sequencers)
+    for (GlyphShapeItem &shapeItem : glyph_shape_items)
     {
-      sequencer.translate_x = static_cast<double>(event->window.data1) * 0.5 -
-                              sequencer.measured_w() * 0.5;
-      sequencer.translate_y = static_cast<double>(event->window.data2) * 0.5 -
-                              sequencer.measured_h() * 0.5;
+      shapeItem.translate_x = static_cast<double>(event->window.data1) * 0.5 -
+                              shapeItem.measured_w() * 0.5;
+      shapeItem.translate_y = static_cast<double>(event->window.data2) * 0.5 -
+                              shapeItem.measured_h() * 0.5;
     }
     return SDL_APP_CONTINUE;
 
@@ -1475,12 +1475,12 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
   }
 }
 
-void GlyphSequencer::instantiate(SDL_Window *window)
+void GlyphShapeItem::instantiate(SDL_Window *window)
 {
   harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
 }
 
-bool GlyphSequencer::verify_atlas_cache()
+bool GlyphShapeItem::verify_atlas_cache()
 {
   std::span<hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
@@ -1612,7 +1612,7 @@ void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row)
   std::memcpy(transferBegin + atlasFullOffset, source, bitmap->width);
 }
 
-void GlyphSequencer::verify_instance_capacity()
+void GlyphShapeItem::verify_instance_capacity()
 {
   std::uint32_t bufferSize = static_cast<std::uint32_t>(
       hb_buffer_get_length(harfbuzz_buffer.get()) * sizeof(RectInstanceData));
@@ -1627,7 +1627,7 @@ void GlyphSequencer::verify_instance_capacity()
       createGPUTransferBuffer(app->device_ctx.get(), instance_capacity);
 }
 
-void GlyphSequencer::transfer_instance_data()
+void GlyphShapeItem::transfer_instance_data()
 {
   unsigned int bufferIdx{};
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
@@ -1655,7 +1655,7 @@ void GlyphSequencer::transfer_instance_data()
   }
 }
 
-void GlyphSequencer::queue_vertex_copypass()
+void GlyphShapeItem::queue_vertex_copypass()
 {
   verify_instance_capacity();
   transfer_instance_data();
@@ -1666,7 +1666,7 @@ constexpr double MAX_SAFE_INTEGER = std::ldexp(1.0, 53) - 1;
 constexpr double MIN_SAFE_INTEGER = -1.0 * MAX_SAFE_INTEGER;
 
 std::array<double, 4>
-GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
+GlyphShapeItem::text_measure(std::pair<std::uint32_t, double> start,
                              std::pair<std::uint32_t, double> final,
                              bool finalBound) const
 {
@@ -1718,7 +1718,7 @@ GlyphSequencer::text_measure(std::pair<std::uint32_t, double> start,
   return textMetrics;
 }
 
-std::generator<GlyphCaretStep> GlyphSequencer::emit_glyph_steps()
+std::generator<GlyphCaretStep> GlyphShapeItem::emit_glyph_steps()
 {
   unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
   std::span<const hb_glyph_position_t> positions{
@@ -1744,7 +1744,7 @@ std::generator<GlyphCaretStep> GlyphSequencer::emit_glyph_steps()
   }
 }
 
-void GlyphSequencer::populate_glyph_geometries()
+void GlyphShapeItem::populate_glyph_geometries()
 {
   std::span<const hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
@@ -1794,7 +1794,7 @@ void GlyphSequencer::populate_glyph_geometries()
   }
 }
 
-std::vector<GlyphClusterSection> GlyphSequencer::make_cluster_sections()
+std::vector<GlyphClusterSection> GlyphShapeItem::make_cluster_sections()
 {
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
@@ -1904,7 +1904,7 @@ const FT_Glyph_Metrics &AppState::freetype_codepoint_metrics(FT_ULong codepoint)
   return face->glyph->metrics;
 }
 
-bool GlyphSequencer::text_reshape(std::string_view textView)
+bool GlyphShapeItem::text_reshape(std::string_view textView)
 {
   hb_buffer_reset(harfbuzz_buffer.get());
   hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
@@ -1917,7 +1917,7 @@ bool GlyphSequencer::text_reshape(std::string_view textView)
   return verify_atlas_cache();
 }
 
-void GlyphSequencer::text_reflow()
+void GlyphShapeItem::text_reflow()
 {
   glyph_geometries.clear();
   populate_glyph_geometries();
@@ -1998,22 +1998,22 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     *appstate = app;
     app->instantiate(globalFTLibrary);
     bool atlasInserted{};
-    for (GlyphSequencer &sequencer : app->glyph_sequencers)
-      atlasInserted |= sequencer.text_reshape(app->caption_string);
+    for (GlyphShapeItem &shapeItem : app->glyph_shape_items)
+      atlasInserted |= shapeItem.text_reshape(app->caption_string);
     if (atlasInserted)
     {
       app->pack_atlas();
       app->copypass_tasks.push_back(CopyGlyphAtlas{});
     }
-    for (GlyphSequencer &sequencer : app->glyph_sequencers)
-      sequencer.text_reflow();
+    for (GlyphShapeItem &shapeItem : app->glyph_shape_items)
+      shapeItem.text_reflow();
     auto [windowW, windowH] = getWindowSizeInPixels(app->main_window.get());
-    for (GlyphSequencer &sequencer : app->glyph_sequencers)
+    for (GlyphShapeItem &shapeItem : app->glyph_shape_items)
     {
-      sequencer.translate_x =
-          static_cast<double>(windowW) * 0.5 - sequencer.measured_w() * 0.5;
-      sequencer.translate_y =
-          static_cast<double>(windowH) * 0.5 - sequencer.measured_h() * 0.5;
+      shapeItem.translate_x =
+          static_cast<double>(windowW) * 0.5 - shapeItem.measured_w() * 0.5;
+      shapeItem.translate_y =
+          static_cast<double>(windowH) * 0.5 - shapeItem.measured_h() * 0.5;
     }
     return SDL_APP_CONTINUE;
   }
