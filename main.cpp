@@ -821,6 +821,7 @@ struct GlyphShapeItem
 {
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
+  std::string shape_string;
 
   double translate_x = 0, translate_y = 0;
   double x_min = 0, x_max = 0;
@@ -845,11 +846,9 @@ struct GlyphShapeItem
   void verify_instance_capacity();
   void transfer_instance_data();
   void queue_vertex_copypass();
-
-  void instantiate(SDL_Window *window);
   bool verify_atlas_cache();
 
-  bool text_reshape(std::string_view);
+  bool text_reshape();
   void text_reflow();
   std::array<double, 4> text_measure(std::pair<std::uint32_t, double>,
                                      std::pair<std::uint32_t, double>,
@@ -931,8 +930,6 @@ struct AppState
   UniqueWindow main_window;
   UniqueWindowForGPUDevice main_window_for_gpu_device;
 
-  std::string caption_string = "Hello figure kerning Text";
-
   static constexpr std::uint32_t ATLAS_SIDE = 1024;
   static constexpr std::uint32_t ATLAS_PADDING = 1;
   UniqueGPUTransferBuffer atlas_transfer;
@@ -941,7 +938,7 @@ struct AppState
 
   GlyphShapeItem caption_one{this};
   GlyphShapeItem caption_two{this};
-  std::vector<GlyphShapeItem *> glyph_shape_items{&caption_one, &caption_two};
+  std::vector<GlyphShapeItem *> shape_items{&caption_one, &caption_two};
 
   UniqueFreetypeGlyph freetype_load_glyph(hb_codepoint_t glyphid, int phase);
   const FT_Glyph_Metrics &freetype_codepoint_metrics(FT_ULong codepoint);
@@ -1010,8 +1007,8 @@ void AppState::instantiate(FT_Library library)
       device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
   const FT_Glyph_Metrics &haitch_metrics = freetype_codepoint_metrics(72);
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
-  caption_one.instantiate(main_window.get());
-  caption_two.instantiate(main_window.get());
+  caption_one.shape_string = "Hello figure kerning Text";
+  caption_two.shape_string = "The quick brown fox jumps over the lazy dog.";
 }
 
 void GPUCommandSequencer::issue_copy_pass()
@@ -1116,7 +1113,7 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
     float viewport[2];
     float translate[2];
   };
-  for (const GlyphShapeItem *shapeItem : app->glyph_shape_items)
+  for (const GlyphShapeItem *shapeItem : app->shape_items)
   {
     SDL_GPUBufferBinding instanceBinding{shapeItem->instance_buffer.get(), 0};
     SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
@@ -1304,7 +1301,7 @@ void SelectionEventHandler::copy_drag_state()
   constexpr double MIN_SELECTION_W = 2.0;
   selectionW = std::max(std::abs(mouseA - mouseB), MIN_SELECTION_W);
   auto [captionX, captionY, captionW, captionH] =
-      app->glyph_shape_items[drag_state->shape_item_idx]->bounding_box();
+      app->shape_items[drag_state->shape_item_idx]->bounding_box();
   selectionY = captionY;
   selectionH = captionH;
   app->selection_areas_flag = true;
@@ -1324,8 +1321,7 @@ void SelectionEventHandler::handle_mouse_button_down(
 {
   for (std::optional<std::array<double, 4>> &selection : app->selection_slots)
     selection.reset();
-  for (const auto &[idx, shapeItem] :
-       app->glyph_shape_items | std::views::enumerate)
+  for (const auto &[idx, shapeItem] : app->shape_items | std::views::enumerate)
     if (isPointInside({event.x, event.y}, shapeItem->bounding_box()))
     {
       drag_state.emplace();
@@ -1340,7 +1336,7 @@ void SelectionEventHandler::handle_mouse_button_down(
 
 std::uint32_t GlyphShapeItem::find_codepoint_offset(double screenX) const
 {
-  std::size_t captionOffset{app->caption_string.size()};
+  std::size_t captionOffset{shape_string.size()};
   for (const GlyphClusterSection &clusterSection : cluster_sections)
   {
     double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
@@ -1390,7 +1386,7 @@ void SelectionEventHandler::handle_mouse_button_up(
   if (not drag_state.has_value())
     return;
   const GlyphShapeItem *shapeItem =
-      app->glyph_shape_items[drag_state->shape_item_idx];
+      app->shape_items[drag_state->shape_item_idx];
   auto [captionX, captionY, captionW, captionH] = shapeItem->bounding_box();
   std::array<double, 2> screenX{drag_state->mouse_segment};
   std::ranges::sort(screenX);
@@ -1436,7 +1432,7 @@ void SelectionEventHandler::handle_mouse_motion(
   if (not drag_state.has_value())
     return;
   const GlyphShapeItem *shapeItem =
-      app->glyph_shape_items[drag_state->shape_item_idx];
+      app->shape_items[drag_state->shape_item_idx];
   auto [captionX, captionY, captionW, captionH] = shapeItem->bounding_box();
   float captionMin = static_cast<float>(captionX);
   float captionMax = static_cast<float>(captionX + captionW);
@@ -1480,11 +1476,6 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
   default:
     return SDL_APP_CONTINUE;
   }
-}
-
-void GlyphShapeItem::instantiate(SDL_Window *window)
-{
-  harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
 }
 
 bool GlyphShapeItem::verify_atlas_cache()
@@ -1911,15 +1902,18 @@ const FT_Glyph_Metrics &AppState::freetype_codepoint_metrics(FT_ULong codepoint)
   return face->glyph->metrics;
 }
 
-bool GlyphShapeItem::text_reshape(std::string_view textView)
+bool GlyphShapeItem::text_reshape()
 {
-  hb_buffer_reset(harfbuzz_buffer.get());
-  hb_buffer_add_utf8(harfbuzz_buffer.get(), textView.data(),
-                     static_cast<int>(textView.size()), 0,
-                     static_cast<int>(textView.size()));
+  if (not harfbuzz_buffer)
+    harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
+  else
+    hb_buffer_reset(harfbuzz_buffer.get());
+  hb_buffer_add_utf8(harfbuzz_buffer.get(), shape_string.data(),
+                     static_cast<int>(shape_string.size()), 0,
+                     static_cast<int>(shape_string.size()));
   hb_buffer_guess_segment_properties(harfbuzz_buffer.get());
   hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
-  codepoint_infos = {std::from_range, emitCodepointInfo(textView)};
+  codepoint_infos = {std::from_range, emitCodepointInfo(shape_string)};
   glyph_steps = {std::from_range, emit_glyph_steps()};
   return verify_atlas_cache();
 }
@@ -2005,14 +1999,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     *appstate = app;
     app->instantiate(globalFTLibrary);
     bool atlasInserted{};
-    for (GlyphShapeItem *shapeItem : app->glyph_shape_items)
-      atlasInserted |= shapeItem->text_reshape(app->caption_string);
+    for (GlyphShapeItem *shapeItem : app->shape_items)
+      atlasInserted |= shapeItem->text_reshape();
     if (atlasInserted)
     {
       app->pack_atlas();
       app->copypass_tasks.push_back(CopyGlyphAtlas{});
     }
-    for (GlyphShapeItem *shapeItem : app->glyph_shape_items)
+    for (GlyphShapeItem *shapeItem : app->shape_items)
       shapeItem->text_reflow();
     auto [windowW, windowH] = getWindowSizeInPixels(app->main_window.get());
     app->caption_one.translate_x = 0.5 * static_cast<double>(windowW) -
