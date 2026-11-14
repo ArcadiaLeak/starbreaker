@@ -938,7 +938,10 @@ struct AppState
   UniqueGPUTransferBuffer atlas_transfer;
   UniqueGPUTexture atlas_texture;
   GlyphAtlasCache atlas_cache;
-  std::vector<GlyphShapeItem> glyph_shape_items;
+
+  GlyphShapeItem caption_one{this};
+  GlyphShapeItem caption_two{this};
+  std::vector<GlyphShapeItem *> glyph_shape_items{&caption_one, &caption_two};
 
   UniqueFreetypeGlyph freetype_load_glyph(hb_codepoint_t glyphid, int phase);
   const FT_Glyph_Metrics &freetype_codepoint_metrics(FT_ULong codepoint);
@@ -1007,7 +1010,8 @@ void AppState::instantiate(FT_Library library)
       device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
   const FT_Glyph_Metrics &haitch_metrics = freetype_codepoint_metrics(72);
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
-  glyph_shape_items.emplace_back(this).instantiate(main_window.get());
+  caption_one.instantiate(main_window.get());
+  caption_two.instantiate(main_window.get());
 }
 
 void GPUCommandSequencer::issue_copy_pass()
@@ -1112,22 +1116,22 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
     float viewport[2];
     float translate[2];
   };
-  for (const GlyphShapeItem &shapeItem : app->glyph_shape_items)
+  for (const GlyphShapeItem *shapeItem : app->glyph_shape_items)
   {
-    SDL_GPUBufferBinding instanceBinding{shapeItem.instance_buffer.get(), 0};
+    SDL_GPUBufferBinding instanceBinding{shapeItem->instance_buffer.get(), 0};
     SDL_BindGPUVertexBuffers(renderPass.get(), 0, &instanceBinding, 1);
 
     RectUniform rectUni{};
     rectUni.translate[0] =
-        static_cast<float>(std::trunc(shapeItem.translate_x));
+        static_cast<float>(std::trunc(shapeItem->translate_x));
     rectUni.translate[1] =
-        static_cast<float>(std::trunc(shapeItem.translate_y));
+        static_cast<float>(std::trunc(shapeItem->translate_y));
     rectUni.viewport[0] = static_cast<float>(swapchain_w);
     rectUni.viewport[1] = static_cast<float>(swapchain_h);
     SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
 
     std::uint32_t numInstances =
-        hb_buffer_get_length(shapeItem.harfbuzz_buffer.get());
+        hb_buffer_get_length(shapeItem->harfbuzz_buffer.get());
     SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
   }
 }
@@ -1300,7 +1304,7 @@ void SelectionEventHandler::copy_drag_state()
   constexpr double MIN_SELECTION_W = 2.0;
   selectionW = std::max(std::abs(mouseA - mouseB), MIN_SELECTION_W);
   auto [captionX, captionY, captionW, captionH] =
-      app->glyph_shape_items[drag_state->shape_item_idx].bounding_box();
+      app->glyph_shape_items[drag_state->shape_item_idx]->bounding_box();
   selectionY = captionY;
   selectionH = captionH;
   app->selection_areas_flag = true;
@@ -1320,12 +1324,12 @@ void SelectionEventHandler::handle_mouse_button_down(
 {
   for (std::optional<std::array<double, 4>> &selection : app->selection_slots)
     selection.reset();
-  for (const GlyphShapeItem &shapeItem : app->glyph_shape_items)
-    if (isPointInside({event.x, event.y}, shapeItem.bounding_box()))
+  for (const auto &[idx, shapeItem] :
+       app->glyph_shape_items | std::views::enumerate)
+    if (isPointInside({event.x, event.y}, shapeItem->bounding_box()))
     {
       drag_state.emplace();
-      drag_state->shape_item_idx = static_cast<std::uint32_t>(
-          &shapeItem - app->glyph_shape_items.data());
+      drag_state->shape_item_idx = static_cast<std::uint32_t>(idx);
       drag_state->selection_idx = find_unoccupied_slot();
       std::get<0>(drag_state->mouse_segment) = event.x;
       std::get<1>(drag_state->mouse_segment) = event.x;
@@ -1385,24 +1389,24 @@ void SelectionEventHandler::handle_mouse_button_up(
 {
   if (not drag_state.has_value())
     return;
-  const GlyphShapeItem &shapeItem =
+  const GlyphShapeItem *shapeItem =
       app->glyph_shape_items[drag_state->shape_item_idx];
-  auto [captionX, captionY, captionW, captionH] = shapeItem.bounding_box();
+  auto [captionX, captionY, captionW, captionH] = shapeItem->bounding_box();
   std::array<double, 2> screenX{drag_state->mouse_segment};
   std::ranges::sort(screenX);
 
   double startX = std::get<0>(screenX) - captionX;
-  std::uint32_t codepointStart = shapeItem.find_codepoint_offset(startX);
+  std::uint32_t codepointStart = shapeItem->find_codepoint_offset(startX);
   std::pair<std::uint32_t, double> clusterStart =
-      shapeItem.find_cluster_offset(codepointStart);
+      shapeItem->find_cluster_offset(codepointStart);
 
   double finalX = std::get<1>(screenX) - captionX;
-  std::uint32_t codepointFinal = shapeItem.find_codepoint_offset(finalX);
+  std::uint32_t codepointFinal = shapeItem->find_codepoint_offset(finalX);
   std::pair<std::uint32_t, double> clusterFinal =
-      shapeItem.find_cluster_offset(codepointFinal);
+      shapeItem->find_cluster_offset(codepointFinal);
 
   auto [measureL, measureR, measureT, measureB] =
-      shapeItem.text_measure(clusterStart, clusterFinal, true);
+      shapeItem->text_measure(clusterStart, clusterFinal, true);
   double measureW = measureR - measureL;
   double measureH = measureB - measureT;
 
@@ -1415,9 +1419,9 @@ void SelectionEventHandler::handle_mouse_button_up(
     static constexpr double PADDING_X = 1;
     static constexpr double PADDING_Y = 4;
     auto &[selectionX, selectionY, selectionW, selectionH] = *selection;
-    selectionX = shapeItem.translate_x + measureL - PADDING_X;
+    selectionX = shapeItem->translate_x + measureL - PADDING_X;
     selectionY =
-        shapeItem.translate_y + shapeItem.measured_h() + measureT - PADDING_Y;
+        shapeItem->translate_y + shapeItem->measured_h() + measureT - PADDING_Y;
     selectionW = measureW + PADDING_X * 2;
     selectionH = measureH + PADDING_Y * 2;
   }
@@ -1431,9 +1435,9 @@ void SelectionEventHandler::handle_mouse_motion(
 {
   if (not drag_state.has_value())
     return;
-  const GlyphShapeItem &shapeItem =
+  const GlyphShapeItem *shapeItem =
       app->glyph_shape_items[drag_state->shape_item_idx];
-  auto [captionX, captionY, captionW, captionH] = shapeItem.bounding_box();
+  auto [captionX, captionY, captionW, captionH] = shapeItem->bounding_box();
   float captionMin = static_cast<float>(captionX);
   float captionMax = static_cast<float>(captionX + captionW);
   std::get<1>(drag_state->mouse_segment) =
@@ -1458,13 +1462,16 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_WINDOW_RESIZED:
-    for (GlyphShapeItem &shapeItem : glyph_shape_items)
-    {
-      shapeItem.translate_x = static_cast<double>(event->window.data1) * 0.5 -
-                              shapeItem.measured_w() * 0.5;
-      shapeItem.translate_y = static_cast<double>(event->window.data2) * 0.5 -
-                              shapeItem.measured_h() * 0.5;
-    }
+    caption_one.translate_x = 0.5 * static_cast<double>(event->window.data1) -
+                              caption_one.measured_w() * 0.5;
+    caption_one.translate_y =
+        5.0 / 12.0 * static_cast<double>(event->window.data2) -
+        caption_one.measured_h() * 0.5;
+    caption_two.translate_x = 0.5 * static_cast<double>(event->window.data1) -
+                              caption_two.measured_w() * 0.5;
+    caption_two.translate_y =
+        7.0 / 12.0 * static_cast<double>(event->window.data2) -
+        caption_two.measured_h() * 0.5;
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_QUIT:
@@ -1998,23 +2005,24 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     *appstate = app;
     app->instantiate(globalFTLibrary);
     bool atlasInserted{};
-    for (GlyphShapeItem &shapeItem : app->glyph_shape_items)
-      atlasInserted |= shapeItem.text_reshape(app->caption_string);
+    for (GlyphShapeItem *shapeItem : app->glyph_shape_items)
+      atlasInserted |= shapeItem->text_reshape(app->caption_string);
     if (atlasInserted)
     {
       app->pack_atlas();
       app->copypass_tasks.push_back(CopyGlyphAtlas{});
     }
-    for (GlyphShapeItem &shapeItem : app->glyph_shape_items)
-      shapeItem.text_reflow();
+    for (GlyphShapeItem *shapeItem : app->glyph_shape_items)
+      shapeItem->text_reflow();
     auto [windowW, windowH] = getWindowSizeInPixels(app->main_window.get());
-    for (GlyphShapeItem &shapeItem : app->glyph_shape_items)
-    {
-      shapeItem.translate_x =
-          static_cast<double>(windowW) * 0.5 - shapeItem.measured_w() * 0.5;
-      shapeItem.translate_y =
-          static_cast<double>(windowH) * 0.5 - shapeItem.measured_h() * 0.5;
-    }
+    app->caption_one.translate_x = 0.5 * static_cast<double>(windowW) -
+                                   app->caption_one.measured_w() * 0.5;
+    app->caption_one.translate_y = 5.0 / 12.0 * static_cast<double>(windowH) -
+                                   app->caption_one.measured_h() * 0.5;
+    app->caption_two.translate_x = 0.5 * static_cast<double>(windowW) -
+                                   app->caption_two.measured_w() * 0.5;
+    app->caption_two.translate_y = 7.0 / 12.0 * static_cast<double>(windowH) -
+                                   app->caption_two.measured_h() * 0.5;
     return SDL_APP_CONTINUE;
   }
   catch (const std::runtime_error &e)
