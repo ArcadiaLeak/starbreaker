@@ -821,7 +821,7 @@ struct GlyphShapeItem
 {
   AppState *app;
   UniqueHarfbuzzBuffer harfbuzz_buffer;
-  std::string shape_string;
+  std::string shape_str;
 
   double translate_x = 0, translate_y = 0;
   double x_min = 0, x_max = 0;
@@ -936,8 +936,10 @@ struct AppState
   UniqueGPUTexture atlas_texture;
   GlyphAtlasCache atlas_cache;
 
-  GlyphShapeItem caption_one{this};
-  GlyphShapeItem caption_two{this};
+  const char *SHAPE_STR_ONE = "Hello figure kerning Text";
+  GlyphShapeItem caption_one{.app = this, .shape_str = SHAPE_STR_ONE};
+  const char *SHAPE_STR_TWO = "The quick brown fox jumps over the lazy dog.";
+  GlyphShapeItem caption_two{.app = this, .shape_str = SHAPE_STR_TWO};
   std::vector<GlyphShapeItem *> shape_items{&caption_one, &caption_two};
 
   UniqueFreetypeGlyph freetype_load_glyph(hb_codepoint_t glyphid, int phase);
@@ -1007,8 +1009,6 @@ void AppState::instantiate(FT_Library library)
       device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
   const FT_Glyph_Metrics &haitch_metrics = freetype_codepoint_metrics(72);
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
-  caption_one.shape_string = "Hello figure kerning Text";
-  caption_two.shape_string = "The quick brown fox jumps over the lazy dog.";
 }
 
 void GPUCommandSequencer::issue_copy_pass()
@@ -1338,7 +1338,7 @@ void SelectionEventHandler::handle_mouse_button_down(
 
 std::uint32_t GlyphShapeItem::find_codepoint_offset(double screenX) const
 {
-  std::size_t captionOffset{shape_string.size()};
+  std::size_t captionOffset{shape_str.size()};
   for (const GlyphClusterSection &clusterSection : cluster_sections)
   {
     double clusterL = std::get<0>(clusterSection.geometries.front().bbox);
@@ -1910,12 +1910,12 @@ bool GlyphShapeItem::text_reshape()
     harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
   else
     hb_buffer_reset(harfbuzz_buffer.get());
-  hb_buffer_add_utf8(harfbuzz_buffer.get(), shape_string.data(),
-                     static_cast<int>(shape_string.size()), 0,
-                     static_cast<int>(shape_string.size()));
+  hb_buffer_add_utf8(harfbuzz_buffer.get(), shape_str.data(),
+                     static_cast<int>(shape_str.size()), 0,
+                     static_cast<int>(shape_str.size()));
   hb_buffer_guess_segment_properties(harfbuzz_buffer.get());
   hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
-  codepoint_infos = {std::from_range, emitCodepointInfo(shape_string)};
+  codepoint_infos = {std::from_range, emitCodepointInfo(shape_str)};
   glyph_steps = {std::from_range, emit_glyph_steps()};
   return verify_atlas_cache();
 }
