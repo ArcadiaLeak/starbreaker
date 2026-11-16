@@ -58,7 +58,7 @@ void FreetypeGlyphDeleter::operator()(FT_Glyph freetypeGlyph) const
   FT_Done_Glyph(freetypeGlyph);
 }
 
-FT_BitmapGlyph asBitmapGlyph(FT_Glyph freetypeGlyph)
+FT_BitmapGlyph AsBitmapGlyph(FT_Glyph freetypeGlyph)
 {
   if (freetypeGlyph->format != FT_GLYPH_FORMAT_BITMAP)
     throw std::runtime_error{"Unexpected FT_Glyph format!"};
@@ -203,7 +203,7 @@ void setWindowMinimumSize(SDL_Window *window, int minW, int minH)
   }
 }
 
-std::array<int, 2> getWindowSizeInPixels(SDL_Window *window)
+std::array<int, 2> GetWindowSizeInPixels(SDL_Window *window)
 {
   int windowW{}, windowH{};
   if (not SDL_GetWindowSizeInPixels(window, &windowW, &windowH))
@@ -220,7 +220,7 @@ struct FileContentDeleter
 };
 using UniqueFileContent = std::unique_ptr<void, FileContentDeleter>;
 
-UniqueFileContent loadFile(const char *filepath, size_t *datasize)
+UniqueFileContent LoadFile(const char *filepath, size_t *datasize)
 {
   void *fileContent = SDL_LoadFile(filepath, datasize);
   if (fileContent)
@@ -742,7 +742,7 @@ struct UTextDeleter
 };
 using UniqueUText = std::unique_ptr<UText, UTextDeleter>;
 
-UniqueUText utextOpenUTF8(std::string_view strView)
+UniqueUText UTextOpenUTF8(std::string_view strView)
 {
   std::int64_t textLen = static_cast<std::int64_t>(strView.size());
   UErrorCode status{U_ZERO_ERROR};
@@ -760,9 +760,9 @@ struct CodepointInfo
   std::uint32_t byte_offset;
   UChar32 codepoint;
 };
-std::generator<CodepointInfo> emitCodepointInfo(std::string_view strView)
+std::generator<CodepointInfo> EmitCodepointInfo(std::string_view strView)
 {
-  UniqueUText uText = utextOpenUTF8(strView);
+  UniqueUText uText = UTextOpenUTF8(strView);
 uTextLoop:
   std::int64_t byteOffset = utext_getNativeIndex(uText.get());
   UChar32 codepoint = utext_next32(uText.get());
@@ -826,36 +826,36 @@ struct GlyphShapeItem
   double translate_x = 0, translate_y = 0;
   double x_min = 0, x_max = 0;
   double y_min = 0, y_max = 0;
-  double measured_w() const noexcept { return x_max - x_min; }
-  double measured_h() const noexcept { return y_max - y_min; }
-  std::array<double, 4> bounding_box() const noexcept;
+  double GetMeasuredW() const noexcept { return x_max - x_min; }
+  double GetMeasuredH() const noexcept { return y_max - y_min; }
+  std::array<double, 4> GetBoundingBox() const noexcept;
 
   std::vector<GlyphGeometry> glyph_geometries;
   std::vector<GlyphCaretStep> glyph_steps;
   std::vector<GlyphClusterSection> cluster_sections;
   std::vector<CodepointInfo> codepoint_infos;
 
-  void populate_glyph_geometries();
-  std::generator<GlyphCaretStep> emit_glyph_steps();
-  std::vector<GlyphClusterSection> make_cluster_sections();
+  void PopulateGlyphGeometries();
+  std::generator<GlyphCaretStep> EmitGlyphSteps();
+  std::vector<GlyphClusterSection> MakeClusterSections();
 
   UniqueGPUBuffer instance_buffer;
   UniqueGPUTransferBuffer instance_transfer;
   std::uint32_t instance_capacity = 0;
 
-  void verify_instance_capacity();
-  void transfer_instance_data();
-  void queue_vertex_copypass();
-  bool verify_atlas_cache();
+  void VerifyInstanceCapacity();
+  void TransferInstanceData();
+  void QueueVertexCopypass();
+  bool VerifyAtlasCache();
 
-  bool text_reshape();
-  void text_reflow();
-  std::array<double, 4> text_measure(std::pair<std::uint32_t, double>,
-                                     std::pair<std::uint32_t, double>,
-                                     bool) const;
-  std::uint32_t find_codepoint_offset(double screenX) const;
+  bool TextReshape();
+  void TextReflow();
+  std::array<double, 4> TextMeasure(std::pair<std::uint32_t, double>,
+                                    std::pair<std::uint32_t, double>,
+                                    bool) const;
+  std::uint32_t FindCodepointOffset(double screenX) const;
   std::pair<std::uint32_t, double>
-  find_cluster_offset(std::uint32_t textOffset) const;
+  FindClusterOffset(std::uint32_t textOffset) const;
 };
 
 struct CopyGlyphAtlas
@@ -971,14 +971,14 @@ struct AppState
 
   std::vector<CopypassTask> copypass_tasks;
 
-  SDL_AppResult iterate() noexcept;
-  SDL_AppResult handle_event(SDL_Event *event) noexcept;
+  SDL_AppResult Iterate() noexcept;
+  SDL_AppResult HandleEvent(SDL_Event *event) noexcept;
 
-  void instantiate(FT_Library library);
-  void pack_atlas();
+  void Instantiate(FT_Library library);
+  void PackAtlas();
 };
 
-void AppState::instantiate(FT_Library library)
+void AppState::Instantiate(FT_Library library)
 {
   device_ctx = createGPUDevice();
   main_window = createWindow("Hello GPU", static_cast<int>(INITIAL_WINDOW_W),
@@ -1124,7 +1124,7 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
     rectUni.translate[0] =
         static_cast<float>(std::trunc(shapeItem->translate_x));
     double vertTranslate = static_cast<double>(swapchain_h) -
-                           shapeItem->translate_y - shapeItem->measured_h();
+                           shapeItem->translate_y - shapeItem->GetMeasuredH();
     rectUni.translate[1] = static_cast<float>(std::trunc(vertTranslate));
 
     SDL_PushGPUVertexUniformData(cmd, 0, &rectUni, sizeof(RectUniform));
@@ -1243,7 +1243,7 @@ void GPURenderSequencer::selected_areas_blend()
   SDL_DispatchGPUCompute(computePass.get(), ceiledX, ceiledY, 1);
 }
 
-SDL_AppResult AppState::iterate() noexcept
+SDL_AppResult AppState::Iterate() noexcept
 {
   try
   {
@@ -1268,15 +1268,15 @@ SDL_AppResult AppState::iterate() noexcept
   }
 }
 
-std::array<double, 4> GlyphShapeItem::bounding_box() const noexcept
+std::array<double, 4> GlyphShapeItem::GetBoundingBox() const noexcept
 {
   static constexpr double PADDING_X = 1;
   static constexpr double PADDING_Y = 4;
   std::array<double, 4> boundingBox{};
   std::get<0>(boundingBox) = translate_x + x_min - PADDING_X;
   std::get<1>(boundingBox) = translate_y + y_max - PADDING_Y;
-  std::get<2>(boundingBox) = measured_w() + PADDING_X * 2;
-  std::get<3>(boundingBox) = measured_h() + PADDING_Y * 2;
+  std::get<2>(boundingBox) = GetMeasuredW() + PADDING_X * 2;
+  std::get<3>(boundingBox) = GetMeasuredH() + PADDING_Y * 2;
   return boundingBox;
 }
 
@@ -1303,7 +1303,7 @@ void SelectionEventHandler::copy_drag_state()
   constexpr double MIN_SELECTION_W = 2.0;
   selectionW = std::max(std::abs(mouseA - mouseB), MIN_SELECTION_W);
   auto [captionX, captionY, captionW, captionH] =
-      app->shape_items[drag_state->shape_item_idx]->bounding_box();
+      app->shape_items[drag_state->shape_item_idx]->GetBoundingBox();
   selectionY = captionY;
   selectionH = captionH;
   app->selection_areas_flag = true;
@@ -1324,7 +1324,7 @@ void SelectionEventHandler::handle_mouse_button_down(
   for (std::optional<std::array<double, 4>> &selection : app->selection_slots)
     selection.reset();
   for (const auto &[idx, shapeItem] : app->shape_items | std::views::enumerate)
-    if (isPointInside({event.x, event.y}, shapeItem->bounding_box()))
+    if (isPointInside({event.x, event.y}, shapeItem->GetBoundingBox()))
     {
       drag_state.emplace();
       drag_state->shape_item_idx = static_cast<std::uint32_t>(idx);
@@ -1336,7 +1336,7 @@ void SelectionEventHandler::handle_mouse_button_down(
     }
 }
 
-std::uint32_t GlyphShapeItem::find_codepoint_offset(double screenX) const
+std::uint32_t GlyphShapeItem::FindCodepointOffset(double screenX) const
 {
   std::size_t captionOffset{shape_str.size()};
   for (const GlyphClusterSection &clusterSection : cluster_sections)
@@ -1360,7 +1360,7 @@ std::uint32_t GlyphShapeItem::find_codepoint_offset(double screenX) const
 }
 
 std::pair<std::uint32_t, double>
-GlyphShapeItem::find_cluster_offset(std::uint32_t textOffset) const
+GlyphShapeItem::FindClusterOffset(std::uint32_t textOffset) const
 {
   std::pair<std::uint32_t, double> clusterOffset{};
   for (const auto &[enumerationIdx, clusterSection] :
@@ -1389,22 +1389,22 @@ void SelectionEventHandler::handle_mouse_button_up(
     return;
   const GlyphShapeItem *shapeItem =
       app->shape_items[drag_state->shape_item_idx];
-  auto [captionX, captionY, captionW, captionH] = shapeItem->bounding_box();
+  auto [captionX, captionY, captionW, captionH] = shapeItem->GetBoundingBox();
   std::array<double, 2> screenX{drag_state->mouse_segment};
   std::ranges::sort(screenX);
 
   double startX = std::get<0>(screenX) - captionX;
-  std::uint32_t codepointStart = shapeItem->find_codepoint_offset(startX);
+  std::uint32_t codepointStart = shapeItem->FindCodepointOffset(startX);
   std::pair<std::uint32_t, double> clusterStart =
-      shapeItem->find_cluster_offset(codepointStart);
+      shapeItem->FindClusterOffset(codepointStart);
 
   double finalX = std::get<1>(screenX) - captionX;
-  std::uint32_t codepointFinal = shapeItem->find_codepoint_offset(finalX);
+  std::uint32_t codepointFinal = shapeItem->FindCodepointOffset(finalX);
   std::pair<std::uint32_t, double> clusterFinal =
-      shapeItem->find_cluster_offset(codepointFinal);
+      shapeItem->FindClusterOffset(codepointFinal);
 
   auto [measureL, measureR, measureT, measureB] =
-      shapeItem->text_measure(clusterStart, clusterFinal, true);
+      shapeItem->TextMeasure(clusterStart, clusterFinal, true);
   double measureW = measureR - measureL;
   double measureH = measureB - measureT;
 
@@ -1418,8 +1418,8 @@ void SelectionEventHandler::handle_mouse_button_up(
     static constexpr double PADDING_Y = 4;
     auto &[selectionX, selectionY, selectionW, selectionH] = *selection;
     selectionX = shapeItem->translate_x + measureL - PADDING_X;
-    selectionY =
-        shapeItem->translate_y + shapeItem->measured_h() + measureT - PADDING_Y;
+    selectionY = shapeItem->translate_y + shapeItem->GetMeasuredH() + measureT -
+                 PADDING_Y;
     selectionW = measureW + PADDING_X * 2;
     selectionH = measureH + PADDING_Y * 2;
   }
@@ -1435,7 +1435,7 @@ void SelectionEventHandler::handle_mouse_motion(
     return;
   const GlyphShapeItem *shapeItem =
       app->shape_items[drag_state->shape_item_idx];
-  auto [captionX, captionY, captionW, captionH] = shapeItem->bounding_box();
+  auto [captionX, captionY, captionW, captionH] = shapeItem->GetBoundingBox();
   float captionMin = static_cast<float>(captionX);
   float captionMax = static_cast<float>(captionX + captionW);
   std::get<1>(drag_state->mouse_segment) =
@@ -1443,7 +1443,7 @@ void SelectionEventHandler::handle_mouse_motion(
   copy_drag_state();
 }
 
-SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
+SDL_AppResult AppState::HandleEvent(SDL_Event *event) noexcept
 {
   switch (event->type)
   {
@@ -1461,15 +1461,15 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
 
   case SDL_EVENT_WINDOW_RESIZED:
     caption_one.translate_x = 0.5 * static_cast<double>(event->window.data1) -
-                              caption_one.measured_w() * 0.5;
+                              caption_one.GetMeasuredW() * 0.5;
     caption_one.translate_y =
         5.0 / 12.0 * static_cast<double>(event->window.data2) -
-        caption_one.measured_h() * 0.5;
+        caption_one.GetMeasuredH() * 0.5;
     caption_two.translate_x = 0.5 * static_cast<double>(event->window.data1) -
-                              caption_two.measured_w() * 0.5;
+                              caption_two.GetMeasuredW() * 0.5;
     caption_two.translate_y =
         7.0 / 12.0 * static_cast<double>(event->window.data2) -
-        caption_two.measured_h() * 0.5;
+        caption_two.GetMeasuredH() * 0.5;
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_QUIT:
@@ -1480,7 +1480,7 @@ SDL_AppResult AppState::handle_event(SDL_Event *event) noexcept
   }
 }
 
-bool GlyphShapeItem::verify_atlas_cache()
+bool GlyphShapeItem::VerifyAtlasCache()
 {
   std::span<hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
@@ -1493,7 +1493,7 @@ bool GlyphShapeItem::verify_atlas_cache()
       continue;
     UniqueFreetypeGlyph ftglyph =
         app->freetype_load_glyph(glyphInfo.codepoint, step.subpixel_phase);
-    const FT_Bitmap &bitmap = asBitmapGlyph(ftglyph.get())->bitmap;
+    const FT_Bitmap &bitmap = AsBitmapGlyph(ftglyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
     FT_Face freetypeFace = hb_ft_font_get_ft_face(app->harfbuzz_font.get());
@@ -1508,7 +1508,7 @@ bool GlyphShapeItem::verify_atlas_cache()
   return everInserted;
 }
 
-void AppState::pack_atlas()
+void AppState::PackAtlas()
 {
   struct AtlasColumnItem
   {
@@ -1523,14 +1523,14 @@ void AppState::pack_atlas()
   auto atlasGlyphH = [this](const AtlasColumnItem &columnItem)
   {
     const GlyphAtlasItem &atlasItem = atlas_cache.at(columnItem.atlas_label);
-    return asBitmapGlyph(atlasItem.ftglyph.get())->bitmap.rows;
+    return AsBitmapGlyph(atlasItem.ftglyph.get())->bitmap.rows;
   };
   std::ranges::sort(atlasColumnItems, std::ranges::greater{}, atlasGlyphH);
   std::uint32_t accumulatedX{};
   for (AtlasColumnItem &columnItem : atlasColumnItems)
   {
     FT_BitmapGlyph bitmapGlyph =
-        asBitmapGlyph(atlas_cache.at(columnItem.atlas_label).ftglyph.get());
+        AsBitmapGlyph(atlas_cache.at(columnItem.atlas_label).ftglyph.get());
     std::uint32_t bitmapW = bitmapGlyph->bitmap.width;
     if (bitmapW > ATLAS_SIDE)
       continue;
@@ -1562,7 +1562,7 @@ void AppState::pack_atlas()
     const GlyphAtlasItem &atlasItem =
         atlas_cache.at(atlasShelf.children.front().atlas_label);
     std::uint32_t atlasShelfH =
-        asBitmapGlyph(atlasItem.ftglyph.get())->bitmap.rows;
+        AsBitmapGlyph(atlasItem.ftglyph.get())->bitmap.rows;
     if (atlasShelfH > ATLAS_SIDE)
       continue;
     atlasShelf.atlas_offset =
@@ -1595,7 +1595,7 @@ void AppState::pack_atlas()
 void GlyphAtlasCopier::copy_bitmap(const GlyphAtlasItem &cacheItem)
 {
   atlas_position = &cacheItem.atlas_position;
-  bitmap = &asBitmapGlyph(cacheItem.ftglyph.get())->bitmap;
+  bitmap = &AsBitmapGlyph(cacheItem.ftglyph.get())->bitmap;
   for (std::uint32_t row = 0; row < bitmap->rows; ++row)
     copy_bitmap_row(row);
 }
@@ -1612,7 +1612,7 @@ void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row)
   std::memcpy(transferBegin + atlasFullOffset, source, bitmap->width);
 }
 
-void GlyphShapeItem::verify_instance_capacity()
+void GlyphShapeItem::VerifyInstanceCapacity()
 {
   std::uint32_t bufferSize = static_cast<std::uint32_t>(
       hb_buffer_get_length(harfbuzz_buffer.get()) * sizeof(RectInstanceData));
@@ -1627,7 +1627,7 @@ void GlyphShapeItem::verify_instance_capacity()
       createGPUTransferBuffer(app->device_ctx.get(), instance_capacity);
 }
 
-void GlyphShapeItem::transfer_instance_data()
+void GlyphShapeItem::TransferInstanceData()
 {
   unsigned int bufferIdx{};
   UniqueGPUMappedBuffer mappedBuffer = mapGPUTransferBuffer(
@@ -1655,10 +1655,10 @@ void GlyphShapeItem::transfer_instance_data()
   }
 }
 
-void GlyphShapeItem::queue_vertex_copypass()
+void GlyphShapeItem::QueueVertexCopypass()
 {
-  verify_instance_capacity();
-  transfer_instance_data();
+  VerifyInstanceCapacity();
+  TransferInstanceData();
   app->copypass_tasks.push_back(CopyGlyphVertices{this});
 }
 
@@ -1666,9 +1666,9 @@ constexpr double MAX_SAFE_INTEGER = std::ldexp(1.0, 53) - 1;
 constexpr double MIN_SAFE_INTEGER = -1.0 * MAX_SAFE_INTEGER;
 
 std::array<double, 4>
-GlyphShapeItem::text_measure(std::pair<std::uint32_t, double> start,
-                             std::pair<std::uint32_t, double> final,
-                             bool finalBound) const
+GlyphShapeItem::TextMeasure(std::pair<std::uint32_t, double> start,
+                            std::pair<std::uint32_t, double> final,
+                            bool finalBound) const
 {
   std::array<double, 4> textMetrics{};
   auto &[textL, textR, textT, textB] = textMetrics;
@@ -1694,7 +1694,7 @@ GlyphShapeItem::text_measure(std::pair<std::uint32_t, double> start,
     {
       const GlyphAtlasItem &atlasItem =
           app->atlas_cache.at(*geometriesFirst->atlas_label);
-      FT_BitmapGlyph bitmapGlyph = asBitmapGlyph(atlasItem.ftglyph.get());
+      FT_BitmapGlyph bitmapGlyph = AsBitmapGlyph(atlasItem.ftglyph.get());
       clusterL -= static_cast<double>(bitmapGlyph->left);
     }
     std::ranges::transform_view geometriesTop{
@@ -1718,7 +1718,7 @@ GlyphShapeItem::text_measure(std::pair<std::uint32_t, double> start,
   return textMetrics;
 }
 
-std::generator<GlyphCaretStep> GlyphShapeItem::emit_glyph_steps()
+std::generator<GlyphCaretStep> GlyphShapeItem::EmitGlyphSteps()
 {
   unsigned int bufferLen = hb_buffer_get_length(harfbuzz_buffer.get());
   std::span<const hb_glyph_position_t> positions{
@@ -1744,7 +1744,7 @@ std::generator<GlyphCaretStep> GlyphShapeItem::emit_glyph_steps()
   }
 }
 
-void GlyphShapeItem::populate_glyph_geometries()
+void GlyphShapeItem::PopulateGlyphGeometries()
 {
   std::span<const hb_glyph_info_t> glyphInfos{
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr),
@@ -1771,7 +1771,7 @@ void GlyphShapeItem::populate_glyph_geometries()
     geometry.atlas_label = atlasLabel;
 
     FT_BitmapGlyph bitmapGlyph =
-        asBitmapGlyph(app->atlas_cache.at(atlasLabel).ftglyph.get());
+        AsBitmapGlyph(app->atlas_cache.at(atlasLabel).ftglyph.get());
     geometry.w = static_cast<double>(bitmapGlyph->bitmap.width);
     geometry.h = static_cast<double>(bitmapGlyph->bitmap.rows);
 
@@ -1794,7 +1794,7 @@ void GlyphShapeItem::populate_glyph_geometries()
   }
 }
 
-std::vector<GlyphClusterSection> GlyphShapeItem::make_cluster_sections()
+std::vector<GlyphClusterSection> GlyphShapeItem::MakeClusterSections()
 {
   const hb_glyph_info_t *glyphInfos =
       hb_buffer_get_glyph_infos(harfbuzz_buffer.get(), nullptr);
@@ -1904,7 +1904,7 @@ const FT_Glyph_Metrics &AppState::freetype_codepoint_metrics(FT_ULong codepoint)
   return face->glyph->metrics;
 }
 
-bool GlyphShapeItem::text_reshape()
+bool GlyphShapeItem::TextReshape()
 {
   if (not harfbuzz_buffer)
     harfbuzz_buffer = UniqueHarfbuzzBuffer{hb_buffer_create()};
@@ -1915,18 +1915,18 @@ bool GlyphShapeItem::text_reshape()
                      static_cast<int>(shape_str.size()));
   hb_buffer_guess_segment_properties(harfbuzz_buffer.get());
   hb_shape(app->harfbuzz_font.get(), harfbuzz_buffer.get(), nullptr, 0);
-  codepoint_infos = {std::from_range, emitCodepointInfo(shape_str)};
-  glyph_steps = {std::from_range, emit_glyph_steps()};
-  return verify_atlas_cache();
+  codepoint_infos = {std::from_range, EmitCodepointInfo(shape_str)};
+  glyph_steps = {std::from_range, EmitGlyphSteps()};
+  return VerifyAtlasCache();
 }
 
-void GlyphShapeItem::text_reflow()
+void GlyphShapeItem::TextReflow()
 {
   glyph_geometries.clear();
-  populate_glyph_geometries();
-  cluster_sections = make_cluster_sections();
-  std::tie(x_min, x_max, y_min, y_max) = text_measure({}, {}, false);
-  queue_vertex_copypass();
+  PopulateGlyphGeometries();
+  cluster_sections = MakeClusterSections();
+  std::tie(x_min, x_max, y_min, y_max) = TextMeasure({}, {}, false);
+  QueueVertexCopypass();
 }
 
 void CopypassTaskVisitor::operator()(CopySelectionAreas task) const
@@ -1999,26 +1999,26 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
   {
     AppState *app = new AppState{};
     *appstate = app;
-    app->instantiate(globalFTLibrary);
+    app->Instantiate(globalFTLibrary);
     bool atlasInserted{};
     for (GlyphShapeItem *shapeItem : app->shape_items)
-      atlasInserted |= shapeItem->text_reshape();
+      atlasInserted |= shapeItem->TextReshape();
     if (atlasInserted)
     {
-      app->pack_atlas();
+      app->PackAtlas();
       app->copypass_tasks.push_back(CopyGlyphAtlas{});
     }
     for (GlyphShapeItem *shapeItem : app->shape_items)
-      shapeItem->text_reflow();
-    auto [windowW, windowH] = getWindowSizeInPixels(app->main_window.get());
+      shapeItem->TextReflow();
+    auto [windowW, windowH] = GetWindowSizeInPixels(app->main_window.get());
     app->caption_one.translate_x = 0.5 * static_cast<double>(windowW) -
-                                   app->caption_one.measured_w() * 0.5;
+                                   app->caption_one.GetMeasuredW() * 0.5;
     app->caption_one.translate_y = 5.0 / 12.0 * static_cast<double>(windowH) -
-                                   app->caption_one.measured_h() * 0.5;
+                                   app->caption_one.GetMeasuredH() * 0.5;
     app->caption_two.translate_x = 0.5 * static_cast<double>(windowW) -
-                                   app->caption_two.measured_w() * 0.5;
+                                   app->caption_two.GetMeasuredW() * 0.5;
     app->caption_two.translate_y = 7.0 / 12.0 * static_cast<double>(windowH) -
-                                   app->caption_two.measured_h() * 0.5;
+                                   app->caption_two.GetMeasuredH() * 0.5;
     return SDL_APP_CONTINUE;
   }
   catch (const std::runtime_error &e)
@@ -2043,11 +2043,11 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
 SDL_AppResult SDL_AppIterate(void *appstate)
 {
   AppState *app = static_cast<AppState *>(appstate);
-  return app->iterate();
+  return app->Iterate();
 }
 
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 {
   AppState *app = static_cast<AppState *>(appstate);
-  return app->handle_event(event);
+  return app->HandleEvent(event);
 }
