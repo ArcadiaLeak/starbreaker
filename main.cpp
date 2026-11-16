@@ -241,22 +241,22 @@ void GPUShaderDeleter::operator()(SDL_GPUShader *shader) const
   SDL_ReleaseGPUShader(device, shader);
 }
 
-const std::array vertexRectImage = std::to_array<std::uint8_t>({
+const std::array rect_image_shader = std::to_array<std::uint8_t>({
 #embed "rect_image.spv"
 });
-const std::array vertexRectInstance = std::to_array<std::uint8_t>({
+const std::array rect_instance_shader = std::to_array<std::uint8_t>({
 #embed "rect_instance.spv"
 });
-const std::array fragmentSelection = std::to_array<std::uint8_t>({
+const std::array selection_box_shader = std::to_array<std::uint8_t>({
 #embed "selection_box.spv"
 });
-const std::array fragmentSolid = std::to_array<std::uint8_t>({
+const std::array solid_shader = std::to_array<std::uint8_t>({
 #embed "solid.spv"
 });
-const std::array fragmentTint = std::to_array<std::uint8_t>({
+const std::array tint_shader = std::to_array<std::uint8_t>({
 #embed "coverage_tint.spv"
 });
-const std::array computeDifferenceBlend = std::to_array<std::uint8_t>({
+const std::array difference_blend_shader = std::to_array<std::uint8_t>({
 #embed "difference_blend.spv"
 });
 
@@ -486,96 +486,149 @@ RectInstanceVertexInfo::RectInstanceVertexInfo()
 
 UniqueGPUGraphicsPipeline
 CreateGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
-                               SDL_GPUTextureFormat targetFormat)
+                               SDL_GPUTextureFormat target_format)
 {
-  SDL_GPUShaderCreateInfo vertexInfo{};
-  vertexInfo.code = vertexRectInstance.data();
-  vertexInfo.code_size = vertexRectInstance.size();
-  vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-  vertexInfo.num_uniform_buffers = 1;
-  UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
+  SDL_GPUShaderCreateInfo vertex_shader_info{};
+  vertex_shader_info.code = rect_instance_shader.data();
+  vertex_shader_info.code_size = rect_instance_shader.size();
+  vertex_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  vertex_shader_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+  vertex_shader_info.num_uniform_buffers = 1;
+  UniqueGPUShader vertex_shader = createGPUShader(device, vertex_shader_info);
 
-  SDL_GPUShaderCreateInfo fragmentInfo{};
-  fragmentInfo.code = fragmentTint.data();
-  fragmentInfo.code_size = fragmentTint.size();
-  fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-  fragmentInfo.num_samplers = 1;
-  fragmentInfo.num_uniform_buffers = 1;
-  UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
+  SDL_GPUShaderCreateInfo fragment_shader_info{};
+  fragment_shader_info.code = tint_shader.data();
+  fragment_shader_info.code_size = tint_shader.size();
+  fragment_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  fragment_shader_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+  fragment_shader_info.num_samplers = 1;
+  fragment_shader_info.num_uniform_buffers = 1;
+  UniqueGPUShader fragment_shader =
+      createGPUShader(device, fragment_shader_info);
 
-  SDL_GPUColorTargetDescription colorTarget{};
-  colorTarget.format = targetFormat;
-  colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-  colorTarget.blend_state.dst_color_blendfactor =
+  SDL_GPUColorTargetDescription color_target{};
+  color_target.format = target_format;
+  color_target.blend_state.src_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+  color_target.blend_state.dst_color_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-  colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-  colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-  colorTarget.blend_state.dst_alpha_blendfactor =
+  color_target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+  color_target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  color_target.blend_state.dst_alpha_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-  colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-  colorTarget.blend_state.enable_blend = true;
+  color_target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  color_target.blend_state.enable_blend = true;
 
-  SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
-  targetInfo.color_target_descriptions = &colorTarget;
-  targetInfo.num_color_targets = 1;
+  SDL_GPUGraphicsPipelineTargetInfo pipeline_target_info{};
+  pipeline_target_info.color_target_descriptions = &color_target;
+  pipeline_target_info.num_color_targets = 1;
 
-  SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
-  pipelineInfo.vertex_shader = vertexShader.get();
-  pipelineInfo.fragment_shader = fragmentShader.get();
-  RectInstanceVertexInfo vertex_info{};
-  pipelineInfo.vertex_input_state = vertex_info.vertex_input_state;
-  pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
-  pipelineInfo.target_info = targetInfo;
+  SDL_GPUGraphicsPipelineCreateInfo pipeline_info{};
+  pipeline_info.vertex_shader = vertex_shader.get();
+  pipeline_info.fragment_shader = fragment_shader.get();
+  RectInstanceVertexInfo rect_instance_vertex_info{};
+  pipeline_info.vertex_input_state =
+      rect_instance_vertex_info.vertex_input_state;
+  pipeline_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
+  pipeline_info.target_info = pipeline_target_info;
 
-  return CreateGPUGraphicsPipeline(device, &pipelineInfo);
+  return CreateGPUGraphicsPipeline(device, &pipeline_info);
 }
 
 UniqueGPUGraphicsPipeline
 CreateSelectionGPUGraphicsPipeline(SDL_GPUDevice *device)
 {
-  SDL_GPUShaderCreateInfo vertexInfo{};
-  vertexInfo.code = vertexRectInstance.data();
-  vertexInfo.code_size = vertexRectInstance.size();
-  vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-  vertexInfo.num_uniform_buffers = 1;
-  UniqueGPUShader vertexShader = createGPUShader(device, vertexInfo);
+  SDL_GPUShaderCreateInfo vertex_shader_info{};
+  vertex_shader_info.code = rect_instance_shader.data();
+  vertex_shader_info.code_size = rect_instance_shader.size();
+  vertex_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  vertex_shader_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+  vertex_shader_info.num_uniform_buffers = 1;
+  UniqueGPUShader vertex_shader = createGPUShader(device, vertex_shader_info);
 
-  SDL_GPUShaderCreateInfo fragmentInfo{};
-  fragmentInfo.code = fragmentSelection.data();
-  fragmentInfo.code_size = fragmentSelection.size();
-  fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
-  fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-  fragmentInfo.num_uniform_buffers = 1;
-  UniqueGPUShader fragmentShader = createGPUShader(device, fragmentInfo);
+  SDL_GPUShaderCreateInfo fragment_shader_info{};
+  fragment_shader_info.code = selection_box_shader.data();
+  fragment_shader_info.code_size = selection_box_shader.size();
+  fragment_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  fragment_shader_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+  fragment_shader_info.num_uniform_buffers = 1;
+  UniqueGPUShader fragment_shader =
+      createGPUShader(device, fragment_shader_info);
 
-  SDL_GPUColorTargetDescription colorTarget{};
-  colorTarget.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-  colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-  colorTarget.blend_state.dst_color_blendfactor =
+  SDL_GPUColorTargetDescription color_target{};
+  color_target.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+  color_target.blend_state.src_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+  color_target.blend_state.dst_color_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-  colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-  colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-  colorTarget.blend_state.dst_alpha_blendfactor =
+  color_target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+  color_target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  color_target.blend_state.dst_alpha_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-  colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-  colorTarget.blend_state.enable_blend = true;
+  color_target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  color_target.blend_state.enable_blend = true;
 
-  SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
-  targetInfo.color_target_descriptions = &colorTarget;
-  targetInfo.num_color_targets = 1;
+  SDL_GPUGraphicsPipelineTargetInfo pipeline_target_info{};
+  pipeline_target_info.color_target_descriptions = &color_target;
+  pipeline_target_info.num_color_targets = 1;
 
-  SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
-  pipelineInfo.vertex_shader = vertexShader.get();
-  pipelineInfo.fragment_shader = fragmentShader.get();
-  RectInstanceVertexInfo vertex_info{};
-  pipelineInfo.vertex_input_state = vertex_info.vertex_input_state;
-  pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
-  pipelineInfo.target_info = targetInfo;
+  SDL_GPUGraphicsPipelineCreateInfo pipeline_info{};
+  pipeline_info.vertex_shader = vertex_shader.get();
+  pipeline_info.fragment_shader = fragment_shader.get();
+  RectInstanceVertexInfo rect_instance_vertex_info{};
+  pipeline_info.vertex_input_state =
+      rect_instance_vertex_info.vertex_input_state;
+  pipeline_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
+  pipeline_info.target_info = pipeline_target_info;
 
-  return CreateGPUGraphicsPipeline(device, &pipelineInfo);
+  return CreateGPUGraphicsPipeline(device, &pipeline_info);
+}
+
+UniqueGPUGraphicsPipeline
+CreateSolidRectGPUGraphicsPipeline(SDL_GPUDevice *device,
+                                   SDL_GPUTextureFormat target_format)
+{
+  SDL_GPUShaderCreateInfo vertex_shader_info{};
+  vertex_shader_info.code = rect_image_shader.data();
+  vertex_shader_info.code_size = rect_image_shader.size();
+  vertex_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  vertex_shader_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+  vertex_shader_info.num_uniform_buffers = 1;
+  UniqueGPUShader vertex_shader = createGPUShader(device, vertex_shader_info);
+
+  SDL_GPUShaderCreateInfo fragment_shader_info{};
+  fragment_shader_info.code = solid_shader.data();
+  fragment_shader_info.code_size = solid_shader.size();
+  fragment_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  fragment_shader_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+  fragment_shader_info.num_uniform_buffers = 1;
+  UniqueGPUShader fragment_shader =
+      createGPUShader(device, fragment_shader_info);
+
+  SDL_GPUColorTargetDescription color_target{};
+  color_target.format = target_format;
+  color_target.blend_state.src_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+  color_target.blend_state.dst_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  color_target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+  color_target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  color_target.blend_state.dst_alpha_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  color_target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  color_target.blend_state.enable_blend = true;
+
+  SDL_GPUGraphicsPipelineTargetInfo pipeline_target_info{};
+  pipeline_target_info.color_target_descriptions = &color_target;
+  pipeline_target_info.num_color_targets = 1;
+
+  SDL_GPUGraphicsPipelineCreateInfo pipeline_info{};
+  pipeline_info.vertex_shader = vertex_shader.get();
+  pipeline_info.fragment_shader = fragment_shader.get();
+  pipeline_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
+  pipeline_info.target_info = pipeline_target_info;
+
+  return CreateGPUGraphicsPipeline(device, &pipeline_info);
 }
 
 struct GPUComputePipelineDeleter
@@ -608,8 +661,8 @@ createGPUComputePipeline(SDL_GPUDevice *device,
 UniqueGPUComputePipeline CreateDifferenceBlendGPUPipeline(SDL_GPUDevice *device)
 {
   SDL_GPUComputePipelineCreateInfo pipelineInfo{};
-  pipelineInfo.code = computeDifferenceBlend.data();
-  pipelineInfo.code_size = computeDifferenceBlend.size();
+  pipelineInfo.code = difference_blend_shader.data();
+  pipelineInfo.code_size = difference_blend_shader.size();
   pipelineInfo.entrypoint = "main";
   pipelineInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
   pipelineInfo.num_readonly_storage_textures = 2;
@@ -898,12 +951,12 @@ struct SelectionEventHandler
   AppState *app;
   std::optional<SelectionDragState> drag_state;
 
-  std::uint32_t find_unoccupied_slot();
-  void copy_drag_state();
+  std::uint32_t FindUnoccupiedSlot();
+  void CopyDragState();
 
-  void handle_mouse_button_down(const SDL_MouseButtonEvent &event);
-  void handle_mouse_button_up(const SDL_MouseButtonEvent &event);
-  void handle_mouse_motion(const SDL_MouseMotionEvent &event);
+  void HandleMouseButtonDown(const SDL_MouseButtonEvent &event);
+  void HandleMouseButtonUp(const SDL_MouseButtonEvent &event);
+  void HandleMouseMotion(const SDL_MouseMotionEvent &event);
 };
 
 struct AppState
@@ -940,9 +993,10 @@ struct AppState
   bool selection_areas_flag = false;
 
   UniqueGPUSampler sampler;
-  UniqueGPUGraphicsPipeline swapchain_pipeline;
-  UniqueGPUGraphicsPipeline offscreen_pipeline;
+  UniqueGPUGraphicsPipeline swapchain_glyph_pipeline;
+  UniqueGPUGraphicsPipeline offscreen_glyph_pipeline;
   UniqueGPUGraphicsPipeline selection_pipeline;
+  UniqueGPUGraphicsPipeline solid_rect_pipeline;
   UniqueGPUComputePipeline difference_blend_pipeline;
 
   UniqueGPUBuffer selection_instances;
@@ -975,22 +1029,28 @@ void AppState::Instantiate(FT_Library library)
                                      getWindowDisplayScale(main_window.get()));
   hb_ft_font_set_load_flags(harfbuzz_font.get(),
                             FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
-  selection_pipeline = CreateSelectionGPUGraphicsPipeline(device_ctx.get());
-  difference_blend_pipeline =
-      CreateDifferenceBlendGPUPipeline(device_ctx.get());
-  GPUTextureCreateInfo textureInfo{.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
-                                   .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
-                                   .texture_w = ATLAS_SIDE,
-                                   .texture_h = ATLAS_SIDE};
-  atlas_texture = CreateGPUTexture(device_ctx.get(), textureInfo);
+
+  GPUTextureCreateInfo texture_info{.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+                                    .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                    .texture_w = ATLAS_SIDE,
+                                    .texture_h = ATLAS_SIDE};
+  atlas_texture = CreateGPUTexture(device_ctx.get(), texture_info);
   atlas_transfer =
       CreateGPUTransferBuffer(device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
   sampler = CreateCommonGPUSampler(device_ctx.get());
-  swapchain_pipeline = CreateGlyphGPUGraphicsPipeline(
-      device_ctx.get(),
-      SDL_GetGPUSwapchainTextureFormat(device_ctx.get(), main_window.get()));
-  offscreen_pipeline = CreateGlyphGPUGraphicsPipeline(
+
+  selection_pipeline = CreateSelectionGPUGraphicsPipeline(device_ctx.get());
+  difference_blend_pipeline =
+      CreateDifferenceBlendGPUPipeline(device_ctx.get());
+  offscreen_glyph_pipeline = CreateGlyphGPUGraphicsPipeline(
       device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+  SDL_GPUTextureFormat swapchain_texture_format =
+      SDL_GetGPUSwapchainTextureFormat(device_ctx.get(), main_window.get());
+  swapchain_glyph_pipeline = CreateGlyphGPUGraphicsPipeline(
+      device_ctx.get(), swapchain_texture_format);
+  solid_rect_pipeline = CreateSolidRectGPUGraphicsPipeline(
+      device_ctx.get(), swapchain_texture_format);
+
   const FT_Glyph_Metrics &haitch_metrics = GetFtMetricsForCodepoint(72);
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
 }
@@ -1030,14 +1090,16 @@ void GPUCommandSequencer::IssueRenderPass()
       std::ranges::distance(app->selection_slots | std::views::join);
   if (num_selections == 0)
   {
-    SDL_GPUGraphicsPipeline *scenePipeline = app->swapchain_pipeline.get();
+    SDL_GPUGraphicsPipeline *scenePipeline =
+        app->swapchain_glyph_pipeline.get();
     render_sequencer.DrawScene(render_sequencer.swapchain_texture,
                                scenePipeline);
   }
   else
   {
     render_sequencer.VerifyStorageTextures();
-    SDL_GPUGraphicsPipeline *scenePipeline = app->offscreen_pipeline.get();
+    SDL_GPUGraphicsPipeline *scenePipeline =
+        app->offscreen_glyph_pipeline.get();
     render_sequencer.DrawScene(app->offscreen_texture.get(), scenePipeline);
     render_sequencer.DrawSelectedAreas();
     render_sequencer.BlendSelectedAreas();
@@ -1264,7 +1326,7 @@ std::array<double, 4> GlyphShapeItem::GetBoundingBox() const noexcept
   return boundingBox;
 }
 
-std::uint32_t SelectionEventHandler::find_unoccupied_slot()
+std::uint32_t SelectionEventHandler::FindUnoccupiedSlot()
 {
   auto selectionPredicate = [](const std::optional<std::array<double, 4>> &slot)
   { return not slot.has_value(); };
@@ -1278,7 +1340,7 @@ std::uint32_t SelectionEventHandler::find_unoccupied_slot()
       std::distance(app->selection_slots.begin(), selectionIt));
 }
 
-void SelectionEventHandler::copy_drag_state()
+void SelectionEventHandler::CopyDragState()
 {
   auto &[selectionX, selectionY, selectionW, selectionH] =
       *app->selection_slots[drag_state->selection_idx];
@@ -1302,7 +1364,7 @@ bool isPointInside(const std::array<double, 2> &point,
          (pointY >= rectangleY) && (pointY <= rectangleY + rectangleH);
 }
 
-void SelectionEventHandler::handle_mouse_button_down(
+void SelectionEventHandler::HandleMouseButtonDown(
     const SDL_MouseButtonEvent &event)
 {
   for (std::optional<std::array<double, 4>> &selection : app->selection_slots)
@@ -1312,10 +1374,10 @@ void SelectionEventHandler::handle_mouse_button_down(
     {
       drag_state.emplace();
       drag_state->shape_item_idx = static_cast<std::uint32_t>(idx);
-      drag_state->selection_idx = find_unoccupied_slot();
+      drag_state->selection_idx = FindUnoccupiedSlot();
       std::get<0>(drag_state->mouse_segment) = event.x;
       std::get<1>(drag_state->mouse_segment) = event.x;
-      copy_drag_state();
+      CopyDragState();
       break;
     }
 }
@@ -1366,7 +1428,7 @@ GlyphShapeItem::FindClusterOffset(std::uint32_t textOffset) const
   return clusterOffset;
 }
 
-void SelectionEventHandler::handle_mouse_button_up(
+void SelectionEventHandler::HandleMouseButtonUp(
     const SDL_MouseButtonEvent &event)
 {
   if (not drag_state.has_value())
@@ -1412,8 +1474,7 @@ void SelectionEventHandler::handle_mouse_button_up(
   drag_state.reset();
 }
 
-void SelectionEventHandler::handle_mouse_motion(
-    const SDL_MouseMotionEvent &event)
+void SelectionEventHandler::HandleMouseMotion(const SDL_MouseMotionEvent &event)
 {
   if (not drag_state.has_value())
     return;
@@ -1424,7 +1485,7 @@ void SelectionEventHandler::handle_mouse_motion(
   float captionMax = static_cast<float>(captionX + captionW);
   std::get<1>(drag_state->mouse_segment) =
       std::clamp(event.x, captionMin, captionMax);
-  copy_drag_state();
+  CopyDragState();
 }
 
 SDL_AppResult AppState::HandleEvent(SDL_Event *event) noexcept
@@ -1432,15 +1493,15 @@ SDL_AppResult AppState::HandleEvent(SDL_Event *event) noexcept
   switch (event->type)
   {
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
-    selection_handler.handle_mouse_button_down(event->button);
+    selection_handler.HandleMouseButtonDown(event->button);
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_MOUSE_MOTION:
-    selection_handler.handle_mouse_motion(event->motion);
+    selection_handler.HandleMouseMotion(event->motion);
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_MOUSE_BUTTON_UP:
-    selection_handler.handle_mouse_button_up(event->button);
+    selection_handler.HandleMouseButtonUp(event->button);
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_WINDOW_RESIZED:
