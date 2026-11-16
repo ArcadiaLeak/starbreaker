@@ -805,8 +805,8 @@ struct GlyphAtlasCopier
   UniqueGPUMappedBuffer mapped_atlas;
   const std::array<std::uint32_t, 3> *atlas_position;
   const FT_Bitmap *bitmap;
-  void copy_bitmap(const GlyphAtlasItem &cacheItem);
-  void copy_bitmap_row(std::uint32_t row);
+  void CopyBitmap(const GlyphAtlasItem &cacheItem);
+  void CopyBitmapRow(std::uint32_t row);
 };
 
 struct GlyphCaretStep
@@ -884,8 +884,8 @@ struct GPUCommandSequencer
 {
   AppState *app;
   EngagedGPUCommandBuffer command_buffer;
-  void issue_copy_pass();
-  void issue_render_pass();
+  void IssueCopyPass();
+  void IssueRenderPass();
 };
 
 struct GPURenderSequencer
@@ -896,11 +896,11 @@ struct GPURenderSequencer
   std::uint32_t swapchain_w, swapchain_h;
   SDL_GPUTexture *swapchain_texture;
 
-  void draw_scene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
-  void verify_storage_textures();
-  void selected_areas_draw();
-  void selected_areas_blend();
-  void draw_processed_image();
+  void DrawScene(SDL_GPUTexture *texture, SDL_GPUGraphicsPipeline *pipeline);
+  void VerifyStorageTextures();
+  void DrawSelectedAreas();
+  void BlendSelectedAreas();
+  void DrawProcessedImage();
 };
 
 struct SelectionDragState
@@ -1011,7 +1011,7 @@ void AppState::Instantiate(FT_Library library)
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
 }
 
-void GPUCommandSequencer::issue_copy_pass()
+void GPUCommandSequencer::IssueCopyPass()
 {
   if (app->copypass_tasks.empty())
     return;
@@ -1034,7 +1034,7 @@ void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const
   SDL_UploadToGPUBuffer(copypass, &src, &dst, false);
 }
 
-void GPUCommandSequencer::issue_render_pass()
+void GPUCommandSequencer::IssueRenderPass()
 {
   GPURenderSequencer render_sequencer{app, this};
   render_sequencer.swapchain_texture = waitAndAcquireGPUSwapchainTexture(
@@ -1047,21 +1047,21 @@ void GPUCommandSequencer::issue_render_pass()
   if (num_selections == 0)
   {
     SDL_GPUGraphicsPipeline *scenePipeline = app->swapchain_pipeline.get();
-    render_sequencer.draw_scene(render_sequencer.swapchain_texture,
-                                scenePipeline);
+    render_sequencer.DrawScene(render_sequencer.swapchain_texture,
+                               scenePipeline);
   }
   else
   {
-    render_sequencer.verify_storage_textures();
+    render_sequencer.VerifyStorageTextures();
     SDL_GPUGraphicsPipeline *scenePipeline = app->offscreen_pipeline.get();
-    render_sequencer.draw_scene(app->offscreen_texture.get(), scenePipeline);
-    render_sequencer.selected_areas_draw();
-    render_sequencer.selected_areas_blend();
-    render_sequencer.draw_processed_image();
+    render_sequencer.DrawScene(app->offscreen_texture.get(), scenePipeline);
+    render_sequencer.DrawSelectedAreas();
+    render_sequencer.BlendSelectedAreas();
+    render_sequencer.DrawProcessedImage();
   }
 }
 
-void GPURenderSequencer::draw_processed_image()
+void GPURenderSequencer::DrawProcessedImage()
 {
   SDL_GPUBlitInfo blitInfo{};
   blitInfo.load_op = SDL_GPU_LOADOP_DONT_CARE;
@@ -1074,8 +1074,8 @@ void GPURenderSequencer::draw_processed_image()
   SDL_BlitGPUTexture(command_sequencer->command_buffer.get(), &blitInfo);
 }
 
-void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
-                                    SDL_GPUGraphicsPipeline *pipeline)
+void GPURenderSequencer::DrawScene(SDL_GPUTexture *scene_texture,
+                                   SDL_GPUGraphicsPipeline *pipeline)
 {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   SDL_GPUColorTargetInfo colorTarget{.texture = scene_texture,
@@ -1135,7 +1135,7 @@ void GPURenderSequencer::draw_scene(SDL_GPUTexture *scene_texture,
   }
 }
 
-void GPURenderSequencer::verify_storage_textures()
+void GPURenderSequencer::VerifyStorageTextures()
 {
   bool isFineW = app->offscreen_w >= swapchain_w;
   bool isFineH = app->offscreen_h >= swapchain_h;
@@ -1173,7 +1173,7 @@ void GPURenderSequencer::verify_storage_textures()
       createGPUTexture(app->device_ctx.get(), processedInfo);
 }
 
-void GPURenderSequencer::selected_areas_draw()
+void GPURenderSequencer::DrawSelectedAreas()
 {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
   SDL_GPUColorTargetInfo colorTarget{.texture = app->selection_texture.get(),
@@ -1223,7 +1223,7 @@ void GPURenderSequencer::selected_areas_draw()
   SDL_DrawGPUPrimitives(renderPass.get(), 4, numInstances, 0, 0);
 }
 
-void GPURenderSequencer::selected_areas_blend()
+void GPURenderSequencer::BlendSelectedAreas()
 {
   SDL_GPUCommandBuffer *cmd = command_sequencer->command_buffer.get();
 
@@ -1257,8 +1257,8 @@ SDL_AppResult AppState::Iterate() noexcept
     GPUCommandSequencer command_sequencer{this};
     command_sequencer.command_buffer =
         acquireGPUCommandBuffer(device_ctx.get());
-    command_sequencer.issue_copy_pass();
-    command_sequencer.issue_render_pass();
+    command_sequencer.IssueCopyPass();
+    command_sequencer.IssueRenderPass();
     return SDL_APP_CONTINUE;
   }
   catch (const std::runtime_error &e)
@@ -1589,18 +1589,18 @@ void AppState::PackAtlas()
       mapGPUTransferBuffer(device_ctx.get(), atlas_transfer.get(), true);
   std::memset(atlasCopier.mapped_atlas.get(), 0, ATLAS_SIDE * ATLAS_SIDE);
   for (const auto &[cacheLabel, cacheItem] : atlas_cache)
-    atlasCopier.copy_bitmap(cacheItem);
+    atlasCopier.CopyBitmap(cacheItem);
 }
 
-void GlyphAtlasCopier::copy_bitmap(const GlyphAtlasItem &cacheItem)
+void GlyphAtlasCopier::CopyBitmap(const GlyphAtlasItem &cacheItem)
 {
   atlas_position = &cacheItem.atlas_position;
   bitmap = &AsBitmapGlyph(cacheItem.ftglyph.get())->bitmap;
   for (std::uint32_t row = 0; row < bitmap->rows; ++row)
-    copy_bitmap_row(row);
+    CopyBitmapRow(row);
 }
 
-void GlyphAtlasCopier::copy_bitmap_row(std::uint32_t row)
+void GlyphAtlasCopier::CopyBitmapRow(std::uint32_t row)
 {
   const auto &[atlasX, atlasY, atlasPage] = *atlas_position;
   unsigned char *source = bitmap->buffer + row * bitmap->pitch;
