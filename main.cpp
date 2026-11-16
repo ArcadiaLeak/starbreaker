@@ -942,8 +942,8 @@ struct AppState
   GlyphShapeItem caption_two{.app = this, .shape_str = SHAPE_STR_TWO};
   std::vector<GlyphShapeItem *> shape_items{&caption_one, &caption_two};
 
-  UniqueFreetypeGlyph freetype_load_glyph(hb_codepoint_t glyphid, int phase);
-  const FT_Glyph_Metrics &freetype_codepoint_metrics(FT_ULong codepoint);
+  UniqueFreetypeGlyph GetFtGlyph(hb_codepoint_t glyphid, int phase);
+  const FT_Glyph_Metrics &GetFtMetricsForCodepoint(FT_ULong codepoint);
 
   UniqueGPUTexture offscreen_texture;
   UniqueGPUTexture selection_texture;
@@ -965,9 +965,9 @@ struct AppState
   UniqueGPUTransferBuffer selection_transfer;
   std::uint32_t selection_instances_capacity = 0;
 
-  void verify_selection_capacity(std::uint32_t numSelections);
-  void transfer_selection_areas();
-  void selection_reflow();
+  void VerifySelectionBuffersCapacity(std::uint32_t num_selections);
+  void WriteSelectionAreasForTransfer();
+  void ReflowSelections();
 
   std::vector<CopypassTask> copypass_tasks;
 
@@ -1007,7 +1007,7 @@ void AppState::Instantiate(FT_Library library)
       SDL_GetGPUSwapchainTextureFormat(device_ctx.get(), main_window.get()));
   offscreen_pipeline = createGlyphGPUGraphicsPipeline(
       device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
-  const FT_Glyph_Metrics &haitch_metrics = freetype_codepoint_metrics(72);
+  const FT_Glyph_Metrics &haitch_metrics = GetFtMetricsForCodepoint(72);
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
 }
 
@@ -1042,9 +1042,9 @@ void GPUCommandSequencer::issue_render_pass()
       &render_sequencer.swapchain_w, &render_sequencer.swapchain_h);
   if (not render_sequencer.swapchain_texture)
     return;
-  auto numSelections =
+  auto num_selections =
       std::ranges::distance(app->selection_slots | std::views::join);
-  if (numSelections == 0)
+  if (num_selections == 0)
   {
     SDL_GPUGraphicsPipeline *scenePipeline = app->swapchain_pipeline.get();
     render_sequencer.draw_scene(render_sequencer.swapchain_texture,
@@ -1247,11 +1247,11 @@ SDL_AppResult AppState::Iterate() noexcept
 {
   try
   {
-    auto numSelections =
+    auto num_selections =
         std::ranges::distance(selection_slots | std::views::join);
-    if (selection_areas_flag && numSelections > 0)
+    if (selection_areas_flag && num_selections > 0)
     {
-      selection_reflow();
+      ReflowSelections();
       selection_areas_flag = false;
     }
     GPUCommandSequencer command_sequencer{this};
@@ -1492,7 +1492,7 @@ bool GlyphShapeItem::VerifyAtlasCache()
     if (app->atlas_cache.contains(cacheLabel))
       continue;
     UniqueFreetypeGlyph ftglyph =
-        app->freetype_load_glyph(glyphInfo.codepoint, step.subpixel_phase);
+        app->GetFtGlyph(glyphInfo.codepoint, step.subpixel_phase);
     const FT_Bitmap &bitmap = AsBitmapGlyph(ftglyph.get())->bitmap;
     if (bitmap.width == 0 || bitmap.rows == 0)
       continue;
@@ -1862,8 +1862,7 @@ void CopypassTaskVisitor::operator()(CopyGlyphAtlas) const
   SDL_UploadToGPUTexture(copypass, &source, &destination, false);
 }
 
-UniqueFreetypeGlyph AppState::freetype_load_glyph(hb_codepoint_t glyphid,
-                                                  int phase)
+UniqueFreetypeGlyph AppState::GetFtGlyph(hb_codepoint_t glyphid, int phase)
 {
   FT_Error errcode{};
   FT_Face face = hb_ft_font_get_ft_face(harfbuzz_font.get());
@@ -1891,7 +1890,7 @@ UniqueFreetypeGlyph AppState::freetype_load_glyph(hb_codepoint_t glyphid,
   return UniqueFreetypeGlyph{glyph};
 }
 
-const FT_Glyph_Metrics &AppState::freetype_codepoint_metrics(FT_ULong codepoint)
+const FT_Glyph_Metrics &AppState::GetFtMetricsForCodepoint(FT_ULong codepoint)
 {
   FT_Error errcode{};
   FT_Face face = hb_ft_font_get_ft_face(harfbuzz_font.get());
@@ -1939,21 +1938,21 @@ void CopypassTaskVisitor::operator()(CopySelectionAreas task) const
   SDL_UploadToGPUBuffer(copypass, &source, &destination, false);
 }
 
-void AppState::selection_reflow()
+void AppState::ReflowSelections()
 {
-  std::uint32_t numSelections = static_cast<std::uint32_t>(
+  std::uint32_t num_selections = static_cast<std::uint32_t>(
       std::ranges::distance(selection_slots | std::views::join));
-  verify_selection_capacity(numSelections);
-  transfer_selection_areas();
-  copypass_tasks.push_back(CopySelectionAreas{numSelections});
+  VerifySelectionBuffersCapacity(num_selections);
+  WriteSelectionAreasForTransfer();
+  copypass_tasks.push_back(CopySelectionAreas{num_selections});
 }
 
-void AppState::verify_selection_capacity(std::uint32_t numSelections)
+void AppState::VerifySelectionBuffersCapacity(std::uint32_t num_selections)
 {
-  std::uint32_t instancesSize = numSelections * sizeof(RectInstanceData);
-  if (instancesSize <= selection_instances_capacity)
+  std::uint32_t instances_size = num_selections * sizeof(RectInstanceData);
+  if (instances_size <= selection_instances_capacity)
     return;
-  selection_instances_capacity = std::max(1u << std::bit_width(instancesSize),
+  selection_instances_capacity = std::max(1u << std::bit_width(instances_size),
                                           selection_instances_capacity * 2u);
   SDL_GPUBufferCreateInfo instancesInfo{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
                                         .size = selection_instances_capacity};
@@ -1962,7 +1961,7 @@ void AppState::verify_selection_capacity(std::uint32_t numSelections)
       createGPUTransferBuffer(device_ctx.get(), selection_instances_capacity);
 }
 
-void AppState::transfer_selection_areas()
+void AppState::WriteSelectionAreasForTransfer()
 {
   UniqueGPUMappedBuffer selectionMapped =
       mapGPUTransferBuffer(device_ctx.get(), selection_transfer.get(), true);
