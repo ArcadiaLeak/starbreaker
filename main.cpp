@@ -86,7 +86,7 @@ void HarfbuzzBufferDeleter::operator()(hb_buffer_t *harfbuzzBuffer) const
   hb_buffer_destroy(harfbuzzBuffer);
 }
 
-UniqueHarfbuzzFont createHarfbuzzFont(FT_Library library, const char *filepath,
+UniqueHarfbuzzFont CreateHarfbuzzFont(FT_Library library, const char *filepath,
                                       FT_F26Dot6 fontsize, float displayScale)
 {
   UniqueFreetypeFace face{};
@@ -112,7 +112,7 @@ void GPUDeviceDeleter::operator()(SDL_GPUDevice *device) const
   SDL_DestroyGPUDevice(device);
 }
 
-UniqueGPUDevice createGPUDevice()
+UniqueGPUDevice CreateGPUDevice()
 {
   SDL_GPUVulkanOptions vulkan_options{};
   vulkan_options.vulkan_api_version = VK_API_VERSION_1_3;
@@ -148,7 +148,7 @@ void WindowDeleter::operator()(SDL_Window *window) const
   SDL_DestroyWindow(window);
 }
 
-UniqueWindow createWindow(const char *title, int width, int height)
+UniqueWindow CreateWindow(const char *title, int width, int height)
 {
   SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
   SDL_Window *window = SDL_CreateWindow(title, width, height, flags);
@@ -172,7 +172,7 @@ void WindowForGPUDeviceDeleter::operator()(SDL_Window *window) const
   SDL_ReleaseWindowFromGPUDevice(device, window);
 }
 
-UniqueWindowForGPUDevice claimWindowForGPUDevice(SDL_GPUDevice *device,
+UniqueWindowForGPUDevice ClaimWindowForGPUDevice(SDL_GPUDevice *device,
                                                  SDL_Window *window)
 {
   if (not SDL_ClaimWindowForGPUDevice(device, window))
@@ -194,7 +194,7 @@ float getWindowDisplayScale(SDL_Window *window)
   return scale;
 }
 
-void setWindowMinimumSize(SDL_Window *window, int minW, int minH)
+void SetWindowMinimumSize(SDL_Window *window, int minW, int minH)
 {
   if (not SDL_SetWindowMinimumSize(window, minW, minH))
   {
@@ -241,11 +241,17 @@ void GPUShaderDeleter::operator()(SDL_GPUShader *shader) const
   SDL_ReleaseGPUShader(device, shader);
 }
 
+const std::array vertexRectImage = std::to_array<std::uint8_t>({
+#embed "rect_image.spv"
+});
 const std::array vertexRectInstance = std::to_array<std::uint8_t>({
 #embed "rect_instance.spv"
 });
 const std::array fragmentSelection = std::to_array<std::uint8_t>({
 #embed "selection_box.spv"
+});
+const std::array fragmentSolid = std::to_array<std::uint8_t>({
+#embed "solid.spv"
 });
 const std::array fragmentTint = std::to_array<std::uint8_t>({
 #embed "coverage_tint.spv"
@@ -277,7 +283,7 @@ void GPUSamplerDeleter::operator()(SDL_GPUSampler *sampler) const
   SDL_ReleaseGPUSampler(device, sampler);
 }
 
-UniqueGPUSampler createCommonGPUSampler(SDL_GPUDevice *device)
+UniqueGPUSampler CreateCommonGPUSampler(SDL_GPUDevice *device)
 {
   SDL_GPUSamplerCreateInfo samplerInfo{};
   samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
@@ -314,7 +320,7 @@ struct GPUTextureCreateInfo
   std::uint32_t texture_w;
   std::uint32_t texture_h;
 };
-UniqueGPUTexture createGPUTexture(SDL_GPUDevice *device,
+UniqueGPUTexture CreateGPUTexture(SDL_GPUDevice *device,
                                   GPUTextureCreateInfo createInfo)
 {
   SDL_GPUTextureCreateInfo textureInfo{};
@@ -360,7 +366,7 @@ void GPUTransferBufferUnmapper::operator()(void *mappedBuffer) const
   SDL_UnmapGPUTransferBuffer(device_ctx, transfer_buffer);
 }
 
-UniqueGPUTransferBuffer createGPUTransferBuffer(SDL_GPUDevice *device,
+UniqueGPUTransferBuffer CreateGPUTransferBuffer(SDL_GPUDevice *device,
                                                 std::uint32_t bufferSize)
 {
   SDL_GPUTransferBufferCreateInfo bufferInfo{};
@@ -428,7 +434,7 @@ void GPUGraphicsPipelineDeleter::operator()(
 }
 
 UniqueGPUGraphicsPipeline
-createGPUGraphicsPipeline(SDL_GPUDevice *device,
+CreateGPUGraphicsPipeline(SDL_GPUDevice *device,
                           SDL_GPUGraphicsPipelineCreateInfo *pipelineInfo)
 {
   SDL_GPUGraphicsPipeline *pipeline =
@@ -442,8 +448,44 @@ createGPUGraphicsPipeline(SDL_GPUDevice *device,
                                    GPUGraphicsPipelineDeleter{device}};
 }
 
+struct RectInstanceVertexInfo
+{
+  std::array<SDL_GPUVertexAttribute, 3> vertex_attributes;
+  SDL_GPUVertexBufferDescription vertex_buffer_descriptions;
+  SDL_GPUVertexInputState vertex_input_state;
+  RectInstanceVertexInfo();
+};
+
+RectInstanceVertexInfo::RectInstanceVertexInfo()
+{
+  std::get<0>(vertex_attributes).location = 0;
+  std::get<0>(vertex_attributes).buffer_slot = 0;
+  std::get<0>(vertex_attributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  std::get<0>(vertex_attributes).offset =
+      offsetof(RectInstanceData, rect_position);
+  std::get<1>(vertex_attributes).location = 1;
+  std::get<1>(vertex_attributes).buffer_slot = 0;
+  std::get<1>(vertex_attributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+  std::get<1>(vertex_attributes).offset = offsetof(RectInstanceData, rect_size);
+  std::get<2>(vertex_attributes).location = 2;
+  std::get<2>(vertex_attributes).buffer_slot = 0;
+  std::get<2>(vertex_attributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+  std::get<2>(vertex_attributes).offset = offsetof(RectInstanceData, uv_rect);
+
+  vertex_buffer_descriptions.slot = 0;
+  vertex_buffer_descriptions.pitch = sizeof(RectInstanceData);
+  vertex_buffer_descriptions.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
+  vertex_buffer_descriptions.instance_step_rate = 0;
+
+  vertex_input_state.vertex_buffer_descriptions = &vertex_buffer_descriptions;
+  vertex_input_state.num_vertex_buffers = 1;
+  vertex_input_state.vertex_attributes = vertex_attributes.data();
+  vertex_input_state.num_vertex_attributes =
+      static_cast<std::uint32_t>(vertex_attributes.size());
+}
+
 UniqueGPUGraphicsPipeline
-createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
+CreateGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
                                SDL_GPUTextureFormat targetFormat)
 {
   SDL_GPUShaderCreateInfo vertexInfo{};
@@ -473,54 +515,25 @@ createGlyphGPUGraphicsPipeline(SDL_GPUDevice *device,
   colorTarget.blend_state.dst_alpha_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
   colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-  colorTarget.blend_state.color_write_mask =
-      SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
-      SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
   colorTarget.blend_state.enable_blend = true;
 
   SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
   targetInfo.color_target_descriptions = &colorTarget;
   targetInfo.num_color_targets = 1;
 
-  std::array<SDL_GPUVertexAttribute, 3> vertexAttributes{};
-  std::get<0>(vertexAttributes).location = 0;
-  std::get<0>(vertexAttributes).buffer_slot = 0;
-  std::get<0>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<0>(vertexAttributes).offset =
-      offsetof(RectInstanceData, rect_position);
-  std::get<1>(vertexAttributes).location = 1;
-  std::get<1>(vertexAttributes).buffer_slot = 0;
-  std::get<1>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<1>(vertexAttributes).offset = offsetof(RectInstanceData, rect_size);
-  std::get<2>(vertexAttributes).location = 2;
-  std::get<2>(vertexAttributes).buffer_slot = 0;
-  std::get<2>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-  std::get<2>(vertexAttributes).offset = offsetof(RectInstanceData, uv_rect);
-
-  SDL_GPUVertexBufferDescription vertexBufferDescriptions{};
-  vertexBufferDescriptions.slot = 0;
-  vertexBufferDescriptions.pitch = sizeof(RectInstanceData);
-  vertexBufferDescriptions.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
-  vertexBufferDescriptions.instance_step_rate = 0;
-
-  SDL_GPUVertexInputState vertexInputState{};
-  vertexInputState.vertex_buffer_descriptions = &vertexBufferDescriptions;
-  vertexInputState.num_vertex_buffers = 1;
-  vertexInputState.vertex_attributes = vertexAttributes.data();
-  vertexInputState.num_vertex_attributes = vertexAttributes.size();
-
   SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
   pipelineInfo.vertex_shader = vertexShader.get();
   pipelineInfo.fragment_shader = fragmentShader.get();
-  pipelineInfo.vertex_input_state = vertexInputState;
+  RectInstanceVertexInfo vertex_info{};
+  pipelineInfo.vertex_input_state = vertex_info.vertex_input_state;
   pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
   pipelineInfo.target_info = targetInfo;
 
-  return createGPUGraphicsPipeline(device, &pipelineInfo);
+  return CreateGPUGraphicsPipeline(device, &pipelineInfo);
 }
 
 UniqueGPUGraphicsPipeline
-createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device)
+CreateSelectionGPUGraphicsPipeline(SDL_GPUDevice *device)
 {
   SDL_GPUShaderCreateInfo vertexInfo{};
   vertexInfo.code = vertexRectInstance.data();
@@ -548,50 +561,21 @@ createSelectionGPUGraphicsPipeline(SDL_GPUDevice *device)
   colorTarget.blend_state.dst_alpha_blendfactor =
       SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
   colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-  colorTarget.blend_state.color_write_mask =
-      SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
-      SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
   colorTarget.blend_state.enable_blend = true;
 
   SDL_GPUGraphicsPipelineTargetInfo targetInfo{};
   targetInfo.color_target_descriptions = &colorTarget;
   targetInfo.num_color_targets = 1;
 
-  std::array<SDL_GPUVertexAttribute, 3> vertexAttributes{};
-  std::get<0>(vertexAttributes).location = 0;
-  std::get<0>(vertexAttributes).buffer_slot = 0;
-  std::get<0>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<0>(vertexAttributes).offset =
-      offsetof(RectInstanceData, rect_position);
-  std::get<1>(vertexAttributes).location = 1;
-  std::get<1>(vertexAttributes).buffer_slot = 0;
-  std::get<1>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-  std::get<1>(vertexAttributes).offset = offsetof(RectInstanceData, rect_size);
-  std::get<2>(vertexAttributes).location = 2;
-  std::get<2>(vertexAttributes).buffer_slot = 0;
-  std::get<2>(vertexAttributes).format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-  std::get<2>(vertexAttributes).offset = offsetof(RectInstanceData, uv_rect);
-
-  SDL_GPUVertexBufferDescription vertexBufferDescriptions{};
-  vertexBufferDescriptions.slot = 0;
-  vertexBufferDescriptions.pitch = sizeof(RectInstanceData);
-  vertexBufferDescriptions.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
-  vertexBufferDescriptions.instance_step_rate = 0;
-
-  SDL_GPUVertexInputState vertexInputState{};
-  vertexInputState.vertex_buffer_descriptions = &vertexBufferDescriptions;
-  vertexInputState.num_vertex_buffers = 1;
-  vertexInputState.vertex_attributes = vertexAttributes.data();
-  vertexInputState.num_vertex_attributes = vertexAttributes.size();
-
   SDL_GPUGraphicsPipelineCreateInfo pipelineInfo{};
   pipelineInfo.vertex_shader = vertexShader.get();
   pipelineInfo.fragment_shader = fragmentShader.get();
-  pipelineInfo.vertex_input_state = vertexInputState;
+  RectInstanceVertexInfo vertex_info{};
+  pipelineInfo.vertex_input_state = vertex_info.vertex_input_state;
   pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
   pipelineInfo.target_info = targetInfo;
 
-  return createGPUGraphicsPipeline(device, &pipelineInfo);
+  return CreateGPUGraphicsPipeline(device, &pipelineInfo);
 }
 
 struct GPUComputePipelineDeleter
@@ -621,7 +605,7 @@ createGPUComputePipeline(SDL_GPUDevice *device,
   return UniqueGPUComputePipeline{pipeline, GPUComputePipelineDeleter{device}};
 }
 
-UniqueGPUComputePipeline createDifferenceBlendGPUPipeline(SDL_GPUDevice *device)
+UniqueGPUComputePipeline CreateDifferenceBlendGPUPipeline(SDL_GPUDevice *device)
 {
   SDL_GPUComputePipelineCreateInfo pipelineInfo{};
   pipelineInfo.code = computeDifferenceBlend.data();
@@ -980,32 +964,32 @@ struct AppState
 
 void AppState::Instantiate(FT_Library library)
 {
-  device_ctx = createGPUDevice();
-  main_window = createWindow("Hello GPU", static_cast<int>(INITIAL_WINDOW_W),
+  device_ctx = CreateGPUDevice();
+  main_window = CreateWindow("Hello GPU", static_cast<int>(INITIAL_WINDOW_W),
                              static_cast<int>(INITIAL_WINDOW_H));
-  setWindowMinimumSize(main_window.get(), static_cast<int>(INITIAL_WINDOW_W),
+  SetWindowMinimumSize(main_window.get(), static_cast<int>(INITIAL_WINDOW_W),
                        static_cast<int>(INITIAL_WINDOW_H));
   main_window_for_gpu_device =
-      claimWindowForGPUDevice(device_ctx.get(), main_window.get());
-  harfbuzz_font = createHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
+      ClaimWindowForGPUDevice(device_ctx.get(), main_window.get());
+  harfbuzz_font = CreateHarfbuzzFont(library, "assets/DejaVuSans.ttf", 10 * 64,
                                      getWindowDisplayScale(main_window.get()));
   hb_ft_font_set_load_flags(harfbuzz_font.get(),
                             FT_LOAD_DEFAULT | FT_LOAD_TARGET_LIGHT);
-  selection_pipeline = createSelectionGPUGraphicsPipeline(device_ctx.get());
+  selection_pipeline = CreateSelectionGPUGraphicsPipeline(device_ctx.get());
   difference_blend_pipeline =
-      createDifferenceBlendGPUPipeline(device_ctx.get());
+      CreateDifferenceBlendGPUPipeline(device_ctx.get());
   GPUTextureCreateInfo textureInfo{.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM,
                                    .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                    .texture_w = ATLAS_SIDE,
                                    .texture_h = ATLAS_SIDE};
-  atlas_texture = createGPUTexture(device_ctx.get(), textureInfo);
+  atlas_texture = CreateGPUTexture(device_ctx.get(), textureInfo);
   atlas_transfer =
-      createGPUTransferBuffer(device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
-  sampler = createCommonGPUSampler(device_ctx.get());
-  swapchain_pipeline = createGlyphGPUGraphicsPipeline(
+      CreateGPUTransferBuffer(device_ctx.get(), ATLAS_SIDE * ATLAS_SIDE);
+  sampler = CreateCommonGPUSampler(device_ctx.get());
+  swapchain_pipeline = CreateGlyphGPUGraphicsPipeline(
       device_ctx.get(),
       SDL_GetGPUSwapchainTextureFormat(device_ctx.get(), main_window.get()));
-  offscreen_pipeline = createGlyphGPUGraphicsPipeline(
+  offscreen_pipeline = CreateGlyphGPUGraphicsPipeline(
       device_ctx.get(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
   const FT_Glyph_Metrics &haitch_metrics = GetFtMetricsForCodepoint(72);
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
@@ -1154,7 +1138,7 @@ void GPURenderSequencer::VerifyStorageTextures()
   offscreenInfo.usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
   app->offscreen_texture =
-      createGPUTexture(app->device_ctx.get(), offscreenInfo);
+      CreateGPUTexture(app->device_ctx.get(), offscreenInfo);
   GPUTextureCreateInfo selectionInfo{};
   selectionInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
   selectionInfo.texture_w = app->offscreen_w;
@@ -1162,7 +1146,7 @@ void GPURenderSequencer::VerifyStorageTextures()
   selectionInfo.usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
   app->selection_texture =
-      createGPUTexture(app->device_ctx.get(), selectionInfo);
+      CreateGPUTexture(app->device_ctx.get(), selectionInfo);
   GPUTextureCreateInfo processedInfo{};
   processedInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
   processedInfo.texture_w = app->offscreen_w;
@@ -1170,7 +1154,7 @@ void GPURenderSequencer::VerifyStorageTextures()
   processedInfo.usage =
       SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
   app->processed_texture =
-      createGPUTexture(app->device_ctx.get(), processedInfo);
+      CreateGPUTexture(app->device_ctx.get(), processedInfo);
 }
 
 void GPURenderSequencer::DrawSelectedAreas()
@@ -1624,7 +1608,7 @@ void GlyphShapeItem::VerifyInstanceCapacity()
                                      .size = instance_capacity};
   instance_buffer = createGPUBuffer(app->device_ctx.get(), &bufferInfo);
   instance_transfer =
-      createGPUTransferBuffer(app->device_ctx.get(), instance_capacity);
+      CreateGPUTransferBuffer(app->device_ctx.get(), instance_capacity);
 }
 
 void GlyphShapeItem::TransferInstanceData()
@@ -1958,7 +1942,7 @@ void AppState::VerifySelectionBuffersCapacity(std::uint32_t num_selections)
                                         .size = selection_instances_capacity};
   selection_instances = createGPUBuffer(device_ctx.get(), &instancesInfo);
   selection_transfer =
-      createGPUTransferBuffer(device_ctx.get(), selection_instances_capacity);
+      CreateGPUTransferBuffer(device_ctx.get(), selection_instances_capacity);
 }
 
 void AppState::WriteSelectionAreasForTransfer()
