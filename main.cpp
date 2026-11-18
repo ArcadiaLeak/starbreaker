@@ -919,18 +919,11 @@ struct CopypassTaskVisitor
   SDL_GPUCopyPass *copypass;
 };
 
-struct GPUCommandSequencer
-{
-  AppState *app;
-  EngagedGPUCommandBuffer command_buffer;
-  void IssueCopyPass();
-  void IssueRenderPass();
-};
-
 struct GPURenderSequencer
 {
   AppState *app;
-  GPUCommandSequencer *command_sequencer;
+  SDL_GPUCommandBuffer *command_buffer;
+  UniqueGPURenderPass render_pass;
 
   std::uint32_t swapchain_w, swapchain_h;
   SDL_GPUTexture *swapchain_texture;
@@ -1015,6 +1008,8 @@ struct AppState
   SDL_AppResult HandleEvent(SDL_Event *event) noexcept;
 
   void Instantiate(FT_Library library);
+  void RecordGPUCopies(SDL_GPUCommandBuffer *command_buffer);
+  void RecordGPURender(SDL_GPUCommandBuffer *command_buffer);
   void PackAtlas();
 };
 
@@ -1057,14 +1052,14 @@ void AppState::Instantiate(FT_Library library)
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
 }
 
-void GPUCommandSequencer::IssueCopyPass()
+void AppState::RecordGPUCopies(SDL_GPUCommandBuffer *command_buffer)
 {
-  if (app->copypass_tasks.empty())
+  if (copypass_tasks.empty())
     return;
-  UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer.get())};
-  for (const CopypassTask &copypassTask : app->copypass_tasks)
-    copypassTask.visit(CopypassTaskVisitor{app, copypass.get()});
-  app->copypass_tasks.clear();
+  UniqueGPUCopyPass copypass{SDL_BeginGPUCopyPass(command_buffer)};
+  for (const CopypassTask &copypassTask : copypass_tasks)
+    copypassTask.visit(CopypassTaskVisitor{this, copypass.get()});
+  copypass_tasks.clear();
 }
 
 void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const
@@ -1080,30 +1075,30 @@ void CopypassTaskVisitor::operator()(CopyGlyphVertices task) const
   SDL_UploadToGPUBuffer(copypass, &src, &dst, false);
 }
 
-void GPUCommandSequencer::IssueRenderPass()
+void AppState::RecordGPURender(SDL_GPUCommandBuffer *command_buffer)
 {
-  GPURenderSequencer render_sequencer{app, this};
+  GPURenderSequencer render_sequencer{this, command_buffer};
   render_sequencer.swapchain_texture = WaitAndAcquireGPUSwapchainTexture(
-      command_buffer.get(), app->main_window.get(),
-      &render_sequencer.swapchain_w, &render_sequencer.swapchain_h);
+      command_buffer, main_window.get(), &render_sequencer.swapchain_w,
+      &render_sequencer.swapchain_h);
   if (not render_sequencer.swapchain_texture)
     return;
   auto num_selections =
-      std::ranges::distance(app->selection_slots | std::views::join);
+      std::ranges::distance(selection_slots | std::views::join);
   if (num_selections == 0)
   {
-    SDL_GPUGraphicsPipeline *scene_pipeline =
-        app->swapchain_glyph_pipeline.get();
     render_sequencer.DrawScene(render_sequencer.swapchain_texture,
-                               scene_pipeline);
+                               swapchain_glyph_pipeline.get());
+    render_sequencer.render_pass.reset();
   }
   else
   {
     render_sequencer.VerifyStorageTextures();
-    SDL_GPUGraphicsPipeline *scene_pipeline =
-        app->offscreen_glyph_pipeline.get();
-    render_sequencer.DrawScene(app->offscreen_texture.get(), scene_pipeline);
+    render_sequencer.DrawScene(offscreen_texture.get(),
+                               offscreen_glyph_pipeline.get());
+    render_sequencer.render_pass.reset();
     render_sequencer.DrawSelectedAreas();
+    render_sequencer.render_pass.reset();
     render_sequencer.BlendSelectedAreas();
     render_sequencer.DrawProcessedImage();
   }
@@ -1119,20 +1114,18 @@ void GPURenderSequencer::DrawProcessedImage()
   blit_info.destination.texture = swapchain_texture;
   blit_info.destination.w = swapchain_w;
   blit_info.destination.h = swapchain_h;
-  SDL_BlitGPUTexture(command_sequencer->command_buffer.get(), &blit_info);
+  SDL_BlitGPUTexture(command_buffer, &blit_info);
 }
 
 void GPURenderSequencer::DrawScene(SDL_GPUTexture *scene_texture,
                                    SDL_GPUGraphicsPipeline *pipeline)
 {
-  SDL_GPUCommandBuffer *command_buf = command_sequencer->command_buffer.get();
   SDL_GPUColorTargetInfo color_target{};
   color_target.texture = scene_texture;
   color_target.clear_color = {0.08f, 0.08f, 0.10f, 1.0f};
   color_target.load_op = SDL_GPU_LOADOP_CLEAR;
   color_target.store_op = SDL_GPU_STOREOP_STORE;
-  UniqueGPURenderPass render_pass =
-      BeginGPURenderPass(command_buf, &color_target);
+  render_pass = BeginGPURenderPass(command_buffer, &color_target);
 
   SDL_GPUViewport viewport{.x = 0,
                            .y = 0,
@@ -1156,7 +1149,7 @@ void GPURenderSequencer::DrawScene(SDL_GPUTexture *scene_texture,
     float tint[4];
   };
   BlitUniform blit{.tint = {1.0f, 1.0f, 1.0f, 1.0f}};
-  SDL_PushGPUFragmentUniformData(command_buf, 0, &blit, sizeof(BlitUniform));
+  SDL_PushGPUFragmentUniformData(command_buffer, 0, &blit, sizeof(BlitUniform));
 
   struct alignas(16) RectUniform
   {
@@ -1178,7 +1171,7 @@ void GPURenderSequencer::DrawScene(SDL_GPUTexture *scene_texture,
         static_cast<float>(std::trunc(shape_item->translate_x));
     rect_uni.translate[1] = static_cast<float>(std::trunc(vertical_translate));
 
-    SDL_PushGPUVertexUniformData(command_buf, 0, &rect_uni,
+    SDL_PushGPUVertexUniformData(command_buffer, 0, &rect_uni,
                                  sizeof(RectUniform));
 
     std::uint32_t num_instances =
@@ -1227,15 +1220,12 @@ void GPURenderSequencer::VerifyStorageTextures()
 
 void GPURenderSequencer::DrawSelectedAreas()
 {
-  SDL_GPUCommandBuffer *command_buffer =
-      command_sequencer->command_buffer.get();
   SDL_GPUColorTargetInfo color_target{};
   color_target.texture = app->selection_texture.get();
   color_target.clear_color = {0.0f, 0.0f, 0.0f, 0.0f};
   color_target.load_op = SDL_GPU_LOADOP_CLEAR;
   color_target.store_op = SDL_GPU_STOREOP_STORE;
-  UniqueGPURenderPass render_pass =
-      BeginGPURenderPass(command_buffer, &color_target);
+  render_pass = BeginGPURenderPass(command_buffer, &color_target);
 
   SDL_GPUViewport viewport{.x = 0,
                            .y = 0,
@@ -1282,8 +1272,6 @@ void GPURenderSequencer::DrawSelectedAreas()
 
 void GPURenderSequencer::BlendSelectedAreas()
 {
-  SDL_GPUCommandBuffer *command_buffer{command_sequencer->command_buffer.get()};
-
   SDL_GPUStorageTextureReadWriteBinding texture_rw{
       .texture = app->processed_texture.get()};
   UniqueGPUComputePass compute_pass =
@@ -1312,11 +1300,10 @@ SDL_AppResult AppState::Iterate() noexcept
       ReflowSelections();
       selection_areas_flag = false;
     }
-    GPUCommandSequencer command_sequencer{this};
-    command_sequencer.command_buffer =
+    EngagedGPUCommandBuffer command_buffer =
         acquireGPUCommandBuffer(device_ctx.get());
-    command_sequencer.IssueCopyPass();
-    command_sequencer.IssueRenderPass();
+    RecordGPUCopies(command_buffer.get());
+    RecordGPURender(command_buffer.get());
     return SDL_APP_CONTINUE;
   }
   catch (const std::runtime_error &e)
