@@ -241,6 +241,9 @@ void GPUShaderDeleter::operator()(SDL_GPUShader *shader) const
   SDL_ReleaseGPUShader(device, shader);
 }
 
+const std::array blit_shader = std::to_array<std::uint8_t>({
+#embed "blit.spv"
+});
 const std::array rect_image_shader = std::to_array<std::uint8_t>({
 #embed "rect_image.spv"
 });
@@ -249,9 +252,6 @@ const std::array rect_instance_shader = std::to_array<std::uint8_t>({
 });
 const std::array selection_box_shader = std::to_array<std::uint8_t>({
 #embed "selection_box.spv"
-});
-const std::array solid_shader = std::to_array<std::uint8_t>({
-#embed "solid.spv"
 });
 const std::array tint_shader = std::to_array<std::uint8_t>({
 #embed "coverage_tint.spv"
@@ -585,8 +585,8 @@ CreateSelectionGPUGraphicsPipeline(SDL_GPUDevice *device)
 }
 
 UniqueGPUGraphicsPipeline
-CreateSolidRectGPUGraphicsPipeline(SDL_GPUDevice *device,
-                                   SDL_GPUTextureFormat target_format)
+CreateTexturedRectGPUGraphicsPipeline(SDL_GPUDevice *device,
+                                      SDL_GPUTextureFormat target_format)
 {
   SDL_GPUShaderCreateInfo vertex_shader_info{};
   vertex_shader_info.code = rect_image_shader.data();
@@ -597,11 +597,11 @@ CreateSolidRectGPUGraphicsPipeline(SDL_GPUDevice *device,
   UniqueGPUShader vertex_shader = createGPUShader(device, vertex_shader_info);
 
   SDL_GPUShaderCreateInfo fragment_shader_info{};
-  fragment_shader_info.code = solid_shader.data();
-  fragment_shader_info.code_size = solid_shader.size();
+  fragment_shader_info.code = blit_shader.data();
+  fragment_shader_info.code_size = blit_shader.size();
   fragment_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
   fragment_shader_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-  fragment_shader_info.num_uniform_buffers = 1;
+  fragment_shader_info.num_samplers = 1;
   UniqueGPUShader fragment_shader =
       createGPUShader(device, fragment_shader_info);
 
@@ -991,7 +991,7 @@ struct AppState
   UniqueGPUGraphicsPipeline swapchain_glyph_pipeline;
   UniqueGPUGraphicsPipeline offscreen_glyph_pipeline;
   UniqueGPUGraphicsPipeline selection_pipeline;
-  UniqueGPUGraphicsPipeline solid_rect_pipeline;
+  UniqueGPUGraphicsPipeline textured_rect_pipeline;
   UniqueGPUComputePipeline difference_blend_pipeline;
 
   UniqueGPUBuffer selection_instances;
@@ -1045,7 +1045,7 @@ void AppState::Instantiate(FT_Library library)
       SDL_GetGPUSwapchainTextureFormat(device_ctx.get(), main_window.get());
   swapchain_glyph_pipeline = CreateGlyphGPUGraphicsPipeline(
       device_ctx.get(), swapchain_texture_format);
-  solid_rect_pipeline = CreateSolidRectGPUGraphicsPipeline(
+  textured_rect_pipeline = CreateTexturedRectGPUGraphicsPipeline(
       device_ctx.get(), swapchain_texture_format);
 
   const FT_Glyph_Metrics &haitch_metrics = GetFtMetricsForCodepoint(72);
@@ -1101,20 +1101,45 @@ void AppState::RecordGPURender(SDL_GPUCommandBuffer *command_buffer)
     render_sequencer.render_pass.reset();
     render_sequencer.BlendSelectedAreas();
     render_sequencer.DrawProcessedImage();
+    render_sequencer.render_pass.reset();
   }
 }
 
 void GPURenderSequencer::DrawProcessedImage()
 {
-  SDL_GPUBlitInfo blit_info{};
-  blit_info.load_op = SDL_GPU_LOADOP_DONT_CARE;
-  blit_info.source.texture = app->processed_texture.get();
-  blit_info.source.w = swapchain_w;
-  blit_info.source.h = swapchain_h;
-  blit_info.destination.texture = swapchain_texture;
-  blit_info.destination.w = swapchain_w;
-  blit_info.destination.h = swapchain_h;
-  SDL_BlitGPUTexture(command_buffer, &blit_info);
+  SDL_GPUColorTargetInfo target_info{};
+  target_info.texture = swapchain_texture;
+  target_info.load_op = SDL_GPU_LOADOP_DONT_CARE;
+  target_info.store_op = SDL_GPU_STOREOP_STORE;
+  render_pass = BeginGPURenderPass(command_buffer, &target_info);
+
+  SDL_BindGPUGraphicsPipeline(render_pass.get(),
+                              app->textured_rect_pipeline.get());
+  SDL_GPUTextureSamplerBinding sampler_binding{};
+  sampler_binding.texture = app->processed_texture.get();
+  sampler_binding.sampler = app->sampler.get();
+  SDL_BindGPUFragmentSamplers(render_pass.get(), 0, &sampler_binding, 1);
+
+  struct alignas(16) RectUniform
+  {
+    float uv_rect[4];
+    float rect_size[2];
+    float rect_pos[2];
+    float viewport[2];
+  };
+  RectUniform rect_uni{};
+  rect_uni.uv_rect[2] = 1.0f;
+  rect_uni.uv_rect[3] = 1.0f;
+  rect_uni.rect_size[0] = static_cast<float>(app->offscreen_w);
+  rect_uni.rect_size[1] = static_cast<float>(app->offscreen_h);
+  rect_uni.rect_pos[1] = -1.0f * static_cast<float>(app->offscreen_h) +
+                         static_cast<float>(swapchain_h);
+  rect_uni.viewport[0] = static_cast<float>(swapchain_w);
+  rect_uni.viewport[1] = static_cast<float>(swapchain_h);
+  SDL_PushGPUVertexUniformData(command_buffer, 0, &rect_uni,
+                               sizeof(RectUniform));
+
+  SDL_DrawGPUPrimitives(render_pass.get(), 4, 1, 0, 0);
 }
 
 void GPURenderSequencer::DrawScene(SDL_GPUTexture *scene_texture,
