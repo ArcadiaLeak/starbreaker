@@ -1152,7 +1152,6 @@ void AppState::RecordGPURender(SDL_GPUCommandBuffer *command_buffer)
     render_sequencer.DrawScene(render_sequencer.swapchain_texture,
                                swapchain_glyph_pipeline.get());
     render_sequencer.DrawMarqueeTool();
-    render_sequencer.render_pass.reset();
   }
   else
   {
@@ -1165,7 +1164,6 @@ void AppState::RecordGPURender(SDL_GPUCommandBuffer *command_buffer)
     render_sequencer.BlendSelectedAreas();
     render_sequencer.DrawProcessedImage();
     render_sequencer.DrawMarqueeTool();
-    render_sequencer.render_pass.reset();
   }
 }
 
