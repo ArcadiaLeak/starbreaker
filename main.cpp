@@ -34,6 +34,14 @@ struct RectInstanceData
   float uv_rect[4];
 };
 
+struct alignas(16) RectImageUniform
+{
+  float uv_rect[4];
+  float rect_size[2];
+  float rect_position[2];
+  float viewport[2];
+};
+
 struct DifferenceBlendArea
 {
   std::uint32_t rect[4];
@@ -252,6 +260,9 @@ const std::array rect_instance_shader = std::to_array<std::uint8_t>({
 });
 const std::array selection_box_shader = std::to_array<std::uint8_t>({
 #embed "selection_box.spv"
+});
+const std::array solid_shader = std::to_array<std::uint8_t>({
+#embed "solid.spv"
 });
 const std::array tint_shader = std::to_array<std::uint8_t>({
 #embed "coverage_tint.spv"
@@ -578,6 +589,53 @@ CreateSelectionGPUGraphicsPipeline(SDL_GPUDevice *device)
   RectInstanceVertexInfo rect_instance_vertex_info{};
   pipeline_info.vertex_input_state =
       rect_instance_vertex_info.vertex_input_state;
+  pipeline_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
+  pipeline_info.target_info = pipeline_target_info;
+
+  return CreateGPUGraphicsPipeline(device, &pipeline_info);
+}
+
+UniqueGPUGraphicsPipeline
+CreateSolidRectGPUGraphicsPipeline(SDL_GPUDevice *device,
+                                   SDL_GPUTextureFormat target_format)
+{
+  SDL_GPUShaderCreateInfo vertex_shader_info{};
+  vertex_shader_info.code = rect_image_shader.data();
+  vertex_shader_info.code_size = rect_image_shader.size();
+  vertex_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  vertex_shader_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+  vertex_shader_info.num_uniform_buffers = 1;
+  UniqueGPUShader vertex_shader = createGPUShader(device, vertex_shader_info);
+
+  SDL_GPUShaderCreateInfo fragment_shader_info{};
+  fragment_shader_info.code = solid_shader.data();
+  fragment_shader_info.code_size = solid_shader.size();
+  fragment_shader_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+  fragment_shader_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+  fragment_shader_info.num_uniform_buffers = 1;
+  UniqueGPUShader fragment_shader =
+      createGPUShader(device, fragment_shader_info);
+
+  SDL_GPUColorTargetDescription color_target{};
+  color_target.format = target_format;
+  color_target.blend_state.src_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+  color_target.blend_state.dst_color_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  color_target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+  color_target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+  color_target.blend_state.dst_alpha_blendfactor =
+      SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+  color_target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+  color_target.blend_state.enable_blend = true;
+
+  SDL_GPUGraphicsPipelineTargetInfo pipeline_target_info{};
+  pipeline_target_info.color_target_descriptions = &color_target;
+  pipeline_target_info.num_color_targets = 1;
+
+  SDL_GPUGraphicsPipelineCreateInfo pipeline_info{};
+  pipeline_info.vertex_shader = vertex_shader.get();
+  pipeline_info.fragment_shader = fragment_shader.get();
   pipeline_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
   pipeline_info.target_info = pipeline_target_info;
 
@@ -933,6 +991,7 @@ struct GPURenderSequencer
   void DrawSelectedAreas();
   void BlendSelectedAreas();
   void DrawProcessedImage();
+  void DrawMarqueeTool();
 };
 
 struct SelectionDragState
@@ -949,8 +1008,8 @@ struct SelectionEventHandler
   std::uint32_t FindUnoccupiedSlot();
   void CopyDragState();
 
-  void HandleMouseButtonDown(const SDL_MouseButtonEvent &event);
-  void HandleMouseButtonUp(const SDL_MouseButtonEvent &event);
+  void HandleMouseButtonLDown(const SDL_MouseButtonEvent &event);
+  void HandleMouseButtonLUp(const SDL_MouseButtonEvent &event);
   void HandleMouseMotion(const SDL_MouseMotionEvent &event);
 };
 
@@ -992,6 +1051,7 @@ struct AppState
   UniqueGPUGraphicsPipeline offscreen_glyph_pipeline;
   UniqueGPUGraphicsPipeline selection_pipeline;
   UniqueGPUGraphicsPipeline textured_rect_pipeline;
+  UniqueGPUGraphicsPipeline solid_rect_pipeline;
   UniqueGPUComputePipeline difference_blend_pipeline;
 
   UniqueGPUBuffer selection_instances;
@@ -1047,6 +1107,8 @@ void AppState::Instantiate(FT_Library library)
       device_ctx.get(), swapchain_texture_format);
   textured_rect_pipeline = CreateTexturedRectGPUGraphicsPipeline(
       device_ctx.get(), swapchain_texture_format);
+  solid_rect_pipeline = CreateSolidRectGPUGraphicsPipeline(
+      device_ctx.get(), swapchain_texture_format);
 
   const FT_Glyph_Metrics &haitch_metrics = GetFtMetricsForCodepoint(72);
   haitch_height = static_cast<double>(haitch_metrics.height) / 64.0;
@@ -1089,6 +1151,7 @@ void AppState::RecordGPURender(SDL_GPUCommandBuffer *command_buffer)
   {
     render_sequencer.DrawScene(render_sequencer.swapchain_texture,
                                swapchain_glyph_pipeline.get());
+    render_sequencer.DrawMarqueeTool();
     render_sequencer.render_pass.reset();
   }
   else
@@ -1101,8 +1164,34 @@ void AppState::RecordGPURender(SDL_GPUCommandBuffer *command_buffer)
     render_sequencer.render_pass.reset();
     render_sequencer.BlendSelectedAreas();
     render_sequencer.DrawProcessedImage();
+    render_sequencer.DrawMarqueeTool();
     render_sequencer.render_pass.reset();
   }
+}
+
+void GPURenderSequencer::DrawMarqueeTool()
+{
+  SDL_BindGPUGraphicsPipeline(render_pass.get(),
+                              app->solid_rect_pipeline.get());
+  RectImageUniform vertex_uniform{};
+  vertex_uniform.uv_rect[2] = 1.0f;
+  vertex_uniform.uv_rect[3] = 1.0f;
+  vertex_uniform.rect_position[0] = 300.0f;
+  vertex_uniform.rect_position[1] = 200.0f;
+  vertex_uniform.rect_size[0] = 200.0f;
+  vertex_uniform.rect_size[1] = 200.0f;
+  vertex_uniform.viewport[0] = static_cast<float>(swapchain_w);
+  vertex_uniform.viewport[1] = static_cast<float>(swapchain_h);
+  SDL_PushGPUVertexUniformData(command_buffer, 0, &vertex_uniform,
+                               sizeof(RectImageUniform));
+  struct alignas(16) SolidUniform
+  {
+    float tint[4];
+  };
+  SolidUniform fragment_uniform{.tint = {1.0f, 1.0f, 1.0f, 0.5f}};
+  SDL_PushGPUFragmentUniformData(command_buffer, 0, &fragment_uniform,
+                                 sizeof(SolidUniform));
+  SDL_DrawGPUPrimitives(render_pass.get(), 4, 1, 0, 0);
 }
 
 void GPURenderSequencer::DrawProcessedImage()
@@ -1120,24 +1209,17 @@ void GPURenderSequencer::DrawProcessedImage()
   sampler_binding.sampler = app->sampler.get();
   SDL_BindGPUFragmentSamplers(render_pass.get(), 0, &sampler_binding, 1);
 
-  struct alignas(16) RectUniform
-  {
-    float uv_rect[4];
-    float rect_size[2];
-    float rect_pos[2];
-    float viewport[2];
-  };
-  RectUniform rect_uni{};
-  rect_uni.uv_rect[2] = 1.0f;
-  rect_uni.uv_rect[3] = 1.0f;
-  rect_uni.rect_size[0] = static_cast<float>(app->offscreen_w);
-  rect_uni.rect_size[1] = static_cast<float>(app->offscreen_h);
-  rect_uni.rect_pos[1] = -1.0f * static_cast<float>(app->offscreen_h) +
-                         static_cast<float>(swapchain_h);
-  rect_uni.viewport[0] = static_cast<float>(swapchain_w);
-  rect_uni.viewport[1] = static_cast<float>(swapchain_h);
-  SDL_PushGPUVertexUniformData(command_buffer, 0, &rect_uni,
-                               sizeof(RectUniform));
+  RectImageUniform vertex_uniform{};
+  vertex_uniform.uv_rect[2] = 1.0f;
+  vertex_uniform.uv_rect[3] = 1.0f;
+  vertex_uniform.rect_size[0] = static_cast<float>(app->offscreen_w);
+  vertex_uniform.rect_size[1] = static_cast<float>(app->offscreen_h);
+  vertex_uniform.rect_position[1] =
+      static_cast<float>(swapchain_h) - static_cast<float>(app->offscreen_h);
+  vertex_uniform.viewport[0] = static_cast<float>(swapchain_w);
+  vertex_uniform.viewport[1] = static_cast<float>(swapchain_h);
+  SDL_PushGPUVertexUniformData(command_buffer, 0, &vertex_uniform,
+                               sizeof(RectImageUniform));
 
   SDL_DrawGPUPrimitives(render_pass.get(), 4, 1, 0, 0);
 }
@@ -1387,7 +1469,7 @@ bool isPointInside(const std::array<double, 2> &point,
          (pointY >= rectangleY) && (pointY <= rectangleY + rectangleH);
 }
 
-void SelectionEventHandler::HandleMouseButtonDown(
+void SelectionEventHandler::HandleMouseButtonLDown(
     const SDL_MouseButtonEvent &event)
 {
   for (std::optional<std::array<double, 4>> &selection : app->selection_slots)
@@ -1451,7 +1533,7 @@ GlyphShapeItem::FindClusterOffset(std::uint32_t textOffset) const
   return clusterOffset;
 }
 
-void SelectionEventHandler::HandleMouseButtonUp(
+void SelectionEventHandler::HandleMouseButtonLUp(
     const SDL_MouseButtonEvent &event)
 {
   if (not drag_state.has_value())
@@ -1516,15 +1598,17 @@ SDL_AppResult AppState::HandleEvent(SDL_Event *event) noexcept
   switch (event->type)
   {
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
-    selection_handler.HandleMouseButtonDown(event->button);
+    if (event->button.button == 1)
+      selection_handler.HandleMouseButtonLDown(event->button);
+    return SDL_APP_CONTINUE;
+
+  case SDL_EVENT_MOUSE_BUTTON_UP:
+    if (event->button.button == 1)
+      selection_handler.HandleMouseButtonLUp(event->button);
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_MOUSE_MOTION:
     selection_handler.HandleMouseMotion(event->motion);
-    return SDL_APP_CONTINUE;
-
-  case SDL_EVENT_MOUSE_BUTTON_UP:
-    selection_handler.HandleMouseButtonUp(event->button);
     return SDL_APP_CONTINUE;
 
   case SDL_EVENT_WINDOW_RESIZED:
