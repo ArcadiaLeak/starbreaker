@@ -1845,7 +1845,7 @@ GlyphShapeItem::TextMeasure(std::pair<std::uint32_t, double> start,
       const GlyphAtlasItem &atlasItem =
           app->atlas_cache.at(*geometriesFirst->atlas_label);
       FT_BitmapGlyph bitmapGlyph = AsBitmapGlyph(atlasItem.ftglyph.get());
-      clusterL -= static_cast<double>(bitmapGlyph->left);
+      clusterL -= std::max(static_cast<double>(bitmapGlyph->left), 0.0);
     }
     std::ranges::transform_view geometriesTop{
         clusterSection.geometries, [](const GlyphGeometry &geometry)
