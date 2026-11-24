@@ -1,20 +1,19 @@
+#include <stdexcept>
+#include <system_error>
 #include <windows.h>
 
-// The window procedure handles messages sent to the window.
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
   switch (uMsg)
   {
   case WM_DESTROY:
-    // When the window is closed, post a quit message to end the application.
     PostQuitMessage(0);
     return 0;
   case WM_PAINT:
   {
-    // Paint the background with the standard window color.
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
-    FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
+    FillRect(hdc, &ps.rcPaint, GetSysColorBrush(COLOR_WINDOW));
     EndPaint(hwnd, &ps);
     return 0;
   }
@@ -23,49 +22,61 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
   }
 }
 
-// The Unicode application entry point.
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                    PWSTR pCmdLine, int nCmdShow)
+static std::wstring ToWide(std::string_view sv)
 {
-  const wchar_t CLASS_NAME[] = L"MinimalWindowClass";
+  if (sv.empty())
+    return {};
+  int outlen = MultiByteToWideChar(CP_UTF8, 0, sv.data(),
+                                   static_cast<int>(sv.size()), nullptr, 0);
+  std::wstring out(static_cast<size_t>(outlen), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()),
+                      out.data(), outlen);
+  return out;
+}
 
-  // 1. Register the window class.
-  WNDCLASSEXW wc = {};
-  wc.cbSize = sizeof(WNDCLASSEXW);
-  wc.lpfnWndProc = WindowProc;
-  wc.hInstance = hInstance;
-  wc.lpszClassName = CLASS_NAME;
-  wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-  wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-  wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
-
-  if (!RegisterClassExW(&wc))
+int WINAPI wWinMain(HINSTANCE h_instance, HINSTANCE h_prev, PWSTR cmd_str,
+                    int cmd_show)
+{
+  try
   {
-    MessageBoxW(NULL, L"Window Registration Failed!", L"Error", MB_ICONERROR);
+    const wchar_t CLASS_NAME[] = L"Starbreaker_WindowClass";
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = h_instance;
+    wc.lpszClassName = CLASS_NAME;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+
+    if (not RegisterClassExW(&wc))
+      throw std::system_error{static_cast<int>(GetLastError()),
+                              std::system_category(), "RegisterClassExW"};
+
+    HWND window_hdl =
+        CreateWindowExW(0, CLASS_NAME, L"Minimal C++ GUI App (wWinMain)",
+                        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 500,
+                        300, nullptr, nullptr, h_instance, nullptr);
+    if (not window_hdl)
+      throw std::system_error{static_cast<int>(GetLastError()),
+                              std::system_category(), "CreateWindowExW"};
+    ShowWindow(window_hdl, cmd_show);
+    UpdateWindow(window_hdl);
+
+    MSG msg{};
+    while (GetMessageW(&msg, NULL, 0, 0) > 0)
+    {
+      TranslateMessage(&msg);
+      DispatchMessageW(&msg);
+    }
+
+    return static_cast<int>(msg.wParam);
+  }
+  catch (const std::exception &e)
+  {
+    std::wstring msg_wide = ToWide(e.what());
+    MessageBoxW(nullptr, msg_wide.c_str(), nullptr, MB_ICONERROR);
     return 1;
   }
-
-  // 2. Create the window.
-  HWND hwnd = CreateWindowExW(0, CLASS_NAME, L"Minimal C++ GUI App (wWinMain)",
-                              WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                              500, 300, NULL, NULL, hInstance, NULL);
-
-  if (!hwnd)
-  {
-    MessageBoxW(NULL, L"Window Creation Failed!", L"Error", MB_ICONERROR);
-    return 1;
-  }
-
-  // 3. Show the window and run the message loop.
-  ShowWindow(hwnd, nCmdShow);
-  UpdateWindow(hwnd);
-
-  MSG msg = {};
-  while (GetMessageW(&msg, NULL, 0, 0) > 0)
-  {
-    TranslateMessage(&msg);
-    DispatchMessageW(&msg);
-  }
-
-  return (int)msg.wParam;
 }
