@@ -22,61 +22,48 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
   }
 }
 
-static std::wstring ToWide(std::string_view sv)
-{
-  if (sv.empty())
-    return {};
-  int outlen = MultiByteToWideChar(CP_UTF8, 0, sv.data(),
-                                   static_cast<int>(sv.size()), nullptr, 0);
-  std::wstring out(static_cast<size_t>(outlen), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()),
-                      out.data(), outlen);
-  return out;
-}
-
 int WINAPI wWinMain(HINSTANCE h_instance, HINSTANCE h_prev, PWSTR cmd_str,
                     int cmd_show)
 {
   try
   {
-    const wchar_t CLASS_NAME[] = L"Starbreaker_WindowClass";
+    const char *CLASS_NAME = "Starbreaker_WindowClass";
 
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(WNDCLASSEXW);
+    WNDCLASSEX wc{};
+    wc.cbSize = sizeof(WNDCLASSEX);
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = h_instance;
     wc.lpszClassName = CLASS_NAME;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
 
-    if (not RegisterClassExW(&wc))
+    if (not RegisterClassEx(&wc))
       throw std::system_error{static_cast<int>(GetLastError()),
-                              std::system_category(), "RegisterClassExW"};
+                              std::system_category(), "RegisterClassEx"};
 
     HWND window_hdl =
-        CreateWindowExW(0, CLASS_NAME, L"Minimal C++ GUI App (wWinMain)",
-                        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 500,
-                        300, nullptr, nullptr, h_instance, nullptr);
+        CreateWindowEx(0, CLASS_NAME, "Minimal C++ GUI App (wWinMain)",
+                       WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 500,
+                       300, nullptr, nullptr, h_instance, nullptr);
     if (not window_hdl)
       throw std::system_error{static_cast<int>(GetLastError()),
-                              std::system_category(), "CreateWindowExW"};
+                              std::system_category(), "CreateWindowEx"};
     ShowWindow(window_hdl, cmd_show);
     UpdateWindow(window_hdl);
 
     MSG msg{};
-    while (GetMessageW(&msg, NULL, 0, 0) > 0)
+    while (GetMessage(&msg, NULL, 0, 0) > 0)
     {
       TranslateMessage(&msg);
-      DispatchMessageW(&msg);
+      DispatchMessage(&msg);
     }
 
     return static_cast<int>(msg.wParam);
   }
   catch (const std::exception &e)
   {
-    std::wstring msg_wide = ToWide(e.what());
-    MessageBoxW(nullptr, msg_wide.c_str(), nullptr, MB_ICONERROR);
+    MessageBox(nullptr, e.what(), nullptr, MB_ICONERROR);
     return 1;
   }
 }
